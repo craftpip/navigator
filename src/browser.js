@@ -1,10 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import http from "node:http";
 import puppeteer from "puppeteer-core";
-import { loadConfig, findLightpandaPath } from "./config.js";
+import { loadConfig } from "./config.js";
 import { getBrowserWarmupEngines, getEngineMetadata } from "./engines/index.js";
 import { getTabTimings } from "./tab-timers.js";
 
@@ -28,10 +26,6 @@ const MONITOR_WIDTH = 1920;
 const MONITOR_HEIGHT = 1080;
 
 const BROWSER_LOG_EMOJI = {
-  "lightpanda.spawn_failed": "❌",
-  "lightpanda.exit": "🚪",
-  "cloakbrowser.launch.ready": "✅",
-  "cloakbrowser.launch.failed": "❌",
   "addon.connected": "🔌",
   "addon.disconnected": "🔌",
   "search.window.opened": "🪟",
@@ -42,10 +36,6 @@ const BROWSER_LOG_EMOJI = {
 };
 
 const BROWSER_LOG_LABEL = {
-  "lightpanda.spawn_failed": "Lightpanda Spawn Failed",
-  "lightpanda.exit": "Lightpanda Exited",
-  "cloakbrowser.launch.ready": "CloakBrowser Ready",
-  "cloakbrowser.launch.failed": "CloakBrowser Failed",
   "addon.connected": "Add-on Connected",
   "addon.disconnected": "Add-on Disconnected",
   "search.window.opened": "Window Opened",
@@ -117,25 +107,15 @@ export class BrowserManager {
   constructor(config) {
     this.config = config;
 
-    // Chromium
+    // Chromium (the only built-in browser)
     this.browser = null;
     this.launching = null;
     this.tempProfileDir = null;
     this.keepAlivePage = null;
     this.prelaunchPromise = null;
 
-    // Lightpanda
-    this.lightpandaProcess = null;
-    this.lightpandaBrowser = null;
-    this.lightpandaLaunching = null;
-    this.lightpandaOwned = false;
-
-    // CloakBrowser
-    this.cloakbrowserBrowser = null;
-    this.cloakbrowserLaunching = null;
-
-    // Add-on browser state (keyed by `addon_${name}`)
-    this._backendState = new Map();
+    // Add-on browser state (keyed by `addon_${name}`) — lazy CDP connections
+    this._addOnState = new Map();
 
     // Shared
     this.engineWorkingWindows = new Map();
@@ -143,7 +123,7 @@ export class BrowserManager {
     this.pageSlotWaiters = [];
 
     // Cumulative spawn counters (in-memory, reset on restart)
-    this.instanceSpawns = { chromium: 0, lightpanda: 0, cloakbrowser: 0 };
+    this.instanceSpawns = { chromium: 0 };
   }
 
   async ensureKeepAlivePage(browser) {
@@ -258,16 +238,12 @@ export class BrowserManager {
     if (next) next();
   }
 
-  clearSearchWindowsForBackend(backend) {
+  clearSearchWindows() {
+    // All search windows pool on Chromium; a browser disconnect invalidates them all.
     for (const pool of this.engineWorkingWindows.values()) {
-      const entryBackend = (entry) =>
-        entry.backend ||
-        (pool.engine === "_shared"
-          ? "lightpanda"
-          : this.config.defaultBackend);
-      const removed = pool.windows.some((entry) => entryBackend(entry) === backend);
-      pool.windows = pool.windows.filter((entry) => entryBackend(entry) !== backend);
-      if (removed) this.wakeSearchWaiter(pool);
+      const hadWindows = pool.windows.length > 0;
+      pool.windows = [];
+      if (hadWindows) this.wakeSearchWaiter(pool);
     }
   }
 
@@ -416,11 +392,10 @@ export class BrowserManager {
 
     browser.on("disconnected", () => {
       this.browser = null;
-      this.clearSearchWindowsForBackend("chromium");
-      if (this.config.defaultBackend === "chromium") {
-        this.keepAlivePage = null;
-        this.prelaunchPromise = null;
-      }
+      this.launching = null;
+      this.clearSearchWindows();
+      this.keepAlivePage = null;
+      this.prelaunchPromise = null;
     });
 
     logBrowserEvent("chromium.ready", { reason: "on_demand" });
@@ -521,352 +496,55 @@ export class BrowserManager {
     throw lastError || new Error("Browser target is not found");
   }
 
-  // ---- Lightpanda backend ----
-
-  async _spawnLightpanda() {
-    const binaryPath = this.config.lightpandaPath || (await findLightpandaPath());
-    if (!binaryPath) return null;
-
-    const port = this.config.lightpandaPort;
-
-    return new Promise((resolve, reject) => {
-      const proc = spawn(binaryPath, ["serve", "--port", String(port), "--timeout", "300"], {
-        stdio: "ignore"
-      });
-
-      let started = false;
-      let pollTimer;
-      let startupTimer;
-      const settle = (error) => {
-        if (started) return;
-        started = true;
-        clearTimeout(pollTimer);
-        clearTimeout(startupTimer);
-        if (error) {
-          proc.kill();
-          reject(error);
-        } else {
-          resolve(proc);
-        }
-      };
-
-      proc.on("error", (err) => {
-        settle(err);
-      });
-
-      const poll = () => {
-        const req = http.get(`http://127.0.0.1:${port}/json/version`, (res) => {
-          res.resume();
-          settle();
-        });
-        req.on("error", () => {
-          if (!started) pollTimer = setTimeout(poll, 100);
-        });
-        req.end();
-      };
-      pollTimer = setTimeout(poll, 300);
-      startupTimer = setTimeout(() => settle(new Error("Lightpanda failed to start within 15s")), 15000);
-    });
-  }
-
-  async getLightpandaBrowser() {
-    if (this.lightpandaBrowser?.connected) return this.lightpandaBrowser;
-    if (this.lightpandaLaunching) return this.lightpandaLaunching;
-
-    this.lightpandaLaunching = this._connectLightpanda();
-    try {
-      this.lightpandaBrowser = await this.lightpandaLaunching;
-      return this.lightpandaBrowser;
-    } finally {
-      this.lightpandaLaunching = null;
-    }
-  }
-
-  async _connectLightpanda() {
-    let processHandle = this.lightpandaProcess;
-    if (!processHandle) {
-      try {
-        const browser = await puppeteer.connect({
-          browserWSEndpoint: `ws://127.0.0.1:${this.config.lightpandaPort}`,
-          defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT }
-        });
-        this.lightpandaBrowser = browser;
-        this.lightpandaOwned = false;
-        this._watchLightpandaBrowser(browser);
-        return browser;
-      } catch {
-        // No existing CDP server is accepting connections; spawn one below.
-      }
-
-      try {
-        processHandle = await this._spawnLightpanda();
-        if (processHandle) this.instanceSpawns.lightpanda += 1;
-      } catch (error) {
-        logBrowserEvent("lightpanda.spawn_failed", { error: String(error?.message || error) });
-        return null;
-      }
-    }
-
-    if (!processHandle) return null;
-
-    this.lightpandaProcess = processHandle;
-    this.lightpandaOwned = true;
-    processHandle.on("exit", (code) => {
-      logBrowserEvent("lightpanda.exit", { code });
-      this.lightpandaProcess = null;
-      this.lightpandaBrowser = null;
-      this.lightpandaOwned = false;
-    });
-
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: `ws://127.0.0.1:${this.config.lightpandaPort}`,
-      defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT }
-    });
-
-    this.lightpandaBrowser = browser;
-    this._watchLightpandaBrowser(browser);
-    return browser;
-  }
-
-  _watchLightpandaBrowser(browser) {
-    browser.on("disconnected", () => {
-      this.lightpandaBrowser = null;
-      this.clearSearchWindowsForBackend("lightpanda");
-    });
-  }
-
-  async _newLightpandaPage() {
-    const browser = await this.getLightpandaBrowser();
-    if (!browser) {
-      throw new Error("Lightpanda is unavailable; cannot create a Lightpanda page");
-    }
-
-    const page = await browser.newPage();
-    await page.setUserAgent(this.config.userAgent);
-    page.setDefaultNavigationTimeout(this.config.browserOpTimeoutMs);
-    page.setDefaultTimeout(this.config.browserOpTimeoutMs);
-
-    // Inject stealth patches to avoid bot detection.
-    // These run before any page scripts on every navigation.
-    await page.evaluateOnNewDocument(() => {
-      // Override navigator.webdriver
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => false,
-        configurable: true,
-      });
-
-      // Spoof navigator.plugins
-      const makePlugin = (name, filename, description) => {
-        const plugin = {
-          name,
-          filename,
-          description,
-          length: 0,
-          item: () => null,
-          namedItem: () => null,
-          [Symbol.iterator]: function* () {},
-        };
-        return plugin;
-      };
-      const plugins = [
-        makePlugin('Chrome PDF Plugin', 'internal-pdf-viewer', 'Portable Document Format'),
-        makePlugin('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
-        makePlugin('Native Client', 'internal-nacl-plugin', ''),
-      ];
-      const pluginArray = Object.assign(plugins.slice(), {
-        item: (i) => plugins[i] || null,
-        namedItem: (n) => plugins.find((p) => p.name === n) || null,
-        refresh: () => {},
-        length: plugins.length,
-        [Symbol.iterator]: function* () { yield* plugins; },
-      });
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => pluginArray,
-        configurable: true,
-      });
-
-      // Spoof navigator.mimeTypes
-      const mimeTypes = [
-        { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
-        { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
-      ];
-      const mimeTypeArray = Object.assign(mimeTypes.slice(), {
-        item: (i) => mimeTypes[i] || null,
-        namedItem: (n) => mimeTypes.find((m) => m.type === n) || null,
-        length: mimeTypes.length,
-        [Symbol.iterator]: function* () { yield* mimeTypes; },
-      });
-      Object.defineProperty(navigator, 'mimeTypes', {
-        get: () => mimeTypeArray,
-        configurable: true,
-      });
-
-      // Spoof navigator.languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-        configurable: true,
-      });
-
-      // Spoof navigator.platform
-      Object.defineProperty(navigator, 'platform', {
-        get: () => 'Linux x86_64',
-        configurable: true,
-      });
-
-      // Spoof navigator.hardwareConcurrency
-      Object.defineProperty(navigator, 'hardwareConcurrency', {
-        get: () => 8,
-        configurable: true,
-      });
-
-      // Spoof navigator.deviceMemory
-      Object.defineProperty(navigator, 'deviceMemory', {
-        get: () => 8,
-        configurable: true,
-      });
-
-      // Add window.chrome object
-      if (!window.chrome) {
-        window.chrome = {
-          runtime: {},
-          loadTimes: () => null,
-          csi: () => null,
-          app: {},
-        };
-      }
-
-      // Override navigator.connection to include effectiveType
-      if (navigator.connection) {
-        Object.defineProperty(navigator.connection, 'effectiveType', {
-          get: () => '4g',
-          configurable: true,
-        });
-      }
-
-      // Remove webdriver from navigator
-      if (Object.hasOwn(navigator, "webdriver")) {
-        delete navigator.webdriver;
-      }
-
-      // Hide headless chrome by overriding permissions
-      const origQuery = navigator.permissions?.query;
-      if (origQuery) {
-        navigator.permissions.query = (params) => {
-          if (params?.name === 'notifications') {
-            return Promise.resolve({ state: 'denied', onchange: null });
-          }
-          return origQuery(params);
-        };
-      }
-    });
-
-    return page;
-  }
-
-  async _launchCloakbrowser() {
-    if (this.cloakbrowserLaunching) return this.cloakbrowserLaunching;
-    this.cloakbrowserLaunching = (async () => {
-      try {
-        const { launch } = await import("cloakbrowser/puppeteer");
-        // CloakBrowser reads its binary path from process.env, not launch options.
-        if (this.config.cloakbrowserPath) {
-          process.env.CLOAKBROWSER_BINARY_PATH = this.config.cloakbrowserPath;
-        } else {
-          delete process.env.CLOAKBROWSER_BINARY_PATH;
-        }
-        const browser = await launch({
-          headless: this.config.headless,
-          humanize: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-extensions",
-            "--window-size=1920,1080",
-            "--fingerprint=48271",
-            "--fingerprint-hardware-concurrency=8",
-            "--fingerprint-device-memory=8",
-            "--fingerprint-screen-width=1920",
-            "--fingerprint-screen-height=1080",
-            "--fingerprint-taskbar-height=48",
-            "--fingerprint-storage-quota=5000"
-          ]
-        });
-        this.cloakbrowserBrowser = browser;
-        this.instanceSpawns.cloakbrowser += 1;
-        browser.on("disconnected", () => {
-          this.cloakbrowserBrowser = null;
-          this.cloakbrowserLaunching = null;
-          this.clearSearchWindowsForBackend("cloakbrowser");
-        });
-        logBrowserEvent("cloakbrowser.launch.ready");
-        return browser;
-      } catch (error) {
-        this.cloakbrowserLaunching = null;
-        logBrowserEvent("cloakbrowser.launch.failed", { error: String(error?.message || error) });
-        throw error;
-      }
-    })();
-    return this.cloakbrowserLaunching;
-  }
-
-  getCloakbrowserBrowser() {
-    if (this.cloakbrowserBrowser?.connected) return this.cloakbrowserBrowser;
-    if (this.cloakbrowserLaunching) return this.cloakbrowserLaunching;
-    return this._launchCloakbrowser();
-  }
-
-  async _newCloakbrowserPage() {
-    const browser = await this.getCloakbrowserBrowser();
-    const page = await browser.newPage();
-    await page.setUserAgent(this.config.userAgent);
-    page.setDefaultNavigationTimeout(this.config.browserOpTimeoutMs);
-    page.setDefaultTimeout(this.config.browserOpTimeoutMs);
-    return page;
-  }
-
-  _findAddOnForBackend(backend) {
-    if (!backend || !this.config.browsers) return null;
-    return this.config.browsers.find(
-      (b) => b.addOn && b.connect === backend
-    );
+  _findAddOnByName(name) {
+    if (!name || !this.config.browsers) return null;
+    return this.config.browsers.find((b) => b.addOn && b.name === name) || null;
   }
 
   async _connectAddOnPage(addOnEntry) {
     const stateKey = `addon_${addOnEntry.name}`;
-    let state = this._backendState.get(stateKey);
+    let state = this._addOnState.get(stateKey);
 
     // Reuse existing connection if alive
     if (state?.browser?.connected) {
       return state.browser.newPage();
     }
 
-    // Connect to external CDP
+    // Connect to external CDP - no launch logic, the user owns the process.
+    // HTTP(S) cdpUrls are CDP servers (e.g. CloakBrowser's cloakserve, Chrome
+    // --remote-debugging-port) — puppeteer resolves /json/version via browserURL.
+    // ws:// cdpUrls are direct browser WebSocket endpoints (puppeteer-connected).
+    const usesHttp = /^https?:\/\//i.test(String(addOnEntry.cdpUrl || ""));
     const browser = await puppeteer.connect({
-      browserWSEndpoint: addOnEntry.cdpUrl,
       defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
+      ...(usesHttp
+        ? { browserURL: addOnEntry.cdpUrl }
+        : { browserWSEndpoint: addOnEntry.cdpUrl }),
     });
 
-    // Store state (owned: false = don't close on shutdown)
-    this._backendState.set(stateKey, {
-      browser,
-      owned: false,
-      connected: true,
-    });
+    // Store state (disconnect-only: never close a browser we don't own)
+    this._addOnState.set(stateKey, { browser, owned: false, connected: true });
 
-    // Track disconnection
+    // Track disconnection - stale connections clear themselves
     browser.on("disconnected", () => {
-      this._backendState.delete(stateKey);
-      this.clearSearchWindowsForBackend(addOnEntry.name);
+      if (this._addOnState.get(stateKey)?.browser === browser) {
+        this._addOnState.delete(stateKey);
+        logBrowserEvent("addon.disconnected", { name: addOnEntry.name });
+      }
     });
 
     this.instanceSpawns[addOnEntry.name] = (this.instanceSpawns[addOnEntry.name] || 0) + 1;
     logBrowserEvent("addon.connected", { name: addOnEntry.name, cdpUrl: addOnEntry.cdpUrl });
 
     return browser.newPage();
+  }
+
+  _addOnConnection(name) {
+    return this._addOnState.get(`addon_${name}`)?.browser || null;
+  }
+
+  _isAddOnConnected(name) {
+    return Boolean(this._addOnState.get(`addon_${name}`)?.browser?.connected);
   }
 
   async _newChromiumPage() {
@@ -881,39 +559,36 @@ export class BrowserManager {
   }
 
   async newPage(options = {}) {
-    let backend = (options && options.backend) || this.config.defaultBackend;
-
-    // Engine-specific backend routing: pool "shared" → lightpanda,
-    // pool "engine" → defaultBackend (chromium/cloakbrowser), API → defaultBackend
-    if (options?.engine && !options.backend) {
-      const meta = getEngineMetadata(options.engine);
-      if (meta?.pool === "shared") {
-        backend = "lightpanda";
+    // Explicit browser name wins. "chromium" → the built-in; any other name
+    // must be a configured add-on entry. Unknown names throw.
+    if (options?.browser) {
+      if (options.browser === "chromium") return this._newChromiumPage();
+      const addOn = this._findAddOnByName(options.browser);
+      if (!addOn) {
+        throw new Error(
+          `unknown browser "${options.browser}" — add a BROWSERS entry with a cdpUrl for it`
+        );
       }
+      return this._connectAddOnPage(addOn);
     }
 
-    // Check for add-on that connects as this backend type
-    const addOn = this._findAddOnForBackend(backend);
-    if (addOn) return this._connectAddOnPage(addOn);
+    // Search engines always run on Chromium (the only built-in). API engines
+    // never open a page — `_poolEngine(engine)` returns null for them.
+    if (options?.engine) {
+      return this._newChromiumPage();
+    }
 
-    // Built-in backend dispatch
-    if (backend === "cloakbrowser") return this._newCloakbrowserPage();
-    if (backend === "chromium") return this._newChromiumPage();
-    return this._newLightpandaPage();
+    // No browser and no engine → Chromium (always present).
+    return this._newChromiumPage();
   }
 
   _poolEngine(engine) {
-    // Per-engine pools for CloakBrowser/Chromium routes; Lightpanda routes share one pool.
+    // Every browser engine pools on Chromium. API engines → null (no page).
     const lower = (engine || "").toLowerCase();
-    const pool = getEngineMetadata(lower)?.pool;
-    if (pool === "engine") return lower;
-    if (pool === "shared") return "_shared";
-    if (this.config.defaultBackend === "cloakbrowser") return lower;
-    return this.config.defaultBackend !== "chromium" ? "_shared" : lower;
+    return getEngineMetadata(lower)?.pool === "engine" ? lower : null;
   }
 
   _poolMaxWindows(poolEngine) {
-    if (poolEngine === "_shared") return 1;
     return this.config.searchMaxWorkingWindows;
   }
 
@@ -934,8 +609,7 @@ export class BrowserManager {
         inUse: false,
         persistent: true,
         pending: true,
-        engine: poolEngine,
-        backend: this.config.defaultBackend
+        engine: poolEngine
       };
       pool.windows.push(entry);
 
@@ -995,8 +669,7 @@ export class BrowserManager {
           inUse: true,
           persistent: false,
           pending: true,
-          engine: poolEngine,
-          backend: this.config.defaultBackend
+          engine: poolEngine
         };
         pool.windows.push(entry);
         try {
@@ -1079,10 +752,7 @@ export class BrowserManager {
     return {
       ok: true,
       backend: this.config.defaultBackend,
-      devtoolsBackend: this.config.devtoolsBackend,
       browserConnected: Boolean(this.browser?.connected),
-      lightpandaConnected: Boolean(this.lightpandaBrowser?.connected),
-      cloakbrowserConnected: Boolean(this.cloakbrowserBrowser?.connected),
       headless: this.config.headless,
       enableDevtoolsMcp: this.config.enableDevtoolsMcp,
       userDataDir: this.config.chromeUserDataDir,
@@ -1100,10 +770,9 @@ export class BrowserManager {
       browsers: (this.config.browsers || []).map((b) => ({
         name: b.name,
         role: b.role,
-        index: b.index,
         addOn: b.addOn,
         cdpUrl: b.cdpUrl,
-        connect: b.connect,
+        connected: b.addOn ? this._isAddOnConnected(b.name) : Boolean(this.browser?.connected),
       })),
       addOns: this._buildAddOnHealth()
     };
@@ -1114,11 +783,9 @@ export class BrowserManager {
     if (!this.config.browsers) return result;
     for (const entry of this.config.browsers) {
       if (!entry.addOn) continue;
-      const state = this._backendState.get(`addon_${entry.name}`);
       result[entry.name] = {
-        connected: Boolean(state?.browser?.connected),
+        connected: this._isAddOnConnected(entry.name),
         cdpUrl: entry.cdpUrl,
-        connect: entry.connect,
         role: entry.role,
       };
     }
@@ -1126,36 +793,28 @@ export class BrowserManager {
   }
 
   async getInstanceStats() {
-    const instances = [
-      ["chromium", this.browser],
-      ["lightpanda", this.lightpandaBrowser],
-      ["cloakbrowser", this.cloakbrowserBrowser]
-    ];
-
-    // Add add-on browsers
+    // Built-in instances (chromium) plus configured add-ons (lazily connected)
     const addOnInstances = [];
     if (this.config.browsers) {
       for (const entry of this.config.browsers) {
         if (!entry.addOn) continue;
-        const state = this._backendState.get(`addon_${entry.name}`);
-        addOnInstances.push([entry.name, state?.browser || null, entry]);
+        addOnInstances.push([entry.name, this._addOnConnection(entry.name), entry]);
       }
     }
 
     const allInstances = [
-      ...instances.map(([backend, instance]) => ({ backend, instance, addOn: false })),
+      { backend: "chromium", instance: this.browser, addOn: false },
       ...addOnInstances.map(([name, instance, entry]) => ({
         backend: name,
         instance,
         addOn: true,
         cdpUrl: entry.cdpUrl,
-        connect: entry.connect,
       }))
     ];
 
     return Promise.all(
-      allInstances.map(({ backend, instance, addOn, cdpUrl, connect }) =>
-        this._instanceStatWithTimeout(backend, instance, { addOn, cdpUrl, connect })
+      allInstances.map(({ backend, instance, addOn, cdpUrl }) =>
+        this._instanceStatWithTimeout(backend, instance, { addOn, cdpUrl })
       )
     );
   }
@@ -1215,14 +874,10 @@ export class BrowserManager {
         openTabs = [];
       }
 
-      if (backend === "lightpanda") {
-        pid = this.lightpandaProcess?.pid ?? null;
-      } else {
-        try {
-          pid = instance.process()?.pid ?? null;
-        } catch {
-          pid = null;
-        }
+      try {
+        pid = instance.process()?.pid ?? null;
+      } catch {
+        pid = null;
       }
     }
 
@@ -1245,16 +900,8 @@ export class BrowserManager {
     }
 
     this.prelaunchPromise = (async () => {
-      if (this.config.defaultBackend === "chromium") {
-        await this._prelaunchChromium();
-      } else if (this.config.defaultBackend === "cloakbrowser") {
-        await this.getCloakbrowserBrowser();
-      } else {
-        const browser = await this.getLightpandaBrowser();
-        if (!browser) {
-          throw new Error("Lightpanda is unavailable; cannot pre-launch the configured backend");
-        }
-      }
+      // Only the built-in Chromium has a launch lifecycle; add-ons connect lazily.
+      await this._prelaunchChromium();
 
       await Promise.allSettled(
         getBrowserWarmupEngines(this.config.searchRouteWarmupEngines).map((engine) =>
@@ -1284,33 +931,15 @@ export class BrowserManager {
   }
 
   async relaunchDefaultBackend(headless) {
-    const backend = this.config.defaultBackend;
     const previousHeadless = this.config.headless;
     this.config.headless = Boolean(headless);
 
-    // VNC needs every active graphical route restarted, not only the default
-    // backend. Search and devtools may use a different browser backend.
-    const graphicalBackends = new Set();
-    if (this.browser || [...this.engineWorkingWindows.values()].some((pool) => pool.windows.some((entry) => entry.backend === "chromium"))) {
-      graphicalBackends.add("chromium");
-    }
-    if (this.cloakbrowserBrowser || [...this.engineWorkingWindows.values()].some((pool) => pool.windows.some((entry) => entry.backend === "cloakbrowser"))) {
-      graphicalBackends.add("cloakbrowser");
-    }
-    if (!graphicalBackends.size) {
-      if (this.config.devtoolsBackend === "chromium" || this.config.devtoolsBackend === "cloakbrowser") {
-        graphicalBackends.add(this.config.devtoolsBackend);
-      } else if (backend === "chromium" || backend === "cloakbrowser") {
-        graphicalBackends.add(backend);
-      }
-    }
+    // Only the built-in Chromium is relaunched — add-ons have no launch lifecycle.
+    const relaunchChromium = this.browser || [...this.engineWorkingWindows.values()].some((pool) => pool.windows.length > 0);
 
     try {
-      if (graphicalBackends.has("chromium") && this.browser) {
+      if (relaunchChromium && this.browser) {
         await this.browser.close();
-      }
-      if (graphicalBackends.has("cloakbrowser") && this.cloakbrowserBrowser) {
-        await this.cloakbrowserBrowser.close();
       }
     } catch (error) {
       logBrowserEvent("relaunch.close_failed", { error: String(error?.message || error) });
@@ -1318,37 +947,29 @@ export class BrowserManager {
 
     this.browser = null;
     this.launching = null;
-    this.cloakbrowserBrowser = null;
-    this.cloakbrowserLaunching = null;
-    for (const graphicalBackend of graphicalBackends) {
-      this.clearSearchWindowsForBackend(graphicalBackend);
-    }
+    this.clearSearchWindows();
     this.keepAlivePage = null;
     this.prelaunchPromise = null;
 
-    const relaunched = await Promise.all(
-      [...graphicalBackends].map((graphicalBackend) =>
-        graphicalBackend === "chromium" ? this.getBrowser() : this.getCloakbrowserBrowser()
-      )
-    );
+    let relaunched = null;
+    if (relaunchChromium || this.config.headless) {
+      relaunched = await this.getBrowser();
+    }
     logBrowserEvent("relaunch.ready", {
-      backend,
-      backends: [...graphicalBackends],
+      backend: "chromium",
       headless: this.config.headless,
       previousHeadless
     });
     return {
       ok: true,
-      backend,
-      backends: [...graphicalBackends],
-      relaunched: relaunched.length > 0,
+      backend: "chromium",
+      relaunched: Boolean(relaunched?.connected),
       headless: this.config.headless,
-      ...(backend === "lightpanda" ? { note: "Lightpanda is CDP-only; graphical routes were relaunched for VNC." } : {})
     };
   }
 
   async shutdown() {
-    // Chromium shutdown
+    // Chromium shutdown (owned — close)
     if (this.browser) {
       try {
         await this.browser.close();
@@ -1367,46 +988,15 @@ export class BrowserManager {
       this.tempProfileDir = null;
     }
 
-    // Lightpanda shutdown
-    if (this.lightpandaBrowser) {
-      try {
-        if (this.lightpandaOwned) await this.lightpandaBrowser.close();
-        else this.lightpandaBrowser.disconnect();
-      } catch {
-        // ignore close errors on shutdown
-      }
-      this.lightpandaBrowser = null;
-    }
-
-    if (this.lightpandaProcess) {
-      try {
-        this.lightpandaProcess.kill();
-      } catch {
-        // ignore process kill errors
-      }
-      this.lightpandaProcess = null;
-      this.lightpandaOwned = false;
-    }
-
-    // CloakBrowser shutdown
-    if (this.cloakbrowserBrowser) {
-      try {
-        await this.cloakbrowserBrowser.close();
-      } catch {
-        // ignore close errors on shutdown
-      }
-      this.cloakbrowserBrowser = null;
-    }
-
-    // Add-on shutdown — disconnect only (user owns the browser process)
-    for (const [stateKey, state] of this._backendState) {
+    // Add-on shutdown — disconnect only (the user owns the browser process)
+    for (const [stateKey, state] of this._addOnState) {
       try {
         state.browser?.disconnect();
       } catch {
         // ignore disconnect errors on shutdown
       }
     }
-    this._backendState.clear();
+    this._addOnState.clear();
 
     this.engineWorkingWindows.clear();
     this.keepAlivePage = null;
@@ -1415,6 +1005,61 @@ export class BrowserManager {
 }
 
 let managerPromise;
+
+/**
+ * Resolve the browser a page tool should use, then create a page on it.
+ *
+ * Selection rules (Browser Selection & Rollback, plan 39):
+ *   1. Explicit `browser` param — strict: "chromium" hits the built-in; any
+ *      other name must be a configured add-on in `BROWSERS`. A down add-on
+ *      errors the call (no silent reroute).
+ *   2. No `browser` param — add-ons are tried in `BROWSERS` array order; the
+ *      first that connects serves the page. Each down add-on is recorded in
+ *      `rollbackNotes` and reported in the tool result.
+ *   3. All add-ons down (or none configured) — Chromium (always present).
+ *
+ * Returns `{ page, browser, rollbackNotes }` so callers can tag the result
+ * with which browser actually served the page.
+ */
+export async function resolveBrowserParam(args = {}, config = null, manager = null, opts = {}) {
+  const mgr = manager || (await getBrowserManager());
+  const cfg = config || mgr.config;
+  const explicit = typeof args?.browser === "string" && args.browser.trim()
+    ? String(args.browser).trim()
+    : "";
+  const roles = Array.isArray(opts.roles) && opts.roles.length ? new Set(opts.roles) : null;
+
+  if (explicit) {
+    if (explicit === "chromium" || explicit === "Chromium") {
+      return { page: await mgr._newChromiumPage(), browser: "chromium", rollbackNotes: [] };
+    }
+    const entry = (cfg.browsers || []).find((b) => b.addOn && b.name.toLowerCase() === explicit.toLowerCase());
+    if (!entry) {
+      throw new Error(`unknown browser "${explicit}" — add a BROWSERS entry with a cdpUrl for it`);
+    }
+    if (roles && !entry.role.some((r) => roles.has(r))) {
+      throw new Error(`browser "${explicit}" lacks a required role (${[...roles].join(", ")})`);
+    }
+    try {
+      const page = await mgr._connectAddOnPage(entry);
+      return { page, browser: entry.name, rollbackNotes: [] };
+    } catch (error) {
+      throw new Error(`browser "${explicit}" unreachable (${entry.cdpUrl}): ${error?.message || error}`);
+    }
+  }
+
+  const rollbackNotes = [];
+  const candidates = (cfg.browsers || []).filter((b) => b.addOn && (!roles || b.role.some((r) => roles.has(r))));
+  for (const entry of candidates) {
+    try {
+      const page = await mgr._connectAddOnPage(entry);
+      return { page, browser: entry.name, rollbackNotes };
+    } catch {
+      rollbackNotes.push(`${entry.name}: down`);
+    }
+  }
+  return { page: await mgr._newChromiumPage(), browser: "chromium", rollbackNotes };
+}
 
 export async function getBrowserManager() {
   if (!managerPromise) {

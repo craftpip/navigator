@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getBrowserManager } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam } from "./browser.js";
 import { resolveRefIdToUrl } from "./ref-memory.js";
 import { clearTab, touchTab } from "./tab-timers.js";
 
@@ -69,26 +69,6 @@ function assertEnabled(manager) {
   if (!manager?.config?.enableDevtoolsMcp) {
     throw new Error("Developer browser tools are disabled. Set ENABLE_DEVTOOLS_MCP=1 to enable them.");
   }
-}
-
-function normalizeBackend(manager, backend) {
-  const normalized = String(backend || "").trim().toLowerCase();
-  if (!normalized) return manager.config.devtoolsBackend || manager.config.defaultBackend;
-
-  // Built-in backends
-  const builtins = ["chromium"];
-  if (builtins.includes(normalized)) return normalized;
-
-  // Add-on backends (from config.browsers with "devtools" or "default" role)
-  if (manager.config.browsers) {
-    const addOn = manager.config.browsers.find(
-      (b) => b.addOn && b.name.toLowerCase() === normalized &&
-        (b.role.includes("devtools") || b.role.includes("default"))
-    );
-    if (addOn) return normalized;
-  }
-
-  throw new Error(`Invalid input: backend must be a built-in (${builtins.join(", ")}) or a configured add-on browser name`);
 }
 
 export function getTargetState(targetId) {
@@ -296,8 +276,6 @@ async function createTarget(args = {}) {
     throw new Error(`Too many open targets. Close a target before creating a new one (max ${MAX_TARGETS}).`);
   }
 
-  const backend = normalizeBackend(manager);
-  const viewport = parseViewport(args.viewport);
   const customTargetId = typeof args.targetId === "string" && args.targetId.trim()
     ? args.targetId.trim()
     : null;
@@ -314,7 +292,14 @@ async function createTarget(args = {}) {
     url = resolveRefIdToUrl(ref);
   }
 
-  const page = await manager.newPage({ backend });
+  const viewport = parseViewport(args.viewport);
+  const { page, browser: backend, rollbackNotes } = await resolveBrowserParam(
+    { browser: typeof args.browser === "string" && args.browser.trim() ? args.browser.trim() : "" },
+    manager.config,
+    manager,
+    { roles: ["devtools", "default"] }
+  );
+
   if (viewport) await page.setViewport(viewport);
 
   const state = {
@@ -348,7 +333,7 @@ async function createTarget(args = {}) {
       })
     );
   }
-  return { ...buildTargetSummary(state), url, navigating: url !== "about:blank" };
+  return { ...buildTargetSummary(state), url, navigating: url !== "about:blank", ...(rollbackNotes?.length ? { rollbackNotes } : {}) };
 }
 
 async function listTargets() {
@@ -1399,6 +1384,10 @@ async function scrollIntoViewIfNeeded(args = {}) {
   };
 }
 
+function isNavigationError(error) {
+  return /execution context was destroyed|cannot find context with specified id|target closed/i.test(String((error && error.message) || error));
+}
+
 async function dispatchMouseEvent(args = {}) {
   assertString(args.targetId, "targetId");
   if (!args.selector && !args.xpath) {
@@ -1413,53 +1402,80 @@ async function dispatchMouseEvent(args = {}) {
     : "left";
   const clickCount = Math.max(1, Math.min(3, Number(args.clickCount) || 1));
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const attempted = args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`;
 
-  const point = await Promise.race([
-    state.page.evaluate(({ selector, xpath }) => {
-      function firstXpath(expression) {
-        const node = document.evaluate(expression, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        return node instanceof Element ? node : null;
-      }
+  const withTimeout = (task, label) =>
+    Promise.race([
+      task(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+      )
+    ]);
 
-      function elementAttributes(element) {
-        const attrs = {};
-        for (const attr of Array.from(element.attributes)) attrs[attr.name] = attr.value;
-        return attrs;
-      }
+  const resolvePoint = () =>
+    withTimeout(
+      () =>
+        state.page.evaluate(
+          ({ selector, xpath }) => {
+            function firstXpath(expression) {
+              const node = document.evaluate(expression, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+              return node instanceof Element ? node : null;
+            }
 
-      const element = selector
-        ? document.querySelector(selector)
-        : firstXpath(xpath);
-      if (!(element instanceof Element)) {
-        return {
-          found: false,
-          url: location.href,
-          title: document.title,
-          attempted: selector ? `selector=${selector}` : `xpath=${xpath}`,
-          candidates: Array.from(document.querySelectorAll("button, a[href], [role='button'], [role='link'], input[type='button'], input[type='submit']"))
-            .slice(0, 10)
-            .map((el) => ({ tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 60), attrs: elementAttributes(el) }))
-        };
-      }
-      element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
-      const rect = element.getBoundingClientRect();
-      return {
-        found: true,
-        x: rect.left + Math.max(1, rect.width / 2),
-        y: rect.top + Math.max(1, rect.height / 2),
-        tagName: element.tagName.toLowerCase()
-      };
-    }, {
-      selector: args.selector || "",
-      xpath: args.xpath || ""
-    }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Element resolution timed out after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ]);
+            function elementAttributes(element) {
+              const attrs = {};
+              for (const attr of Array.from(element.attributes)) attrs[attr.name] = attr.value;
+              return attrs;
+            }
+
+            const element = selector
+              ? document.querySelector(selector)
+              : firstXpath(xpath);
+            if (!(element instanceof Element)) {
+              return {
+                found: false,
+                url: location.href,
+                title: document.title,
+                attempted: selector ? `selector=${selector}` : `xpath=${xpath}`,
+                candidates: Array.from(document.querySelectorAll("button, a[href], [role='button'], [role='link'], input[type='button'], input[type='submit']"))
+                  .slice(0, 10)
+                  .map((el) => ({ tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 60), attrs: elementAttributes(el) }))
+              };
+            }
+            element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+            const rect = element.getBoundingClientRect();
+            return {
+              found: true,
+              x: rect.left + Math.max(1, rect.width / 2),
+              y: rect.top + Math.max(1, rect.height / 2),
+              tagName: element.tagName.toLowerCase()
+            };
+          },
+          { selector: args.selector || "", xpath: args.xpath || "" }
+        ),
+      "Element resolution"
+    );
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 500));
+
+  // Resolving the click point can itself race a navigation (e.g. the tab was
+  // just created and is still committing). Retry once against the settled page
+  // so the caller can act on the page that actually finished loading.
+  let point;
+  try {
+    point = await resolvePoint();
+  } catch (error) {
+    if (!isNavigationError(error)) throw error;
+    await settle();
+    try {
+      point = await resolvePoint();
+    } catch (error2) {
+      if (!isNavigationError(error2)) throw error2;
+      throw new Error(`Input.dispatchMouseEvent — page kept navigating; could not resolve ${attempted}.`);
+    }
+  }
 
   if (!point || point.found === false) {
-    const attempted = args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`;
     const hint = point?.candidates?.length
       ? ` Matches nothing; clickable elements present: ${JSON.stringify(point.candidates)}`
       : "";
@@ -1469,18 +1485,54 @@ async function dispatchMouseEvent(args = {}) {
     );
   }
 
-  await Promise.race([
-    state.page.mouse.click(point.x, point.y, { button, clickCount }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Mouse click timed out after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ]);
+  // A click on a navigation link (or an element that triggers a SPA route) can
+  // destroy the execution context before the mouse event finishes — Puppeteer
+  // then reports e.g. "Execution context was destroyed, most likely because the
+  // page navigated". The click itself succeeded. Track main-frame navigations
+  // across the click, downgrade that specific failure to a success result, and
+  // tell the caller where the page went so the LLM stays in the loop.
+  const beforeUrl = state.page.url();
+  let mainFrameNavigated = false;
+  const onFrameNavigated = (frame) => {
+    if (frame === state.page.mainFrame()) mainFrameNavigated = true;
+  };
+  state.page.on("framenavigated", onFrameNavigated);
+
+  try {
+    await withTimeout(() => state.page.mouse.click(point.x, point.y, { button, clickCount }), "Mouse click");
+  } catch (error) {
+    if (!isNavigationError(error)) throw error;
+    // Give the new document a beat to commit before judging navigation state.
+    await settle();
+    const navigated = mainFrameNavigated || state.page.url() !== beforeUrl;
+    if (!navigated) throw error;
+    await refreshTitle(state).catch(() => {});
+    return {
+      targetId: state.targetId,
+      clicked: true,
+      button,
+      clickCount,
+      point,
+      navigated: true,
+      url: state.page.url(),
+      title: state.lastTitle,
+      note: "Click triggered a navigation; the execution context was destroyed mid-click (expected)."
+    };
+  } finally {
+    state.page.off("framenavigated", onFrameNavigated);
+  }
+
+  await refreshTitle(state);
+  const navigated = mainFrameNavigated || state.page.url() !== beforeUrl;
   return {
     targetId: state.targetId,
     clicked: true,
     button,
     clickCount,
-    point
+    point,
+    navigated,
+    url: state.page.url(),
+    title: state.lastTitle
   };
 }
 
@@ -1618,13 +1670,14 @@ async function insertText(args = {}) {
 export const devtoolsToolDefinitions = [
   {
     name: "Target.createTarget",
-    description: "Create a persistent browser tab for interactive testing. Provide a url, ref_id, and optional viewport to apply before navigation. Targets close automatically after 5 minutes of no interaction.",
+    description: "Create a persistent browser tab for interactive testing. Provide a url, ref_id, and optional viewport to apply before navigation. Targets close automatically after 5 minutes of no interaction. The tab opens in the browser given by the `browser` param (chromium default, or an add-on name from list_browsers); when omitted, browsers with a devtools role are preferred, falling back to chromium.",
     inputSchema: {
       type: "object",
       properties: {
         targetId: { type: "string", description: "Optional custom target id. If omitted, a random id is generated." },
         url: { type: "string", description: "Optional starting URL. Defaults to about:blank." },
         ref_id: { type: "number", description: "Optional numeric reference from a prior web_search or web_fetch to open. Overridden by url when both are given." },
+        browser: { type: "string", description: "Browser to use (chromium default, or an add-on name from list_browsers)." },
         viewport: {
           type: "object",
           description: "Optional page viewport applied before navigation, e.g. { width: 390, height: 844 }.",

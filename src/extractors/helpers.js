@@ -215,7 +215,13 @@ function expandTableRows(rowNodes, maxCellChars) {
 export function extractTablesFromDocument(doc, { container, maxCellChars = 120 } = {}) {
   const root = container || doc;
   const tables = [];
-  for (const table of root.querySelectorAll("table")) {
+  // A container that is itself a <table> must count — querySelectorAll only
+  // sees descendants, so a block selector pointing at the table element
+  // would otherwise match nothing.
+  const tableNodes = root.matches?.("table")
+    ? [root, ...root.querySelectorAll("table")]
+    : root.querySelectorAll("table");
+  for (const table of tableNodes) {
     const rows = Array.from(table.querySelectorAll("tr"));
     if (rows.length < 1) continue;
     const theadRows = Array.from(table.querySelectorAll("thead tr"));
@@ -224,7 +230,11 @@ export function extractTablesFromDocument(doc, { container, maxCellChars = 120 }
     let headerRowNodes = theadRows.length ? theadRows : [];
     let bodyRowNodes = tbodyRows.length ? tbodyRows : [];
 
-    if (!headerRowNodes.length && !bodyRowNodes.length) {
+    // No explicit <thead>: treat the first row as the header when the table
+    // has content rows below it. This must fire even when the DOM parser has
+    // wrapped bare <tr> rows in an implicit <tbody> (jsdom/parse5 does this),
+    // which otherwise hides the header row from the heuristic above.
+    if (!headerRowNodes.length) {
       if (rows.length >= 2) {
         headerRowNodes = [rows[0]];
         bodyRowNodes = rows.slice(1);

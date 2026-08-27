@@ -1,15 +1,11 @@
 import { DEFAULT_SEARCH_ENABLED_ENGINES } from "./config.js";
 
 export const CONFIG_SCHEMA = [
-  { key: "BROWSERS", category: "backend", type: "json", fallback: '[{"name":"chromium","role":["default"]}]', applies: "recreate", description: 'JSON array of browser entries. Each entry: {name, role:[], index, cdpUrl?, connect?}. Roles: "default" (everything), "search" (web_search), "fetch" (web_fetch), "screenshot" (web_page_screenshot/ascii/svg), "devtools" (browser_* tools). Chromium is always present. Add-ons (Lightpanda, CloakBrowser, etc.) need cdpUrl. index = priority order (lower = tried first).' },
-  { key: "BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", deprecated: true, description: "DEPRECATED: use BROWSERS. Primary browser backend for page fetch/screenshot." },
-  { key: "DEVTOOLS_BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", deprecated: true, description: "DEPRECATED: use BROWSERS. Backend used by the devtools testing tools." },
+  { key: "BROWSERS", category: "backend", type: "json", fallback: '[{"name":"chromium","role":[]},{"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}]', applies: "recreate", description: 'JSON array of browser entries. Each entry: {name, role:[], cdpUrl?}. Roles: "default" (everything), "search" (web_search), "fetch" (web_fetch), "screenshot" (web_page_screenshot/ascii/svg), "devtools" (browser_* tools). Chromium is always present (no cdpUrl); an empty role array makes it a fallback/backup only. Add-ons (CloakBrowser, etc.) must provide a cdpUrl (ws:// endpoint or http:// CDP server).' },
   { key: "HEADLESS", category: "backend", type: "boolean", fallback: true, applies: "recreate", description: "Run browsers without a UI. Toggled automatically by the VNC control." },
   { key: "CHROME_PATH", category: "backend", type: "string", fallback: "/usr/bin/chromium", applies: "recreate", description: "Path to the Chromium executable." },
   { key: "CHROME_USER_DATA_DIR", category: "backend", type: "string", fallback: "/data/chrome", applies: "recreate", description: "Persistent Chrome profile directory." },
   { key: "CHROME_PROFILE_DIR", category: "backend", type: "string", fallback: "Default", applies: "recreate", description: "Chrome profile folder name." },
-
-  { key: "CLOAKBROWSER_BINARY_PATH", category: "backend", type: "string", fallback: "auto-detect", applies: "recreate", deprecated: true, description: "DEPRECATED: CloakBrowser is now an add-on. Use BROWSERS with cdpUrl instead." },
   { key: "PRELAUNCH_BROWSER", category: "backend", type: "boolean", fallback: true, applies: "recreate", description: "Pre-launch browser on server start." },
   { key: "STARTUP_URL", category: "backend", type: "string", fallback: "about:blank", applies: "recreate", description: "URL opened in the browser on launch." },
   { key: "BROWSER_USER_AGENT", category: "backend", type: "string", fallback: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", applies: "recreate", description: "User agent string used by the browsers." },
@@ -21,7 +17,7 @@ export const CONFIG_SCHEMA = [
   { key: "LINKUP_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for linkup_api search (https://app.linkup.so/api-keys). When empty, linkup_api is disabled." },
   { key: "TAVILY_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for tavily_api search (https://app.tavily.com/). When empty, tavily_api is disabled." },
   { key: "FIRECRAWL_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for firecrawl_api search (https://www.firecrawl.dev/app/api-keys). When empty, firecrawl_api is disabled." },
-  { key: "SEARCH_KEEP_MIN_WORKING_WINDOWS", category: "search", type: "integer", min: 0, fallback: 2, applies: "hot", description: "Min warm windows per route pool; the shared Lightpanda pool is capped at one." },
+  { key: "SEARCH_KEEP_MIN_WORKING_WINDOWS", category: "search", type: "integer", min: 0, fallback: 2, applies: "hot", description: "Min warm windows per route pool; the shared pool is capped at one." },
   { key: "SEARCH_MAX_WORKING_WINDOWS", category: "search", type: "integer", fallback: 10, applies: "hot", description: "Max concurrent windows per engine." },
   { key: "SEARCH_QUEUE_MIN_INTERVAL_MS", category: "search", type: "number", fallback: 30000, applies: "hot", description: "Baseline minimum gap between automatic calls to one engine (ms)." },
   { key: "SEARCH_QUEUE_MAX_INTERVAL_MS", category: "search", type: "number", fallback: 1800000, applies: "hot", description: "Cap for learned engine backoff (ms)." },

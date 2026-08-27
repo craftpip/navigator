@@ -3,7 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-vi.mock("../src/browser.js", () => ({ getBrowserManager: vi.fn() }));
+vi.mock("../src/browser.js", () => ({
+  getBrowserManager: vi.fn(),
+  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
+    const mgr = manager || (await getBrowserManager());
+    const page = await mgr.newPage({ browser });
+    return { page, browser: browser || config?.defaultBackend || "chromium", rollbackNotes: [] };
+  }
+}));
 vi.mock("../src/vnc-manager.js", () => {
   const fakeVnc = {
     display: ":99",
@@ -76,8 +83,6 @@ function makeMockManager(overrides = {}) {
       startupUrl: "about:blank",
       searchRouteWarmupEngines: [],
       searchEnabledEngines: null,
-      lightpandaPath: null,
-      lightpandaPort: 1997,
       screenshotPathPrefix: null,
       enableScreenshotDownloadLink: false,
       enableWebConsole: true,
@@ -91,13 +96,11 @@ function makeMockManager(overrides = {}) {
     getHealth: vi.fn().mockResolvedValue({
       ok: true,
       browserConnected: true,
-      lightpandaConnected: false,
       openPageSlots: { used: 0, max: 10 },
       pageLimiter: { inUse: 0 },
     }),
     getInstanceStats: vi.fn().mockResolvedValue([
       { backend: "chromium", connected: false, tabs: 0, pid: null, spawns: 0 },
-      { backend: "lightpanda", connected: false, tabs: 0, pid: null, spawns: 0 },
       { backend: "cloakbrowser", connected: true, tabs: 2, pid: 42, spawns: 1 },
     ]),
     shutdown: vi.fn().mockResolvedValue(undefined),
@@ -201,7 +204,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body).toHaveProperty("memory.heapUsed");
       expect(body).toHaveProperty("sessions");
       expect(body).toHaveProperty("cache");
-      expect(body.instances).toHaveLength(3);
+      expect(body.instances).toHaveLength(2);
       const cloak = body.instances.find((i) => i.backend === "cloakbrowser");
       expect(cloak).toMatchObject({ connected: true, tabs: 2, pid: 42, spawns: 1 });
     });
@@ -417,12 +420,12 @@ describe("mcp-server HTTP endpoints", () => {
       const res = await fetch(`${MCP_BASE}/console/config`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ updates: { BROWSER_BACKEND: "chromium" } }),
+        body: JSON.stringify({ updates: { CHROME_PATH: "/usr/bin/chromium" } }),
       });
       const body = await res.json();
       expect(body.ok).toBe(true);
-      expect(body.restartRequired).toContain("BROWSER_BACKEND");
-      expect(body.hotApplied).not.toContain("BROWSER_BACKEND");
+      expect(body.restartRequired).toContain("CHROME_PATH");
+      expect(body.hotApplied).not.toContain("CHROME_PATH");
     });
 
     it("rejects unknown variables and invalid values", async () => {
@@ -691,7 +694,7 @@ describe("mcp-server HTTP endpoints", () => {
       const webFetch = body.result.tools.find((tool) => tool.name === "web_fetch");
       expect(webFetch.inputSchema.additionalProperties).toBe(false);
       expect(Object.keys(webFetch.inputSchema.properties).sort()).toEqual([
-        "bypassCache", "maxChars", "ref_ids", "urls"
+        "browser", "bypassCache", "maxChars", "ref_ids", "urls"
       ]);
     });
 
@@ -1044,7 +1047,8 @@ describe("mcp-server HTTP endpoints", () => {
         includeSeoAnalysis: true,
         hintOverride: null,
         cachedHtml: null,
-        captureHtml: false
+        captureHtml: false,
+        browser: ""
       });
     });
 

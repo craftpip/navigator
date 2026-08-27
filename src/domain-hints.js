@@ -666,7 +666,7 @@ const STABILIZE_STRATEGIES = ["none", "network_idle", "content_idle", "mutation"
 const STEP_STABILIZE_STRATEGIES = STABILIZE_STRATEGIES;
 const TOP_LEVEL_KEYS = [
   "domain", "pathPattern", "pageType", "comment", "testUrls",
-  "requireSelector", "default", "flow", "flowOptions"
+  "requireSelector", "browserEngine", "default", "flow", "flowOptions"
 ];
 const LEGACY_TOP_LEVEL_KEYS = {
   waitForSelector: "moved into default.waitForSelector",
@@ -750,7 +750,7 @@ function validateDefault(defaultBlock, errors, warnings, aiModelIds) {
   }
 }
 
-export function validateHintRule(hint, { scope = "static", aiModelIds = [] } = {}) {
+export function validateHintRule(hint, { scope = "static", aiModelIds = [], browserNames = null } = {}) {
   const errors = [];
   const warnings = [];
   if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
@@ -791,6 +791,16 @@ export function validateHintRule(hint, { scope = "static", aiModelIds = [] } = {
           errors.push({ field: `testUrls[${index}]`, message: "must be an http:// or https:// URL" });
         }
       });
+    }
+  }
+
+  if (hint.browserEngine !== undefined) {
+    if (typeof hint.browserEngine !== "string" || !hint.browserEngine.trim()) {
+      errors.push({ field: "browserEngine", message: "optional; when present must be a non-empty string (a configured browser name)" });
+    } else if (!/^[a-z0-9_-]+$/i.test(hint.browserEngine)) {
+      errors.push({ field: "browserEngine", message: "must match /^[a-z0-9_-]+$/i (letters, digits, dashes, underscores)" });
+    } else if (browserNames && hint.browserEngine !== "chromium" && !browserNames.includes(hint.browserEngine)) {
+      errors.push({ field: "browserEngine", message: `"${hint.browserEngine}" is not a configured browser (BROWSERS names: ${browserNames.join(", ")})` });
     }
   }
 

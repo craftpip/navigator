@@ -257,7 +257,8 @@ For visual verification, call `web_page_screenshot` with the same `ref_ids`.
 |----------|---------|-------------|
 | `CHROME_PATH` | `/usr/bin/chromium` | Path to Chromium executable |
 | `HEADLESS` | `true` | Run browser in headless mode |
-| `BROWSER_BACKEND` | `cloakbrowser` | Default backend for non-search page creation. Allowed values: `cloakbrowser`, `chromium`, `lightpanda`. This is used by `web_fetch` and `web_page_screenshot`. |
+| `BROWSERS` | `[{"name":"chromium","role":["default"]}]` | JSON array of browser entries: `{name, role[], cdpUrl?}`. `chromium` is always present (built-in, no cdpUrl). Any other entry is an **add-on** — needs `cdpUrl`: `ws://` (direct browser WS endpoint → `puppeteer.connect({browserWSEndpoint})`) or `http://` (CDP server like CloakBrowser's `cloakserve` → `puppeteer.connect({browserURL})`). Roles: `default`, `search`, `fetch`, `screenshot`, `devtools`. An **empty role array** (`"role":[]`) marks a browser fallback/backup-only. Array order = rollback chain. |
+| `CLOAKBROWSER_LICENSE_KEY` | `` | License key passed to the optional `cloak-browser` compose sidecar (see below) |
 | `BROWSER_OP_TIMEOUT_MS` | `60000` application / `25000` Compose | Per-operation timeout |
 | `SEARCH_ROUTE_WARMUP_ENGINES` | Application fallback routes / empty in Compose | Engines to warm up on startup; an explicit empty value disables warmup |
 | `SEARCH_ROUTE_CIRCUIT_OPEN_MS` | `300000` | Per-route cooldown after failure |
@@ -274,14 +275,10 @@ For visual verification, call `web_page_screenshot` with the same `ref_ids`.
 - Link-reference caches are process-local, but `ref_links` in SQLite preserves URL-to-ID mappings across restarts.
 - Prefer `ref_id` / `ref_ids` immediately after a search within the same session.
 - Sticky search windows are reused for performance.
-- `BROWSER_BACKEND` is parsed in `src/config.js` into `defaultBackend`.
-- `BrowserManager.newPage()` in `src/browser.js` uses `defaultBackend` only when no specific search engine override is passed.
-- `web_fetch` calls `browserOpenAndExtract()`, and that opens pages with `manager.newPage({ backend: manager.config.defaultBackend })`.
-- `web_page_screenshot` calls `browserCaptureScreenshot()`, and that opens pages with `manager.newPage({ backend: manager.config.defaultBackend })`.
-- Search routes are different: when `newPage()` is called with an engine like `bing_lp`, `google_cb`, or `duckduckgo_ch`, the engine-specific route wins over `BROWSER_BACKEND`.
-- Current engine-to-backend overrides in `newPage()` are: `*_cb` -> `cloakbrowser`, `*_ch` -> `chromium`, `*_lp` -> `lightpanda`.
-- So the rule is simple: `BROWSER_BACKEND` controls direct page operations, but search-engine routes control search pages.
-- Before adding or changing config, trace the existing variable through `loadConfig()`, `BrowserManager.newPage()`, and the actual call site first; do not invent a new env var or behavior until the current flow is verified end-to-end.
+- `BROWSERS` is parsed in `src/config.js` into `config.browsers`. Page tools (`web_fetch`, `web_page_screenshot`, `web_page_ascii`, `web_page_svg`) and devtools route through `resolveBrowserParam()` (`src/browser.js`): explicit `browser` param (strict, errors if down) → add-ons tried in `BROWSERS` array order (first to connect serves, each down add-on reported in `rollbackNotes`) → Chromium (always present, self-healing).
+- Add-on connections are lazy and reused (`_addOnState`); a `disconnected` event clears state and the next call reconnects. Navigator never launches/closes add-ons — the user owns the external CDP process.
+- The compose file ships an optional **`cloak-browser`** sidecar (stock `cloakhq/cloakbrowser` image, `command: ["cloakserve"]`, CDP multiplexer on :9222). It's the reference CDP add-on (see `plans/39_dynamic-browser-array.md` §12): the fallback-first BROWSERS shape is `[{"name":"chromium","role":[]},{"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}]`. `web_search` always runs on Chromium (engines never use add-ons).
+- Before adding or changing config, trace the existing variable through `loadConfig()`, `BrowserManager`, and the actual call site first; do not invent a new env var or behavior until the current flow is verified end-to-end.
 
 ---
 
@@ -618,6 +615,7 @@ Do not remove `console.log` / `console.error` calls from `src/search.js` or othe
 ### Browser Backend Dispatch Verification + Lightpanda Screenshot Caveat
 
 **Created:** 2026-08-11
+**Superseded:** 2026-08-28 — plan 39 eliminated `BROWSER_BACKEND`/backends entirely; browsers are a `BROWSERS` array (`chromium` built-in + CDP add-ons). See the Configuration table and Key Notes above.
 
 **What:** Verified the two variables that select page backend — `BROWSER_BACKEND` (env) and the engine override in `BrowserManager.newPage()` — across all four backends (`chromium`, `cloakbrowser`, `lightpanda`, `lightpanda-fork`). 6/6 test cases passed: both variables dispatch every backend correctly, and the two lightpanda variants are never silently reused for other backends.
 

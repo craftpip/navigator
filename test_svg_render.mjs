@@ -1,0 +1,20 @@
+import fs from "fs";
+import { getBrowserManager } from "./src/browser.js";
+import { PNG } from "pngjs";
+const svg = fs.readFileSync("/tmp/wcxb.svg","utf8");
+const mgr = await getBrowserManager();
+const page = await mgr.newPage({backend: mgr.config.defaultBackend});
+const html = `<!DOCTYPE html><html><body style="margin:0">${svg}</body></html>`;
+await page.setContent(html, {waitUntil:"load"});
+await page.setViewport({width:1920, height:8620});
+await new Promise(r=>setTimeout(r,600));
+const clip={x:434,y:710,width:1052,height:751};
+const buf = await page.screenshot({clip, type:"png"});
+fs.writeFileSync("/tmp/lb-svg-inline.png", buf);
+console.log("inline", buf.length);
+let p = PNG.sync.read(buf);
+let total=p.width*p.height;
+let white=0;
+for(let i=0;i<total;i++){ let o=i*4; if(p.data[o]>245 && p.data[o+1]>245 && p.data[o+2]>245) white++; }
+console.log("white", (white/total*100).toFixed(1));
+await page.close();

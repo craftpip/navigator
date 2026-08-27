@@ -2,6 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/browser.js", () => ({
   getBrowserManager: vi.fn(),
+  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
+    const mgr = manager || (await getBrowserManager());
+    const page = await mgr.newPage({ browser });
+    return {
+      page,
+      browser: browser || config?.devtoolsBackend || config?.defaultBackend || "chromium",
+      rollbackNotes: []
+    };
+  },
 }));
 
 const dbMock = vi.hoisted(() => {
@@ -492,6 +501,79 @@ describe("handleDevtoolsToolCall", () => {
     expect(up).toHaveBeenNthCalledWith(2, "Control");
     expect(requests).toMatchObject({ total: 1, shown: 1, failed: 0 });
     expect(requests.requests[0]).toMatchObject({ url: "https://example.com/api/items", status: 200 });
+  });
+
+  it("Input.dispatchMouseEvent downgrades a context-destroyed click into a navigated result", async () => {
+    let url = "https://example.com/";
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn(() => url),
+      title: vi.fn().mockResolvedValue("Example Domains"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      off: vi.fn(),
+      evaluate: vi.fn().mockResolvedValue({ found: true, x: 100, y: 50, tagName: "a" }),
+      mouse: {
+        click: vi.fn().mockImplementation(async () => {
+          url = "https://www.iana.org/help/example-domains";
+          throw new Error("Execution context was destroyed, most likely because of a navigation.");
+        }),
+      },
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", {});
+    const result = await handleDevtoolsToolCall("Input.dispatchMouseEvent", {
+      targetId: created.targetId,
+      selector: "a",
+    });
+
+    expect(result).toMatchObject({ clicked: true, navigated: true });
+    expect(result.url).toBe("https://www.iana.org/help/example-domains");
+    expect(result.title).toBe("Example Domains");
+  });
+
+  it("Input.dispatchMouseEvent returns navigated: false for a plain click", async () => {
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("https://example.com/"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      off: vi.fn(),
+      evaluate: vi.fn().mockResolvedValue({ found: true, x: 100, y: 50, tagName: "div" }),
+      mouse: { click: vi.fn().mockResolvedValue(undefined) },
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", {});
+    const result = await handleDevtoolsToolCall("Input.dispatchMouseEvent", {
+      targetId: created.targetId,
+      xpath: "/html[1]/body[1]/div[1]",
+    });
+
+    expect(result).toMatchObject({ clicked: true, navigated: false, url: "https://example.com/" });
+    expect(result.title).toBe("Example");
   });
 
   it("Input.insertText returns focused, clearedExistingValue, and finalValue readback", async () => {

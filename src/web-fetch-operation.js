@@ -125,18 +125,20 @@ export class WebFetchOperation {
   }
 
   async openPage(task) {
-    const page = await this.step("new_page", task, {
-      onLateResolve: (latePage) => {
+    const resolved = await this.step("new_page", task, {
+      onLateResolve: (late) => {
+        const latePage = late?.page || late;
         this.page = latePage;
         return this.closePage("late_new_page");
       }
     });
+    const page = resolved?.page || resolved;
     this.page = page;
     if (this.signal.aborted) {
       void this.closePage("late_new_page");
       this.throwIfAborted();
     }
-    return page;
+    return resolved;
   }
 
   closePage(reason = "operation_complete") {

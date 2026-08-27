@@ -4,7 +4,7 @@ import { formatLabel } from "../../lib/format.js";
 import { Pill } from "../../components/ui.jsx";
 
 const MANAGE_GROUPS = [
-  { label: "Browser Array", detail: "JSON array of browser entries with role-based routing. Replaces BROWSER_BACKEND and DEVTOOLS_BROWSER_BACKEND.", keys: ["BROWSERS"] },
+  { label: "Browser Array", detail: "JSON array of browser entries with role-based routing — the built-in Chromium plus add-on browsers.", keys: ["BROWSERS"] },
   { label: "Browser Defaults", detail: "User agent and operation timeout for all browsers.", keys: ["BROWSER_USER_AGENT", "BROWSER_OP_TIMEOUT_MS"] },
   { label: "Backend Installations", detail: "Executable and profile settings for built-in Chromium.", keys: ["CHROME_PATH", "CHROME_USER_DATA_DIR", "CHROME_PROFILE_DIR"] },
   { label: "Browser Startup And Desktop Access", detail: "VNC toggles HEADLESS automatically; use the header VNC action to change them together.", keys: ["PRELAUNCH_BROWSER", "STARTUP_URL", "HEADLESS", "ENABLE_VNC", "VNC_PORT", "NOVNC_PORT"] },
@@ -465,7 +465,6 @@ function BrowserArrayEditor({ value, onChange, ok, message }) {
                       <option value="">auto-detect</option>
                       <option value="chromium">chromium</option>
                       <option value="cloakbrowser">cloakbrowser</option>
-                      <option value="lightpanda">lightpanda</option>
                     </select></label>
                   </div>
                 )}

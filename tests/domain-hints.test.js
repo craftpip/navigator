@@ -49,14 +49,39 @@ function validateSelector(selector) {
 }
 
 describe("domain hints", () => {
-  it("loads every configured hint", async () => {
+  const nonWildcard = rawHints.filter((hint) => hint.domain !== "*");
+  const keyOf = (hint) => `${hint.domain}|${hint.pathPattern}`;
+  const sharedKeys = new Map();
+  for (const hint of nonWildcard) {
+    if (!sharedKeys.has(keyOf(hint))) sharedKeys.set(keyOf(hint), []);
+    sharedKeys.get(keyOf(hint)).push(hint);
+  }
+  const isShared = (hint) => (sharedKeys.get(keyOf(hint))?.length || 0) > 1;
+
+  it("loads every configured hint with the wildcard first", async () => {
     const loaded = await loadDomainHints(hintsPath);
-    expect(loaded).toHaveLength(rawHints.length + 1);
+    expect(loaded).toHaveLength(nonWildcard.length + 1);
     expect(loaded[0].domain).toBe("*");
-    expect(loaded.slice(1)).toEqual(rawHints.map((hint) => migrateHintShape(hint).hint));
+    expect(loaded.slice(1)).toEqual(nonWildcard.map((hint) => migrateHintShape(hint).hint));
   });
 
-  it.each(rawHints.map((hint, index) => [index + 1, hint]))(
+  it("validates the wildcard hint shape", () => {
+    const wildcard = rawHints.find((hint) => hint.domain === "*");
+    expect(wildcard).toBeDefined();
+    expect(wildcard.pathPattern).toBe("/**");
+    expect(wildcard.pageType).toBe("default");
+    expect(wildcard.default?.format).toEqual(expect.any(String));
+    expect(wildcard.requireSelector).toBeUndefined();
+    const { errors, warnings } = validateHintRule(wildcard);
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each(
+    rawHints
+      .map((hint, index) => [index + 1, hint])
+      .filter(([, hint]) => hint.domain !== "*")
+  )(
     "validates hint %i: %s",
     (_, hint) => {
       expect(hint.domain).toMatch(/^[a-z0-9.-]+$/);
@@ -65,7 +90,11 @@ describe("domain hints", () => {
       expect(hint.comment).toEqual(expect.any(String));
       for (const testUrl of hint.testUrls || []) {
         expect(testUrl).toMatch(/^https?:\/\//);
-        expect(findDomainHint(testUrl, rawHints)).toBe(hint);
+        if (isShared(hint)) {
+          expect(findMatchingHints(testUrl, rawHints)).toContain(hint);
+        } else {
+          expect(findDomainHint(testUrl, rawHints)).toBe(hint);
+        }
       }
 
       if (hint.waitForSelector && (!Array.isArray(hint.waitForSelector) || hint.waitForSelector.length)) {
@@ -92,13 +121,27 @@ describe("domain hints", () => {
     }
   );
 
-  it.each(rawHints.map((hint, index) => [index + 1, hint]))(
+  it.each(
+    rawHints
+      .map((hint, index) => [index + 1, hint])
+      .filter(([, hint]) => hint.domain !== "*" && !isShared(hint))
+  )(
     "matches its intended URL first: hint %i: %s",
     (_, hint) => {
       const url = hint.testUrls?.[0] || sampleUrl(hint);
       expect(findDomainHint(url, rawHints)).toBe(hint);
     }
   );
+
+  it("requireSelector-split siblings resolve in file order (first-match wins)", () => {
+    const groups = [...sharedKeys.values()].filter((members) => members.length > 1);
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    for (const members of groups) {
+      const url = members.find((m) => m.testUrls?.length)?.testUrls[0] || sampleUrl(members[0]);
+      expect(findMatchingHints(url, rawHints)).toEqual(members);
+      expect(findDomainHint(url, rawHints)).toBe(members[0]);
+    }
+  });
 
   it("does not contain duplicate domain, path-pattern, and requireSelector entries", () => {
     const keys = rawHints.map((hint) => `${hint.domain}|${hint.pathPattern}|${hint.requireSelector || ""}`);
@@ -173,6 +216,24 @@ describe("validateHintRule", () => {
     );
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
+  });
+
+  it("accepts browserEngine", () => {
+    const { errors, warnings } = validateHintRule(
+      { browserEngine: "chrome" },
+      { scope: "test", browserNames: ["chrome", "firefox"] }
+    );
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("rejects an unknown or malformed browserEngine", () => {
+    const unknown = validateHintRule({ browserEngine: "nope" }, { scope: "test", browserNames: ["chrome"] });
+    expect(unknown.errors.map((e) => e.field)).toContain("browserEngine");
+    for (const bad of [123, "", "  "]) {
+      const { errors } = validateHintRule({ browserEngine: bad }, { scope: "test", browserNames: ["chrome"] });
+      expect(errors.map((e) => e.field)).toContain("browserEngine");
+    }
   });
 
   it("rejects an invalid requireSelector selector", () => {

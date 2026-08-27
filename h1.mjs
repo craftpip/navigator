@@ -1,0 +1,11 @@
+import { svgExtractor } from "/app/src/svg/extractor.js";
+import puppeteer from "puppeteer-core";
+const b = await puppeteer.launch({ executablePath: "/usr/bin/chromium", headless: "new", args: ["--no-sandbox"] });
+const p = await b.newPage();
+await p.setViewport({ width: 1920, height: 1080 });
+await p.goto("http://10.69.1.164:1994/", { waitUntil: "networkidle2" });
+await new Promise(r => setTimeout(r, 1200));
+const d = await p.evaluate(svgExtractor, 3000);
+const h1 = (d.elements||[]).find(n => n.tagName === "h1");
+if (h1) console.log(JSON.stringify({ text: h1.text.slice(0,60), len: h1.text.length, wordRects: h1.wordRects.length, ls: h1.style.letterSpacing, fs: h1.style.fontSize, sample: h1.wordRects.slice(0,4) }, null, 1));
+await b.close();

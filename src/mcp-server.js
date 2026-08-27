@@ -13,8 +13,8 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
-import { formatBrowserBackendShort, parseBrowserBackend, DEFAULT_MAX_CHARS } from "./config.js";
-import { getBrowserManager } from "./browser.js";
+import { DEFAULT_MAX_CHARS } from "./config.js";
+import { getBrowserManager, resolveBrowserParam } from "./browser.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
@@ -403,8 +403,7 @@ async function isVncRunning(novncPort = 1996) {
 }
 
 const ENV_KEY_TO_CONFIG_KEY = {
-  BROWSER_BACKEND: "defaultBackend",
-  DEVTOOLS_BROWSER_BACKEND: "devtoolsBackend"
+  BROWSERS: "browsers"
 };
 
 function envKeyToConfigKey(key) {
@@ -788,7 +787,7 @@ function findHintDuplicate(hints, hint, excludeIndex) {
   return null;
 }
 
-async function createHint(hintsPath, rawHint, aiModelIds) {
+async function createHint(hintsPath, rawHint, aiModelIds, browserNames = null) {
   if (!rawHint || typeof rawHint !== "object" || Array.isArray(rawHint)) {
     return { ok: false, error: "hint must be an object" };
   }
@@ -799,7 +798,7 @@ async function createHint(hintsPath, rawHint, aiModelIds) {
   if (hint.pathPattern === undefined || hint.pathPattern === null || hint.pathPattern === "") {
     hint.pathPattern = "/**";
   }
-  const validation = validateHintRule(hint, { scope: "static", aiModelIds });
+  const validation = validateHintRule(hint, { scope: "static", aiModelIds, browserNames });
   if (validation.errors.length) {
     return { ok: false, error: "invalid hint", validation };
   }
@@ -816,7 +815,7 @@ async function createHint(hintsPath, rawHint, aiModelIds) {
   });
 }
 
-async function updateHint(hintsPath, index, rawHint, aiModelIds) {
+async function updateHint(hintsPath, index, rawHint, aiModelIds, browserNames = null) {
   if (!Number.isInteger(index) || index < 0) {
     return { ok: false, error: "invalid index" };
   }
@@ -827,7 +826,7 @@ async function updateHint(hintsPath, index, rawHint, aiModelIds) {
   if (hint.pathPattern === undefined || hint.pathPattern === null || hint.pathPattern === "") {
     hint.pathPattern = "/**";
   }
-  const validation = validateHintRule(hint, { scope: "static", aiModelIds });
+  const validation = validateHintRule(hint, { scope: "static", aiModelIds, browserNames });
   if (validation.errors.length) {
     return { ok: false, error: "invalid hint", validation };
   }
@@ -967,9 +966,11 @@ function mcpRequestSummary(body) {
   }
   if (args.ref_id !== void 0) parts.push(`ref #${args.ref_id}`);
   if (args.ref_ids) parts.push(`${args.ref_ids.length} refs`);
-  const pageBackend = formatBrowserBackendShort(parseBrowserBackend(process.env.BROWSER_BACKEND, "cloakbrowser"));
+  const pageBrowser = typeof args.browser === "string" && args.browser.trim()
+    ? String(args.browser).trim()
+    : "chromium";
   const engine = typeof args.engine === "string" ? String(args.engine).trim().toLowerCase() : "";
-  const eng = isPage ? pageBackend : engine && engine !== "select_best" ? engine : "";
+  const eng = isPage ? pageBrowser : engine && engine !== "select_best" ? engine : "";
   if (eng) parts.push(`[${eng}]`);
   if (args.limit && args.limit !== 5) parts.push(`limit=${args.limit}`);
   if (args.maxChars && args.maxChars !== DEFAULT_MAX_CHARS) parts.push(`maxc=${args.maxChars}`);
@@ -1441,6 +1442,12 @@ function formatOpenPageResponse(payload) {
     if (entry?.url) {
       lines.push(`- URL: ${entry.url}`);
     }
+    if (entry?.browser) {
+      lines.push(`- Browser: ${entry.browser}`);
+    }
+    if (entry?.browserNote) {
+      lines.push(`- Browser: ${entry.browserNote}`);
+    }
     if (entry?.pageType) {
       const conf = entry.confidence != null ? ` | confidence: ${entry.confidence.toFixed(2)}` : "";
       lines.push(`- Page type: ${entry.pageType}${conf}`);
@@ -1486,6 +1493,12 @@ function formatScreenshotResponse(payload) {
     lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
     if (entry?.url) {
       lines.push(`- URL: ${entry.url}`);
+    }
+    if (entry?.browser) {
+      lines.push(`- Browser: ${entry.browser}`);
+    }
+    if (entry?.browserNote) {
+      lines.push(`- Browser: ${entry.browserNote}`);
     }
     if (entry?.error) {
       lines.push(`- Error: ${entry.error}`);
@@ -1611,7 +1624,8 @@ async function openTargetsParallel(targetUrls, maxParallel, includeSeoAnalysis =
           includeSeoAnalysis,
           hintOverride: opts?.hintOverride || null,
           cachedHtml: opts?.cachedHtmlByUrl?.get(targetUrl) || null,
-          captureHtml: opts?.captureHtml === true
+          captureHtml: opts?.captureHtml === true,
+          browser: opts?.browser || ""
         });
         if (debug) console.log(`[web_fetch] [${targetUrl}] openTargetsParallel process (post-extract): ${Math.round(performance.now() - tUrl)}ms`);
         const result = {
@@ -1661,7 +1675,7 @@ async function captureScreenshotsParallel(targetUrls, maxParallel, captureOption
     maxParallel,
     async (targetUrl, index) => {
       try {
-        const capture = await browserCaptureScreenshot({ url: targetUrl, ...captureOptions });
+        const capture = await browserCaptureScreenshot({ url: targetUrl, browser: captureOptions?.browser || "", ...captureOptions });
         return {
           index,
           ok: true,
@@ -1808,6 +1822,10 @@ function getToolsListResponse(allowedTools = null) {
               type: "boolean",
               default: false,
               description: "Skip cached data and refresh the cached response"
+            },
+            browser: {
+              type: "string",
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). Defaults to the matching hint's browserEngine."
             }
           },
           description: "Provide one of: urls (string[]) or ref_ids (number[]) from a previous web_search call. Prefer ref_ids when available.",
@@ -1834,6 +1852,10 @@ function getToolsListResponse(allowedTools = null) {
             targetId: {
               type: "string",
               description: "Target id from Target.createTarget. Screenshots the existing tab instead of opening a new one."
+            },
+            browser: {
+              type: "string",
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). Screenshots an existing tab for a targetId when no value is set."
             },
             viewport: {
               type: "object",
@@ -1920,7 +1942,11 @@ function getToolsListResponse(allowedTools = null) {
               description: "Max elements to annotate (1-100)"
             },
             includeSelector: { type: "boolean", default: true },
-            includeXpath: { type: "boolean", default: true }
+            includeXpath: { type: "boolean", default: true },
+            browser: {
+              type: "string",
+              description: "Browser to use (chromium default, or an add-on name from list_browsers)."
+            }
           },
           additionalProperties: false
         }
@@ -1970,6 +1996,10 @@ function getToolsListResponse(allowedTools = null) {
             },
             includeSelector: { type: "boolean", default: true },
             includeXpath: { type: "boolean", default: true },
+            browser: {
+              type: "string",
+              description: "Browser to use (chromium default, or an add-on name from list_browsers)."
+            },
             hybrid: { type: "boolean", default: false, description: "When true, SVG includes <foreignObject> with inlined HTML for 100% visual fidelity (hybrid: foreignObject visual + rect data-* geometry). Use for pixel-perfect replication of http://10.69.1.164:1994/." },
             output: {
               type: "string",
@@ -2093,7 +2123,7 @@ async function handleToolCallInner(name, args = {}) {
     const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     mark = timer.step("prepare_execution", mark);
     const fullResult = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs })
+      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "" })
     );
     mark = timer.step("open_targets", mark);
     await setCachedToolResult(name, cacheKeyArgs, fullResult);
@@ -2198,7 +2228,8 @@ async function handleToolCallInner(name, args = {}) {
             format,
             fullPage,
             ...(quality ? { quality } : {}),
-            ...(viewport ? { viewport } : {})
+            ...(viewport ? { viewport } : {}),
+            browser: args.browser || ""
           })
         );
       } catch (error) {
@@ -2388,9 +2419,13 @@ async function handleToolCallInner(name, args = {}) {
 `;
 
     let asciiResult;
+    let usedBrowser = "";
+    let asciiBrowserNotes = [];
     try {
       asciiResult = await runWithHangGuard(`mcp:${name}`, () => manager.withPageSlot(async () => {
-        const page = await manager.newPage({ backend: manager.config.defaultBackend });
+        const { page, browser: resolvedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser: args.browser || "" }, manager.config, manager);
+        usedBrowser = resolvedBrowser;
+        asciiBrowserNotes = rollbackNotes;
         try {
           await page.goto(targetUrl, {
             waitUntil: manager.config.navWaitUntil,
@@ -2445,6 +2480,8 @@ async function handleToolCallInner(name, args = {}) {
           return {
             title: elementData.title,
             url: elementData.url,
+            browser: resolvedBrowser,
+            ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}),
             ansi: result.ansi,
             legend: result.legend,
             stats: {
@@ -2486,6 +2523,7 @@ async function handleToolCallInner(name, args = {}) {
       asciiResult.legend,
       "",
       `- Page: ${asciiResult.title} (${asciiResult.url})`,
+      `- Browser: ${asciiResult.browser || "chromium"}${asciiResult.browserNote ? ` — ${asciiResult.browserNote}` : ""}`,
       `- Grid: ${asciiResult.stats.asciiCols}×${asciiResult.stats.asciiRows} cells${
         asciiResult.stats.fullPage ? " (full page)" : " (viewport)"
       } · mode: ${asciiResult.stats.mode}`,
@@ -2609,14 +2647,14 @@ async function handleToolCallInner(name, args = {}) {
 
     const svgBatch = await mapWithConcurrency(targetUrls, managerSvg.config.openPageMaxParallel, async (targetUrl) => {
       return managerSvg.withPageSlot(async () => {
-        const page = await managerSvg.newPage({ backend: managerSvg.config.defaultBackend });
+        const { page, browser: svgBrowser, rollbackNotes: svgRollbackNotes } = await resolveBrowserParam({ browser: args.browser || "" }, managerSvg.config, managerSvg);
         try {
           if (viewportOverride) await page.setViewport(viewportOverride);
           await page.goto(targetUrl, { waitUntil: managerSvg.config.navWaitUntil, timeout: managerSvg.config.browserOpTimeoutMs });
           await page.waitForFunction(() => document.readyState === "complete" || document.readyState === "interactive", { timeout: 10000 }).catch(() => {});
           await new Promise((r) => setTimeout(r, 900));
           const cap = await capturePageAsSvg(page, { elementLimit, fullPage, includeSelector, includeXpath, hybrid });
-          const result = { svg: cap.svg, title: cap.data.title, url: cap.data.url, stats: { width: cap.clipW, height: cap.clipH, viewportWidth: cap.data.viewportWidth, viewportHeight: cap.data.viewportHeight, pageWidth: cap.data.pageWidth, pageHeight: cap.data.pageHeight, elementCount: cap.data.elements.length, filteredCount: cap.filtered.length, bytes: cap.built.stats.bytes, fullPage }, filteredCount: cap.filtered.length, elementCount: cap.data.elements.length, bytes: cap.built.stats.bytes, _capData: cap.data };
+          const result = { svg: cap.svg, title: cap.data.title, url: cap.data.url, browser: svgBrowser, ...(svgRollbackNotes?.length ? { browserNote: `Browser rollback: ${svgRollbackNotes.join(", ")}` } : {}), stats: { width: cap.clipW, height: cap.clipH, viewportWidth: cap.data.viewportWidth, viewportHeight: cap.data.viewportHeight, pageWidth: cap.data.pageWidth, pageHeight: cap.data.pageHeight, elementCount: cap.data.elements.length, filteredCount: cap.filtered.length, bytes: cap.built.stats.bytes, fullPage }, filteredCount: cap.filtered.length, elementCount: cap.data.elements.length, bytes: cap.built.stats.bytes, _capData: cap.data };
           result.url = targetUrl;
           // file/url output per entry
           if (output === "file" || output === "url") {
@@ -2657,6 +2695,7 @@ async function handleToolCallInner(name, args = {}) {
       linesOut.push("", `### ${title}`);
       linesOut.push(`- Status: ${entry.ok ? "Success" : "Failed"}`);
       if (entry.url) linesOut.push(`- URL: ${entry.url}`);
+      if (entry.browser) linesOut.push(`- Browser: ${entry.browser}${entry.browserNote ? ` — ${entry.browserNote}` : ""}`);
       if (!entry.ok) {
         linesOut.push(`- Error: ${entry.error}`);
         continue;
@@ -2679,15 +2718,14 @@ async function handleToolCallInner(name, args = {}) {
   if (name === "list_browsers") {
     const manager = await getBrowserManager();
     const browsers = (manager.config.browsers || []).map((b) => {
-      const state = b.addOn ? manager._backendState.get(`addon_${b.name}`) : manager._backendState.get(b.name);
-      const connected = Boolean(state?.browser?.connected);
+      const state = manager._addOnState.get(b.addOn ? `addon_${b.name}` : b.name);
+      const connected = b.addOn ? Boolean(state?.browser?.connected) : Boolean(manager.browser?.connected);
       return {
         name: b.name,
         role: b.role,
-        index: b.index,
         type: b.addOn ? "addon" : "builtin",
         connected,
-        ...(b.addOn ? { cdpUrl: b.cdpUrl, connect: b.connect } : {}),
+        ...(b.addOn ? { cdpUrl: b.cdpUrl } : {}),
       };
     });
     timer.end({ status: "ok" });
@@ -2725,7 +2763,7 @@ async function handleToolCallInner(name, args = {}) {
       recordPageOp({
         tool: name,
         url: args.url || args.targetId || "",
-        backend: manager.config.devtoolsBackend,
+        backend: args.browser || "chromium",
         durationMs: performance.now() - startedAt,
         responseChars: JSON.stringify(result).length,
         source: "devtools"
@@ -2740,7 +2778,7 @@ async function handleToolCallInner(name, args = {}) {
         durationMs: performance.now() - startedAt,
         ok: false,
         error: String(error?.message || error),
-        backend: manager.config.devtoolsBackend,
+        backend: args.browser || "chromium",
         source: "devtools"
       });
       throw error;
@@ -3266,9 +3304,10 @@ async function maybeStartHttpServer(managerOverride) {
             sendJson(res, 200, { ok: true, valid: validation.errors.length === 0, ...validation });
             return;
           }
-          if (method === "POST" && url.pathname === "/console/api/hints") {
-            const body = await readJsonBody(req);
-            const result = await createHint(hintsPath, body?.hint, modelIds);
+            const browserNames = (manager.config.browsers || []).map((b) => b.name);
+            if (method === "POST" && url.pathname === "/console/api/hints") {
+              const body = await readJsonBody(req);
+              const result = await createHint(hintsPath, body?.hint, modelIds, browserNames);
             if (!result.ok) {
               sendJson(res, 400, result);
               return;
@@ -3278,10 +3317,10 @@ async function maybeStartHttpServer(managerOverride) {
             return;
           }
           const updateMatch = url.pathname.match(/^\/console\/api\/hints\/(\d+)$/);
-          if (method === "PUT" && updateMatch) {
-            const index = Number(updateMatch[1]);
-            const body = await readJsonBody(req);
-            const result = await updateHint(hintsPath, index, body?.hint, modelIds);
+            if (method === "PUT" && updateMatch) {
+              const index = Number(updateMatch[1]);
+              const body = await readJsonBody(req);
+              const result = await updateHint(hintsPath, index, body?.hint, modelIds, browserNames);
             if (!result.ok) {
               sendJson(res, 400, result);
               return;

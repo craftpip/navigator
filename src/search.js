@@ -1,4 +1,4 @@
-import { getBrowserManager } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam } from "./browser.js";
 import { DEFAULT_MAX_CHARS, DEFAULT_SEARCH_ENABLED_ENGINES } from "./config.js";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
@@ -2042,7 +2042,7 @@ async function runFlowExtraction({ page, hint, config, maxChars, debug, debugLog
   return result;
 }
 
-export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false }) {
+export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "" }) {
   const tOverall = performance.now();
   activityCounters.fetches += 1;
   incrementUsageTotal("fetches");
@@ -2101,6 +2101,11 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
         }
       }
 
+      // Browser selection: explicit `browser` param wins; otherwise the
+      // URL-matched hint's `browserEngine` is the default; rollback applies.
+      const hintBrowserEngine = (hintOverride || hintCandidates[0] || hint || "")?.browserEngine || "";
+      const requestedBrowser = browser || hintBrowserEngine;
+
       const cached = typeof cachedHtml === "string" && cachedHtml.length > 0 ? cachedHtml : null;
       if (cached && hint?.flow?.length && isSnapshotReplayableFlow(hint.flow)) {
         const tCache = performance.now();
@@ -2155,7 +2160,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
 
       return manager.withPageSlot(async () => {
         t = performance.now();
-        const page = await operation.openPage(() => manager.newPage({ backend: manager.config.defaultBackend }));
+        const { page, browser: usedBrowser, rollbackNotes = [] } = await operation.openPage(() =>
+          resolveBrowserParam({ browser: requestedBrowser }, manager.config, manager)
+        );
         debugLog("new_page", t);
         const withPageTimeout = (label, task) => operation.step(label, task);
         const withOperationDeadline = (label, task) => operation.wait(label, task);
@@ -2214,7 +2221,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
               title: earlyTitle || earlyUrl || "",
               url: earlyUrl,
               text: "",
-              error: earlyBotChallenge
+              error: earlyBotChallenge,
+              browser: usedBrowser,
+              ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})
             };
           }
 
@@ -2254,9 +2263,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
               signal: operation.signal
             }));
             if (flowHtml && !flowResult.error) {
-              return { ...flowResult, html: flowHtml };
+              return { ...flowResult, html: flowHtml, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
             }
-            return flowResult;
+            return { ...flowResult, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
           }
 
           t = performance.now();
@@ -2296,7 +2305,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
               title: pageTitle || resolvedUrl || "",
               url: resolvedUrl,
               text: "",
-              error: botChallenge
+              error: botChallenge,
+              browser: usedBrowser,
+              ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})
             };
           }
 
@@ -2353,6 +2364,8 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             ...(links.length ? { links } : {}),
             ...(seoAnalysis ? { seo: seoAnalysis } : {}),
             ...(captureHtml ? { html } : {}),
+            browser: usedBrowser,
+            ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}),
             ...(pageStateWarnings.length
               ? { warnings: [...(extracted.warnings || []), ...pageStateWarnings] }
               : {})
@@ -2381,7 +2394,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
     });
 
     await operation.finish("op_complete");
-    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: true });
+    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: true });
     return result;
   } catch (error) {
     await operation.finish(operation.timedOut ? "op_timeout" : "op_failed");
@@ -2397,7 +2410,8 @@ export async function browserCaptureScreenshot({
   format: _format = "jpeg",
   fullPage = true,
   quality,
-  viewport
+  viewport,
+  browser = ""
 }) {
   activityCounters.screenshots += 1;
   incrementUsageTotal("screenshots");
@@ -2412,7 +2426,7 @@ export async function browserCaptureScreenshot({
 
   try {
     const result = await manager.withPageSlot(async () => {
-    const page = await manager.newPage({ backend: manager.config.defaultBackend });
+    const { page, browser: usedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser }, manager.config, manager);
 
     try {
       if (viewport && typeof viewport === "object" && viewport.width) {
@@ -2481,7 +2495,9 @@ export async function browserCaptureScreenshot({
         sizeBytes: Buffer.byteLength(screenshot, "base64"),
         captureTimestamp: new Date().toISOString(),
         dimensions,
-        screenshotBase64: screenshot
+        screenshotBase64: screenshot,
+        browser: usedBrowser,
+        ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})
       };
     } finally {
       try {
@@ -2493,7 +2509,7 @@ export async function browserCaptureScreenshot({
       }
     }
     });
-    recordPageOp({ id: pageOpId, tool: "web_page_screenshot", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tShotStart, responseChars: result.screenshotBase64?.length, ok: true });
+    recordPageOp({ id: pageOpId, tool: "web_page_screenshot", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tShotStart, responseChars: result.screenshotBase64?.length, ok: true });
     return result;
   } catch (error) {
     recordPageOp({ id: pageOpId, tool: "web_page_screenshot", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tShotStart, ok: false, error: String(error?.message || error) });

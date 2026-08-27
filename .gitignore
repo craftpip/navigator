@@ -29,3 +29,7 @@ website/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/node_modules/
+
+# Browser plugin — packed build + signing key (secret, defines extension ID)
+chrome-extension/dist/
+chrome-extension/chrome-extension-key.pem

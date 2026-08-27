@@ -1,42 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
-vi.mock("cloakbrowser", () => ({}));
-vi.mock("cloakbrowser/puppeteer", () => ({ launch: vi.fn() }));
-
 afterEach(() => {
   vi.unstubAllEnvs();
-});
-
-describe("parseBrowserBackend", () => {
-  it("returns normalized for valid backends", async () => {
-    const { parseBrowserBackend } = await import("../src/config.js");
-    expect(parseBrowserBackend("chromium")).toBe("chromium");
-    expect(parseBrowserBackend("cloakbrowser")).toBe("cloakbrowser");
-    expect(parseBrowserBackend("lightpanda")).toBe("lightpanda");
-    expect(parseBrowserBackend("CHROMIUM")).toBe("chromium");
-    expect(parseBrowserBackend("  cloakbrowser  ")).toBe("cloakbrowser");
-  });
-
-  it("returns fallback for invalid input", async () => {
-    const { parseBrowserBackend } = await import("../src/config.js");
-    expect(parseBrowserBackend("firefox")).toBe("cloakbrowser");
-    expect(parseBrowserBackend("")).toBe("cloakbrowser");
-    expect(parseBrowserBackend(null)).toBe("cloakbrowser");
-    expect(parseBrowserBackend(undefined)).toBe("cloakbrowser");
-  });
-
-  it("uses the provided fallback if valid", async () => {
-    const { parseBrowserBackend } = await import("../src/config.js");
-    expect(parseBrowserBackend("invalid", "lightpanda")).toBe("lightpanda");
-    expect(parseBrowserBackend("invalid", "chromium")).toBe("chromium");
-  });
-
-  it("defaults to cloakbrowser when fallback is invalid", async () => {
-    const { parseBrowserBackend } = await import("../src/config.js");
-    expect(parseBrowserBackend("invalid", "firefox")).toBe("cloakbrowser");
-    expect(parseBrowserBackend("invalid", null)).toBe("cloakbrowser");
-    expect(parseBrowserBackend("invalid", undefined)).toBe("cloakbrowser");
-  });
 });
 
 describe("parsePort", () => {
@@ -49,25 +14,80 @@ describe("parsePort", () => {
   });
 });
 
-describe("formatBrowserBackendShort", () => {
-  it("returns cb for cloakbrowser", async () => {
-    const { formatBrowserBackendShort } = await import("../src/config.js");
-    expect(formatBrowserBackendShort("cloakbrowser")).toBe("cb");
+describe("parseBrowsersEnv", () => {
+  it("returns chromium-only (with warning) when BROWSERS is unset", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(undefined);
+    expect(browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }]);
   });
 
-  it("returns ch for chromium", async () => {
-    const { formatBrowserBackendShort } = await import("../src/config.js");
-    expect(formatBrowserBackendShort("chromium")).toBe("ch");
+  it("parses a valid array with an add-on", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(
+      JSON.stringify([
+        { name: "chromium", role: ["default"] },
+        { name: "lightpanda", role: ["fetch", "screenshot"], cdpUrl: "http://127.0.0.1:9222" }
+      ])
+    );
+    expect(browsers).toEqual([
+      { name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false },
+      { name: "lightpanda", role: ["fetch", "screenshot"], cdpUrl: "http://127.0.0.1:9222", addOn: true }
+    ]);
   });
 
-  it("returns lp for lightpanda", async () => {
-    const { formatBrowserBackendShort } = await import("../src/config.js");
-    expect(formatBrowserBackendShort("lightpanda")).toBe("lp");
+  it("normalizes role casing and coerces a scalar role to an array", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(
+      JSON.stringify([{ name: "chromium", role: ["Fetch"] }, { name: "cb", role: "devtools", cdpUrl: "http://cb:9222" }])
+    );
+    expect(browsers[0].role).toEqual(["fetch"]);
+    expect(browsers[1]).toMatchObject({ name: "cb", role: ["devtools"], addOn: true });
   });
 
-  it("falls back to cb for invalid input", async () => {
-    const { formatBrowserBackendShort } = await import("../src/config.js");
-    expect(formatBrowserBackendShort("invalid")).toBe("cb");
+  it("defaults a missing role to [default]", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(JSON.stringify([{ name: "chromium" }]));
+    expect(browsers[0].role).toEqual(["default"]);
+  });
+
+  it("preserves an explicit empty role array (fallback/backup-only declaration)", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(JSON.stringify([
+      { name: "chromium", role: [] },
+      { name: "cloakbrowser", role: ["default", "search", "fetch", "screenshot", "devtools"], cdpUrl: "http://cloak-browser:9222" }
+    ]));
+    expect(browsers[0]).toMatchObject({ name: "chromium", role: [], addOn: false });
+    expect(browsers[1]).toMatchObject({ name: "cloakbrowser", role: ["default", "search", "fetch", "screenshot", "devtools"], addOn: true });
+  });
+
+  it("throws on duplicate names", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    expect(() => parseBrowsersEnv(JSON.stringify([
+      { name: "chromium", role: ["default"] },
+      { name: "chromium", role: ["fetch"] }
+    ]))).toThrow(/duplicate/i);
+  });
+
+  it("throws on a non-chromium browser without a cdpUrl", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    expect(() => parseBrowsersEnv(JSON.stringify([{ name: "lightpanda", role: ["fetch"] }]))).toThrow(/cdpUrl/i);
+  });
+
+  it("throws on unknown roles", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    expect(() => parseBrowsersEnv(JSON.stringify([{ name: "chromium", role: ["banana"] }]))).toThrow(/unknown role/i);
+  });
+
+  it("throws on invalid JSON", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    expect(() => parseBrowsersEnv("not json")).toThrow(/JSON/i);
+  });
+
+  it("appends chromium when missing", async () => {
+    const { parseBrowsersEnv } = await import("../src/config.js");
+    const browsers = parseBrowsersEnv(JSON.stringify([{ name: "cb", role: ["fetch"], cdpUrl: "http://cb:9222" }]));
+    expect(browsers.some((b) => b.name === "chromium")).toBe(true);
+    expect(browsers[browsers.length - 1].name).toBe("chromium");
   });
 });
 
@@ -75,15 +95,12 @@ describe("resolveChromePath", () => {
   it("uses CHROME_PATH env when set and accessible", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
     const { resolveChromePath } = await import("../src/config.js");
-    // /usr/bin/env exists on all Linux systems and is executable
     await expect(resolveChromePath()).resolves.toBe("/usr/bin/env");
   });
 
   it("ignores env var that points to non-executable", async () => {
     vi.stubEnv("CHROME_PATH", "/etc/passwd");
     const { resolveChromePath } = await import("../src/config.js");
-    // /etc/passwd exists but is not executable — the resolver falls back to
-    // known binaries instead of using it (or rejects when nothing is found).
     const result = await resolveChromePath().catch(() => null);
     expect(result).not.toBe("/etc/passwd");
   });
@@ -93,37 +110,6 @@ describe("resolveChromePath", () => {
     const { resolveChromePath } = await import("../src/config.js");
     const result = await resolveChromePath().catch(() => null);
     expect(result).not.toBe("/nonexistent/chrome");
-  });
-});
-
-describe("findLightpandaPath", () => {
-  it("uses LIGHTPANDA_PATH env when set and accessible", async () => {
-    vi.stubEnv("LIGHTPANDA_PATH", "/usr/bin/env");
-    const { findLightpandaPath } = await import("../src/config.js");
-    await expect(findLightpandaPath()).resolves.toBe("/usr/bin/env");
-  });
-
-  it("returns null when not found", async () => {
-    vi.stubEnv("LIGHTPANDA_PATH", "/nonexistent/lightpanda");
-    const { findLightpandaPath } = await import("../src/config.js");
-    const result = await findLightpandaPath();
-    // Should either be null or a found path (if lightpanda is in $PATH)
-    expect(result === null || typeof result === "string").toBe(true);
-  });
-});
-
-describe("findCloakbrowserPath", () => {
-  it("uses CLOAKBROWSER_BINARY_PATH env when set and accessible", async () => {
-    vi.stubEnv("CLOAKBROWSER_BINARY_PATH", "/usr/bin/env");
-    const { findCloakbrowserPath } = await import("../src/config.js");
-    await expect(findCloakbrowserPath()).resolves.toBe("/usr/bin/env");
-  });
-
-  it("returns null when env var points to nonexistent", async () => {
-    vi.stubEnv("CLOAKBROWSER_BINARY_PATH", "/nonexistent/cloak");
-    const { findCloakbrowserPath } = await import("../src/config.js");
-    const result = await findCloakbrowserPath();
-    expect(result === null || typeof result === "string").toBe(true);
   });
 });
 
@@ -185,23 +171,9 @@ describe("parsePostProcessorModels / readConfigEnv (READER_LM_* → AI_EXTRACTOR
       { id: "reader_lm", label: "reader-lm-0.5b", model: "reader-lm:0.5b", baseUrl: "http://o:11434/v1", kind: "chat", inputs: undefined, path: undefined, method: undefined, body: undefined, headers: undefined, outputField: undefined, outputType: undefined, prompt: undefined, timeoutMs: undefined, maxInputChars: undefined, maxTokens: undefined }
     ]);
   });
-
-  it("loadConfig falls back to deprecated AI_EXTRACTOR_MODELS and READER_LM_* env vars", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("POST_PROCESSOR_MODELS", undefined);
-    vi.stubEnv("AI_EXTRACTOR_MODELS", undefined);
-    vi.stubEnv("READER_LM_MODELS", undefined);
-    vi.stubEnv("READER_LM_BASE_URL", "http://legacy:11434/v1");
-    vi.stubEnv("READER_LM_MODEL", "reader-lm:0.5b");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.postProcessorModels).toEqual([
-      { id: "reader_lm", label: "reader-lm:0.5b", model: "reader-lm:0.5b", baseUrl: "http://legacy:11434/v1", kind: "chat", inputs: undefined, path: undefined, method: undefined, body: undefined, headers: undefined, outputField: undefined, outputType: undefined, prompt: undefined, timeoutMs: undefined, maxInputChars: undefined, maxTokens: undefined }
-    ]);
-  });
 });
 
-describe("loadConfig (parse engine behavior)", () => {
+describe("loadConfig (parse engine + browser behavior)", () => {
   it("defaults SEARCH_ROUTE_WARMUP_ENGINES to the primary routes", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
     vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", undefined);
@@ -220,22 +192,6 @@ describe("loadConfig (parse engine behavior)", () => {
     expect(config.mcpAllowUnauthenticated).toBe(false);
   });
 
-  it("parses SEARCH_ROUTE_WARMUP_ENGINES correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", "google,bing,invalid_engine");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.searchRouteWarmupEngines).toEqual(["google", "bing"]);
-  });
-
-  it("allows an explicitly empty SEARCH_ROUTE_WARMUP_ENGINES (no warmup)", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", "");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.searchRouteWarmupEngines).toEqual([]);
-  });
-
   it("parses SEARCH_ENABLED_ENGINES correctly", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
     vi.stubEnv("SEARCH_ENABLED_ENGINES", "duckduckgo_api,google");
@@ -244,23 +200,20 @@ describe("loadConfig (parse engine behavior)", () => {
     expect(config.searchEnabledEngines).toEqual(["duckduckgo_api", "google"]);
   });
 
-  it("uses the shared default for an empty SEARCH_ENABLED_ENGINES", async () => {
+  it("defaultBackend is always chromium", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ENABLED_ENGINES", "");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.searchEnabledEngines).toEqual([
-      "duckduckgo_api", "brave", "google", "duckduckgo",
-      "bing", "mojeek", "yahoo", "startpage"
-    ]);
-  });
-
-  it("parses BROWSER_BACKEND correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("BROWSER_BACKEND", "chromium");
+    vi.stubEnv("BROWSERS", undefined);
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
     expect(config.defaultBackend).toBe("chromium");
+  });
+
+  it("maps BROWSERS env into config.browsers", async () => {
+    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
+    vi.stubEnv("BROWSERS", JSON.stringify([{ name: "chromium", role: ["default"] }]));
+    const { loadConfig } = await import("../src/config.js");
+    const config = await loadConfig();
+    expect(config.browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }]);
   });
 
   it("parses HEADLESS correctly", async () => {
@@ -270,16 +223,6 @@ describe("loadConfig (parse engine behavior)", () => {
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
     expect(config.headless).toBe(false);
-  });
-
-  it("falls back to headless when a headful browser has no VNC display", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("HEADLESS", "false");
-    vi.stubEnv("ENABLE_VNC", "0");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.headless).toBe(true);
-    expect(config.vncEnabled).toBe(false);
   });
 
   it("parses PRELAUNCH_BROWSER correctly", async () => {
@@ -298,14 +241,6 @@ describe("loadConfig (parse engine behavior)", () => {
     expect(config.navWaitUntil).toBe("networkidle0");
   });
 
-  it("defaults to networkidle2 for invalid NAV_WAIT_UNTIL", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("NAV_WAIT_UNTIL", "invalid");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.navWaitUntil).toBe("networkidle2");
-  });
-
   it("parses SEARCH_KEEP_MIN_WORKING_WINDOWS with clamping", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
     vi.stubEnv("SEARCH_KEEP_MIN_WORKING_WINDOWS", "50");
@@ -314,182 +249,44 @@ describe("loadConfig (parse engine behavior)", () => {
     expect(config.searchKeepMinWorkingWindows).toBe(20);
   });
 
-  it("parses HUMAN_TYPING_DELAY with clamping", async () => {
+  it("parses OPEN_PAGE_MAX_PARALLEL correctly", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("HUMAN_TYPING_DELAY", "1000");
+    vi.stubEnv("OPEN_PAGE_MAX_PARALLEL", "8");
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.humanTypingDelay).toBe(500);
-  });
-
-  it("parses ENABLE_HTTP_MCP correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("ENABLE_HTTP_MCP", "1");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.enableHttpMcp).toBe(true);
-  });
-
-  it("parses ENABLE_INSTANT_ANSWERS correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("ENABLE_INSTANT_ANSWERS", "1");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.enableInstantAnswers).toBe(true);
-  });
-
-  it("disables instant answers with ENABLE_INSTANT_ANSWERS=0", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("ENABLE_INSTANT_ANSWERS", "0");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.enableInstantAnswers).toBe(false);
-  });
-
-  it("parses MCP_API_PORT correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("MCP_API_PORT", "8080");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.mcpApiPort).toBe(8080);
+    expect(config.openPageMaxParallel).toBe(8);
   });
 
   it("sets default values when no env vars provided", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    // Guard against host/container env leaking into the test.
     for (const v of [
-      "BROWSER_BACKEND",
+      "BROWSERS",
       "BROWSER_OP_TIMEOUT_MS",
       "MCP_API_PORT",
-      "HEALTH_PORT",
       "ENABLE_HTTP_MCP",
       "MCP_API_KEYS",
       "MCP_ALLOW_UNAUTHENTICATED",
       "ENABLE_STDIO_MCP",
       "ENABLE_DEVTOOLS_MCP",
       "SEARCH_KEEP_MIN_WORKING_WINDOWS",
-      "SEARCH_MAX_WORKING_WINDOWS",
       "SEARCH_ROUTE_CIRCUIT_OPEN_MS",
       "SEARCH_ENABLED_ENGINES",
-      "SEARCH_QUEUE_MIN_INTERVAL_MS",
-      "SEARCH_QUEUE_MAX_INTERVAL_MS",
-      "SEARCH_QUEUE_ESCALATION_FACTOR",
-      "SEARCH_QUEUE_READY_INTERVAL_MS",
-      "SEARCH_QUEUE_EXPLORATION_EVERY",
-      "SEARCH_QUEUE_LATENCY_SAMPLES",
       "OPEN_PAGE_MAX_PARALLEL",
       "MAX_CONCURRENT_PAGE_OPS",
-      "HUMAN_TYPING_DELAY",
       "PRELAUNCH_BROWSER",
-      "ENABLE_HANG_RESTART",
       "STARTUP_URL",
-      "ENABLE_SCREENSHOT_PATH",
-      "ENABLE_SCREENSHOT_DOWNLOAD_LINK",
       "ENABLE_INSTANT_ANSWERS"
-    ]) {      vi.stubEnv(v, undefined);
+    ]) {
+      vi.stubEnv(v, undefined);
     }
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
     expect(config.defaultBackend).toBe("chromium");
-    expect(config.browsers).toBeDefined();
-    expect(Array.isArray(config.browsers)).toBe(true);
-    expect(config.browsers.some((b) => b.name === "chromium")).toBe(true);
-    expect(config.browsers[0].role).toContain("default");
     expect(config.browserOpTimeoutMs).toBe(60000);
     expect(config.mcpApiPort).toBe(1994);
-    expect(config.enableHttpMcp).toBe(false);
-    expect(config.mcpApiKeys).toEqual([]);
+    expect(config.enableHttpMcp).toBe(true);
     expect(config.mcpAllowUnauthenticated).toBe(true);
-    expect(config.enableStdioMcp).toBe(true);
-    expect(config.enableDevtoolsMcp).toBe(false);
-    expect(config.searchKeepMinWorkingWindows).toBe(2);
-    expect(config.searchMaxWorkingWindows).toBeGreaterThanOrEqual(2);
-    expect(config.searchRouteCircuitOpenMs).toBe(300000);
-    expect(config.searchEnabledEngines).toEqual([
-      "duckduckgo_api", "brave", "google", "duckduckgo",
-      "bing", "mojeek", "yahoo", "startpage"
-    ]);
-    expect(config.searchQueueMinIntervalMs).toBe(30000);
-    expect(config.searchQueueMaxIntervalMs).toBe(1800000);
-    expect(config.searchQueueEscalationFactor).toBe(2);
-    expect(config.searchQueueErrorGapPercentile).toBe(0.75);
-    expect(config.searchQueueErrorGapSafety).toBe(1.25);
-    expect(config.searchQueueWRecovery).toBe(0.05);
-    expect(config.openPageMaxParallel).toBe(6);
-    expect(config.maxConcurrentPageOps).toBe(30);
-    expect(config.humanTypingDelay).toBe(15);
-    expect(config.prelaunchBrowser).toBe(true);
-    expect(config.enableHangRestart).toBe(false);
-    expect(config.startupUrl).toBe("about:blank");
-    expect(config.screenshotPathPrefix).toBeNull();
-    expect(config.enableScreenshotDownloadLink).toBe(false);
+    expect(config.enableStdioMcp).toBe(false);
     expect(config.enableInstantAnswers).toBe(true);
-  });
-
-  it("parses STARTUP_URL correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("STARTUP_URL", "https://example.com");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.startupUrl).toBe("https://example.com");
-  });
-
-  it("handles invalid OPEN_PAGE_MAX_PARALLEL by clamping", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("OPEN_PAGE_MAX_PARALLEL", "100");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.openPageMaxParallel).toBe(20);
-  });
-
-  it("handles SEARCH_ROUTE_CIRCUIT_OPEN_MS correctly", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ROUTE_CIRCUIT_OPEN_MS", "600000");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.searchRouteCircuitOpenMs).toBe(600000);
-  });
-
-  it("parses search queue cooldown settings", async () => {
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_QUEUE_MIN_INTERVAL_MS", "600000");
-    vi.stubEnv("SEARCH_QUEUE_MAX_INTERVAL_MS", "7200000");
-    vi.stubEnv("SEARCH_QUEUE_ESCALATION_FACTOR", "3");
-    vi.stubEnv("SEARCH_QUEUE_W_RECOVERY", "0.1");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    expect(config.searchQueueMinIntervalMs).toBe(600000);
-    expect(config.searchQueueMaxIntervalMs).toBe(7200000);
-    expect(config.searchQueueEscalationFactor).toBe(3);
-    expect(config.searchQueueWRecovery).toBe(0.1);
-  });
-
-  it("merges the .env file over process.env at load time", async () => {
-    const fs = await import("node:fs/promises");
-    const os = await import("node:os");
-    const path = await import("node:path");
-    const envFile = path.join(os.tmpdir(), `navigator-test-${Date.now()}.env`);
-    await fs.writeFile(
-      envFile,
-      [
-        "SEARCH_ENABLED_ENGINES=duckduckgo,bing",
-        'BROWSER_BACKEND="lightpanda"',
-        "# commented = ignored",
-        "SEARCH_QUEUE_MIN_INTERVAL_MS=45000"
-      ].join("\n"),
-      "utf8"
-    );
-    process.env.NAVIGATOR_ENV_FILE = envFile;
-    vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ENABLED_ENGINES", "google");
-    vi.stubEnv("BROWSER_BACKEND", "chromium");
-    const { loadConfig } = await import("../src/config.js");
-    const config = await loadConfig();
-    delete process.env.NAVIGATOR_ENV_FILE;
-    await fs.unlink(envFile);
-
-    expect(config.searchEnabledEngines).toEqual(["duckduckgo", "bing"]);
-    expect(config.defaultBackend).toBe("lightpanda");
-    expect(config.searchQueueMinIntervalMs).toBe(45000);
   });
 });

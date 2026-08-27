@@ -6,7 +6,12 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 const mockGetBrowserManager = vi.fn();
 
 vi.mock("../src/browser.js", () => ({
-  getBrowserManager: (...args) => mockGetBrowserManager(...args)
+  getBrowserManager: (...args) => mockGetBrowserManager(...args),
+  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
+    const mgr = manager || (await mockGetBrowserManager());
+    const page = await mgr.newPage({ browser });
+    return { page, browser: browser || mgr.config?.defaultBackend || "chromium", rollbackNotes: [] };
+  },
 }));
 
 let originalCwd;

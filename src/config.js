@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -18,8 +17,6 @@ const WAIT_UNTIL_VALUES = new Set([
 ]);
 
 const SEARCH_ENGINE_VALUES = new Set(SUPPORTED_ENGINES);
-
-const BROWSER_BACKEND_VALUES = new Set(["chromium", "cloakbrowser", "lightpanda"]);
 
 const BROWSER_ROLE_VALUES = new Set(["default", "search", "fetch", "screenshot", "devtools"]);
 
@@ -170,78 +167,96 @@ export function parsePostProcessorModels(value) {
   }
 }
 
-export function parseBrowserBackend(value, fallback = "cloakbrowser") {
-  const normalizedFallback = BROWSER_BACKEND_VALUES.has(fallback) ? fallback : "cloakbrowser";
-  const normalized = String(value || "").trim().toLowerCase();
-  return BROWSER_BACKEND_VALUES.has(normalized) ? normalized : normalizedFallback;
-}
+export function parseBrowsersEnv(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    console.warn(
+      "⚠️  BROWSERS env var not set. Using the built-in Chromium browser only. " +
+      "Set BROWSERS to configure add-on browsers."
+    );
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }];
+  }
 
-export function parseBrowsers(value) {
-  if (!value || typeof value !== "string") return null;
+  let parsed;
   try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed)) return null;
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `BROWSERS env var is not valid JSON: ${error?.message}. ` +
+      "Use BROWSERS='[{\"name\":\"chromium\",\"role\":[\"default\"]}]' to start with the built-in browser only."
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('BROWSERS env var must be a JSON array of browser entries, e.g. [{"name":"chromium","role":["default"]}].');
+  }
+  if (!parsed.length) {
+    console.warn("⚠️  BROWSERS env var is an empty array. Adding the built-in Chromium browser.");
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }];
+  }
 
-    const browsers = parsed
-      .filter((entry) => entry && typeof entry === "object" && typeof entry.name === "string" && entry.name.trim())
-      .map((entry, idx) => {
-        const name = String(entry.name).trim();
+  const seen = new Set();
+  let chromiumSeen = false;
+  const browsers = parsed.map((entry, idx) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`BROWSERS entry at index ${idx} is not an object: ${JSON.stringify(entry)}`);
+    }
+    if (typeof entry.name !== "string" || !entry.name.trim()) {
+      throw new Error(`BROWSERS entry at index ${idx} is missing a "name" (got ${JSON.stringify(entry.name)})`);
+    }
+    const name = String(entry.name).trim();
+    if (seen.has(name)) {
+      throw new Error(`BROWSERS has a duplicate browser name "${name}" — names must be unique`);
+    }
+    seen.add(name);
 
-        // Parse role array
-        let role = ["default"];
-        if (Array.isArray(entry.role)) {
-          role = entry.role
-            .filter((r) => typeof r === "string" && BROWSER_ROLE_VALUES.has(r.trim().toLowerCase()))
-            .map((r) => r.trim().toLowerCase());
-          if (!role.length) role = ["default"];
-        } else if (typeof entry.role === "string" && BROWSER_ROLE_VALUES.has(entry.role.trim().toLowerCase())) {
-          role = [entry.role.trim().toLowerCase()];
+    let role;
+    if (entry.role === undefined || entry.role === null) {
+      role = ["default"];
+    } else if (Array.isArray(entry.role)) {
+      if (!entry.role.length) {
+        role = [];
+      } else {
+        role = [];
+        for (const r of entry.role) {
+          const normalized = String(r).trim().toLowerCase();
+          if (!BROWSER_ROLE_VALUES.has(normalized)) {
+            throw new Error(
+              `BROWSERS browser "${name}" has an unknown role "${r}" — valid roles: ${[...BROWSER_ROLE_VALUES].join(", ")}`
+            );
+          }
+          role.push(normalized);
         }
+      }
+    } else {
+      const normalized = String(entry.role).trim().toLowerCase();
+      if (!BROWSER_ROLE_VALUES.has(normalized)) {
+        throw new Error(
+          `BROWSERS browser "${name}" has an unknown role "${entry.role}" — valid roles: ${[...BROWSER_ROLE_VALUES].join(", ")}`
+        );
+      }
+      role = [normalized];
+    }
 
-        // Parse index (priority order — lower = tried first)
-        const index = typeof entry.index === "number" && entry.index >= 0 ? entry.index : idx;
+    const cdpUrl = typeof entry.cdpUrl === "string" && entry.cdpUrl.trim()
+      ? String(entry.cdpUrl).trim()
+      : undefined;
 
-        // Parse cdpUrl (presence makes this an add-on)
-        const cdpUrl = typeof entry.cdpUrl === "string" && entry.cdpUrl.trim()
-          ? String(entry.cdpUrl).trim()
-          : undefined;
+    if (!cdpUrl && name !== "chromium") {
+      throw new Error(
+        `BROWSERS browser "${name}" has no cdpUrl — only Chromium (the built-in) may be managed by Navigator; ` +
+        "every other browser is an add-on and must provide a cdpUrl"
+      );
+    }
+    if (name === "chromium") chromiumSeen = true;
 
-        // Parse connect (built-in driver type for add-ons)
-        const connect = typeof entry.connect === "string" && entry.connect.trim()
-          ? String(entry.connect).trim().toLowerCase()
-          : undefined;
+    return { name, role, cdpUrl, addOn: !!cdpUrl };
+  });
 
-        return { name, role, index, cdpUrl, connect, addOn: !!cdpUrl };
-      })
-      .filter((entry) => entry.name);
-
-    return browsers.length ? browsers : null;
-  } catch {
-    return null;
+  if (!chromiumSeen) {
+    console.warn("⚠️  BROWSERS is missing Chromium — adding the built-in browser at the end of the array.");
+    browsers.push({ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false });
   }
-}
 
-function ensureChromiumPresent(browsers) {
-  if (!browsers) browsers = [];
-  if (!browsers.some((b) => b.name === "chromium")) {
-    const maxIndex = browsers.reduce((max, b) => Math.max(max, b.index), -1);
-    browsers.push({
-      name: "chromium",
-      role: ["default"],
-      index: maxIndex + 1,
-      cdpUrl: undefined,
-      connect: undefined,
-      addOn: false,
-    });
-  }
   return browsers;
-}
-
-export function formatBrowserBackendShort(value) {
-  const backend = parseBrowserBackend(value);
-  if (backend === "cloakbrowser") return "cb";
-  if (backend === "chromium") return "ch";
-  return "lp";
 }
 
 async function canAccess(path) {
@@ -295,77 +310,6 @@ export async function resolveChromePath() {
   );
 }
 
-export async function findCloakbrowserPath() {
-  const fromEnv = process.env.CLOAKBROWSER_BINARY_PATH;
-  if (fromEnv && (await canAccess(fromEnv))) {
-    return fromEnv;
-  }
-
-  const homeDir = os.homedir?.() || process.env.HOME || "/root";
-  const knownPaths = [
-    `${homeDir}/.cloakbrowser/chromium-146.0.7680.177.5/chrome`,
-    `${homeDir}/.cloakbrowser/chromium-*/chrome`,
-    "/usr/local/bin/cloakbrowser-chrome"
-  ];
-
-  for (const candidate of knownPaths) {
-    if (candidate.includes("*")) {
-      const parts = candidate.split("*");
-      const prefix = parts[0];
-      try {
-        const entries = await fs.readdir(path.dirname(prefix));
-        const matching = entries
-          .filter((entry) => entry.startsWith(path.basename(prefix)))
-          .sort()
-          .reverse();
-        for (const match of matching) {
-          const fullPath = path.join(path.dirname(prefix), match, "chrome");
-          if (await canAccess(fullPath)) return fullPath;
-        }
-      } catch {
-        continue;
-      }
-    } else if (await canAccess(candidate)) {
-      return candidate;
-    }
-  }
-
-  try {
-    await import("cloakbrowser/puppeteer");
-    const { ensureBinary } = await import("cloakbrowser/dist/download.js");
-    const binaryPath = await ensureBinary();
-    return binaryPath;
-  } catch {
-    return null;
-  }
-}
-
-export async function findLightpandaPath() {
-  const fromEnv = process.env.LIGHTPANDA_PATH;
-  if (fromEnv && (await canAccess(fromEnv))) {
-    return fromEnv;
-  }
-
-  const knownPaths = [
-    "/usr/local/bin/lightpanda",
-    "/usr/bin/lightpanda"
-  ];
-
-  for (const candidate of knownPaths) {
-    if (await canAccess(candidate)) {
-      return candidate;
-    }
-  }
-
-  const pathCandidates = ["lightpanda", "stealthpanda"];
-  for (const candidate of pathCandidates) {
-    const resolved = await findExecutableInPath(candidate);
-    if (resolved) return resolved;
-  }
-
-  return null;
-}
-
 const headlessDefault = !process.env.DISPLAY;
 export const DEFAULT_MAX_CHARS = parseInteger(process.env.WEB_FETCH_MAX_CHARS, 90000);
 export const DEFAULT_SEARCH_ENABLED_ENGINES = Object.freeze([
@@ -393,45 +337,6 @@ async function applyEnvFileToProcessEnv() {
   }
 }
 
-function synthesizeBrowsersFromLegacy() {
-  const defaultBackend = parseBrowserBackend(process.env.BROWSER_BACKEND, "chromium");
-  const devtoolsBackend = parseBrowserBackend(
-    process.env.DEVTOOLS_BROWSER_BACKEND,
-    defaultBackend
-  );
-
-  const browsers = [];
-  const seen = new Set();
-
-  // Default backend (does everything)
-  if (!seen.has(defaultBackend)) {
-    browsers.push({ name: defaultBackend, role: ["default"], index: 0, cdpUrl: undefined, connect: undefined, addOn: false });
-    seen.add(defaultBackend);
-  }
-  // Devtools backend
-  if (!seen.has(devtoolsBackend)) {
-    browsers.push({ name: devtoolsBackend, role: ["devtools"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
-    seen.add(devtoolsBackend);
-  }
-  // Lightpanda for search
-  if (!seen.has("lightpanda")) {
-    browsers.push({ name: "lightpanda", role: ["search"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
-    seen.add("lightpanda");
-  }
-
-  // Ensure Chromium is always present
-  if (!browsers.some((b) => b.name === "chromium")) {
-    browsers.push({ name: "chromium", role: ["default"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
-  }
-
-  console.warn(
-    "⚠️  BROWSERS env var not set. Using legacy defaults. " +
-    "Set BROWSERS to configure browsers explicitly."
-  );
-
-  return browsers;
-}
-
 export async function loadConfig() {
   await applyEnvFileToProcessEnv();
   const navWaitUntilRaw = process.env.NAV_WAIT_UNTIL || "domcontentloaded";
@@ -451,8 +356,6 @@ export async function loadConfig() {
   );
 
   const chromePath = await resolveChromePath();
-  const lightpandaPath = await findLightpandaPath();
-  const cloakbrowserPath = await findCloakbrowserPath();
 
   const defaultHintsPath = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -470,29 +373,15 @@ export async function loadConfig() {
     headless = true;
   }
 
-  // Parse BROWSERS array (new format) or synthesize from legacy env vars
-  const browsersRaw = parseBrowsers(process.env.BROWSERS);
-  const browsers = ensureChromiumPresent(
-    browsersRaw || synthesizeBrowsersFromLegacy()
-  );
-
-  // Sort by index for consistent ordering
-  browsers.sort((a, b) => a.index - b.index);
-
-  // Derive convenience fields from browsers array
-  const defaultBackend = browsers.find((b) => b.role.includes("default"))?.name || "chromium";
-  const devtoolsBackend = browsers.find((b) => b.role.includes("devtools"))?.name || defaultBackend;
+  // Parse BROWSERS array (single source of truth)
+  const browsers = parseBrowsersEnv(process.env.BROWSERS);
 
   return {
     chromePath,
     chromeUserDataDir: process.env.CHROME_USER_DATA_DIR || "/data/chrome",
     chromeProfileDir: process.env.CHROME_PROFILE_DIR || "Default",
-    lightpandaPath,
-    lightpandaPort: parsePort(process.env.LIGHTPANDA_PORT, 1997),
-    cloakbrowserPath,
     browsers,
-    defaultBackend,
-    devtoolsBackend,
+    defaultBackend: "chromium",
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless,

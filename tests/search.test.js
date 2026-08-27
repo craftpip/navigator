@@ -9,6 +9,11 @@ const { mockRunPostProcessor } = vi.hoisted(() => ({ mockRunPostProcessor: vi.fn
 
 vi.mock("../src/browser.js", () => ({
   getBrowserManager: (...args) => mockGetBrowserManager(...args),
+  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
+    const mgr = manager || (await mockGetBrowserManager());
+    const page = await mgr.newPage({ browser });
+    return { page, browser: browser || mgr.config?.defaultBackend || "chromium", rollbackNotes: [] };
+  },
 }));
 
 vi.mock("../src/post-processor.js", async (importOriginal) => {
@@ -350,17 +355,17 @@ describe("browserOpenAndExtract", () => {
         {
           action: "extract",
           label: "Page content",
-          content: { blocks: [{ selector: ".profile", label: "Profile", priority: "high", format: "text" }] }
+          content: { blocks: [{ selector: ".profile", label: "Profile", priority: "high", format: "table" }] }
         }
       ]
     }]));
 
     mockGetBrowserManager.mockResolvedValue(makeExtractionManager({
       hintsPath,
-      configOverrides: { maxChars: 120 },
+      configOverrides: { maxChars: 70 },
       html: `<!doctype html><html><head><title>Hinted page</title></head><body>
         <section class="profile"><p>${"Profile content ".repeat(20)}</p>
-          <table><caption>Metrics</caption><tr><th>Name</th><th>Value</th></tr><tr><td>Visitors</td><td>12345</td></tr><tr><td>Subscribers</td><td>67890</td></tr></table>
+          <table><caption>Metrics</caption><tr><th>Name</th><th>Value</th></tr><tr><td>Visitors</td><td>12345</td></tr><tr><td>Subscribers</td><td>67890</td></tr><tr><td>Impressions</td><td>112233</td></tr></table>
         </section>
       </body></html>`
     }));
@@ -373,7 +378,7 @@ describe("browserOpenAndExtract", () => {
       });
 
       expect(result.text).toContain("### Profile");
-      expect(result.text).toContain("### Metrics");
+      expect(result.text).toContain("Name | Value");
       expect(result.text).toContain("Visitors | 12345");
       expect(result.text).toContain("Response truncated");
     } finally {
@@ -738,7 +743,6 @@ describe("browserOpenAndExtract", () => {
       expect(result.text).toContain("Visitors | 12345");
       expect(result.text).toContain("Subscribers | 67890");
       expect(result.text).not.toContain("Prose that must not appear");
-      expect(result.tables).toBeDefined();
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
@@ -758,7 +762,7 @@ describe("browserOpenAndExtract", () => {
         hintsPath,
         html: `<!doctype html><html><head><title>T</title></head><body>
           <p>Prose</p>
-          <table><tr><th>Name</th><th>Value</th></tr><tr><td>Visitors</td><td>12345</td></tr><tr><td>Subscribers</td><td>67890</td></tr></table>
+          <div><table><tr><th>Name</th><th>Value</th></tr><tr><td>Visitors</td><td>12345</td></tr><tr><td>Subscribers</td><td>67890</td></tr></table></div>
         </body></html>`
       }));
 
@@ -1162,7 +1166,7 @@ describe("browserOpenAndExtract with flow hints", () => {
       }
     ];
     const hint = interactiveFlowHint([
-      { action: "extract", label: "Summary", content: { blocks: [{ selector: ".summary", label: "Summary", priority: "high", format: "text" }] } },
+      { action: "extract", label: "Summary", content: { blocks: [{ selector: ".summary", label: "Summary", priority: "high", format: "table" }] } },
       { action: "click", selector: "#show", waitForSelector: ".extra" },
       { action: "extract", label: "Revealed", content: { blocks: [{ selector: ".extra", label: "Extra", priority: "high", format: "text" }] } }
     ]);
@@ -1173,14 +1177,13 @@ describe("browserOpenAndExtract with flow hints", () => {
       const { browserOpenAndExtract } = await import("../src/search.js");
       const result = await browserOpenAndExtract({ url: "https://example.com/page", includeSeoAnalysis: false });
 
-      expect(result.text).toContain("### Table");
+      expect(result.text).toContain("Name | Value");
       expect(result.text).toContain("Visitors | 12345");
       expect(result.text.split("Visitors | 12345")).toHaveLength(2);
-      expect(result.text.split("### Table")).toHaveLength(2);
-      const tableIndex = result.text.indexOf("### Table");
+      const tableIndex = result.text.indexOf("Visitors | 12345");
       const revealedIndex = result.text.indexOf("## Revealed");
       expect(tableIndex).toBeGreaterThan(-1);
-      expect(tableIndex).toBeGreaterThan(revealedIndex);
+      expect(tableIndex).toBeLessThan(revealedIndex);
       expect(result.links.map((l) => l.href).sort()).toEqual(["https://example.com/a", "https://example.com/b"]);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
