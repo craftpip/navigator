@@ -21,6 +21,8 @@ const SEARCH_ENGINE_VALUES = new Set(SUPPORTED_ENGINES);
 
 const BROWSER_BACKEND_VALUES = new Set(["chromium", "cloakbrowser", "lightpanda"]);
 
+const BROWSER_ROLE_VALUES = new Set(["default", "search", "fetch", "screenshot", "devtools"]);
+
 const STABILIZE_STRATEGY_VALUES = new Set([
   "network_idle",
   "content_idle",
@@ -174,6 +176,67 @@ export function parseBrowserBackend(value, fallback = "cloakbrowser") {
   return BROWSER_BACKEND_VALUES.has(normalized) ? normalized : normalizedFallback;
 }
 
+export function parseBrowsers(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+
+    const browsers = parsed
+      .filter((entry) => entry && typeof entry === "object" && typeof entry.name === "string" && entry.name.trim())
+      .map((entry, idx) => {
+        const name = String(entry.name).trim();
+
+        // Parse role array
+        let role = ["default"];
+        if (Array.isArray(entry.role)) {
+          role = entry.role
+            .filter((r) => typeof r === "string" && BROWSER_ROLE_VALUES.has(r.trim().toLowerCase()))
+            .map((r) => r.trim().toLowerCase());
+          if (!role.length) role = ["default"];
+        } else if (typeof entry.role === "string" && BROWSER_ROLE_VALUES.has(entry.role.trim().toLowerCase())) {
+          role = [entry.role.trim().toLowerCase()];
+        }
+
+        // Parse index (priority order — lower = tried first)
+        const index = typeof entry.index === "number" && entry.index >= 0 ? entry.index : idx;
+
+        // Parse cdpUrl (presence makes this an add-on)
+        const cdpUrl = typeof entry.cdpUrl === "string" && entry.cdpUrl.trim()
+          ? String(entry.cdpUrl).trim()
+          : undefined;
+
+        // Parse connect (built-in driver type for add-ons)
+        const connect = typeof entry.connect === "string" && entry.connect.trim()
+          ? String(entry.connect).trim().toLowerCase()
+          : undefined;
+
+        return { name, role, index, cdpUrl, connect, addOn: !!cdpUrl };
+      })
+      .filter((entry) => entry.name);
+
+    return browsers.length ? browsers : null;
+  } catch {
+    return null;
+  }
+}
+
+function ensureChromiumPresent(browsers) {
+  if (!browsers) browsers = [];
+  if (!browsers.some((b) => b.name === "chromium")) {
+    const maxIndex = browsers.reduce((max, b) => Math.max(max, b.index), -1);
+    browsers.push({
+      name: "chromium",
+      role: ["default"],
+      index: maxIndex + 1,
+      cdpUrl: undefined,
+      connect: undefined,
+      addOn: false,
+    });
+  }
+  return browsers;
+}
+
 export function formatBrowserBackendShort(value) {
   const backend = parseBrowserBackend(value);
   if (backend === "cloakbrowser") return "cb";
@@ -307,17 +370,13 @@ const headlessDefault = !process.env.DISPLAY;
 export const DEFAULT_MAX_CHARS = parseInteger(process.env.WEB_FETCH_MAX_CHARS, 90000);
 export const DEFAULT_SEARCH_ENABLED_ENGINES = Object.freeze([
   "duckduckgo_api",
-  "brave_cb",
-  "google_lp",
-  "google_cb",
-  "duckduckgo_cb",
-  "bing_cb",
-  "bing_lp",
-  "google_ch",
-  "duckduckgo_ch",
-  "mojeek_lp",
-  "yahoo_cb",
-  "startpage_cb"
+  "brave",
+  "google",
+  "duckduckgo",
+  "bing",
+  "mojeek",
+  "yahoo",
+  "startpage"
 ]);
 
 async function applyEnvFileToProcessEnv() {
@@ -332,6 +391,45 @@ async function applyEnvFileToProcessEnv() {
   } catch (error) {
     // Keep process.env as-is if the env file is missing or unreadable.
   }
+}
+
+function synthesizeBrowsersFromLegacy() {
+  const defaultBackend = parseBrowserBackend(process.env.BROWSER_BACKEND, "chromium");
+  const devtoolsBackend = parseBrowserBackend(
+    process.env.DEVTOOLS_BROWSER_BACKEND,
+    defaultBackend
+  );
+
+  const browsers = [];
+  const seen = new Set();
+
+  // Default backend (does everything)
+  if (!seen.has(defaultBackend)) {
+    browsers.push({ name: defaultBackend, role: ["default"], index: 0, cdpUrl: undefined, connect: undefined, addOn: false });
+    seen.add(defaultBackend);
+  }
+  // Devtools backend
+  if (!seen.has(devtoolsBackend)) {
+    browsers.push({ name: devtoolsBackend, role: ["devtools"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
+    seen.add(devtoolsBackend);
+  }
+  // Lightpanda for search
+  if (!seen.has("lightpanda")) {
+    browsers.push({ name: "lightpanda", role: ["search"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
+    seen.add("lightpanda");
+  }
+
+  // Ensure Chromium is always present
+  if (!browsers.some((b) => b.name === "chromium")) {
+    browsers.push({ name: "chromium", role: ["default"], index: browsers.length, cdpUrl: undefined, connect: undefined, addOn: false });
+  }
+
+  console.warn(
+    "⚠️  BROWSERS env var not set. Using legacy defaults. " +
+    "Set BROWSERS to configure browsers explicitly."
+  );
+
+  return browsers;
 }
 
 export async function loadConfig() {
@@ -372,6 +470,19 @@ export async function loadConfig() {
     headless = true;
   }
 
+  // Parse BROWSERS array (new format) or synthesize from legacy env vars
+  const browsersRaw = parseBrowsers(process.env.BROWSERS);
+  const browsers = ensureChromiumPresent(
+    browsersRaw || synthesizeBrowsersFromLegacy()
+  );
+
+  // Sort by index for consistent ordering
+  browsers.sort((a, b) => a.index - b.index);
+
+  // Derive convenience fields from browsers array
+  const defaultBackend = browsers.find((b) => b.role.includes("default"))?.name || "chromium";
+  const devtoolsBackend = browsers.find((b) => b.role.includes("devtools"))?.name || defaultBackend;
+
   return {
     chromePath,
     chromeUserDataDir: process.env.CHROME_USER_DATA_DIR || "/data/chrome",
@@ -379,11 +490,9 @@ export async function loadConfig() {
     lightpandaPath,
     lightpandaPort: parsePort(process.env.LIGHTPANDA_PORT, 1997),
     cloakbrowserPath,
-    defaultBackend: parseBrowserBackend(process.env.BROWSER_BACKEND, "cloakbrowser"),
-    devtoolsBackend: parseBrowserBackend(
-      process.env.DEVTOOLS_BROWSER_BACKEND,
-      parseBrowserBackend(process.env.BROWSER_BACKEND, "cloakbrowser")
-    ),
+    browsers,
+    defaultBackend,
+    devtoolsBackend,
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless,
@@ -436,7 +545,7 @@ export async function loadConfig() {
     disableTools: parseToolList(process.env.DISABLE_TOOLS),
     domainHintsPath,
     searchRouteWarmupEngines: process.env.SEARCH_ROUTE_WARMUP_ENGINES === undefined
-      ? ["brave_cb", "duckduckgo_api", "duckduckgo_cb"]
+      ? ["brave", "duckduckgo_api", "duckduckgo"]
       : parseEngines(process.env.SEARCH_ROUTE_WARMUP_ENGINES, []),
     searchEnabledEngines: (() => {
       const parsed = parseEngines(

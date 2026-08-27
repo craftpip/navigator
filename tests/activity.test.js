@@ -39,8 +39,8 @@ describe("activity trends", () => {
     insertEvent.run(now - 60_000, "web_fetch", "web", 0, "timeout");
     insertEvent.run(now - 120_000, "Page.navigate", "devtools", 1, "");
     insertAttempt.run(null, now - 60_000, "duckduckgo_api", "api", "ok", 5, 20, "");
-    insertAttempt.run(null, now - 60_000, "bing_lp", "lightpanda", "fail", 0, 20, "blocked");
-    insertAttempt.run(null, now - 60_000, "bing_lp", "lightpanda", "skip", 0, 0, "cooldown");
+    insertAttempt.run(null, now - 60_000, "bing", "lightpanda", "fail", 0, 20, "blocked");
+    insertAttempt.run(null, now - 60_000, "bing", "lightpanda", "skip", 0, 0, "cooldown");
 
     const trend = activity.getActivityTrend({ range: "minutes", now });
 
@@ -48,7 +48,7 @@ describe("activity trends", () => {
     expect(trend.summary).toMatchObject({ total: 3, ok: 2, fail: 1, web: { ok: 1, fail: 1 }, devtools: { ok: 1, fail: 0 } });
     expect(trend.engineSummary).toEqual({ total: 3, ok: 1, fail: 1, skip: 1 });
     expect(trend.engineSeries.find((series) => series.id === "duckduckgo_api")?.buckets.some((bucket) => bucket.ok === 1)).toBe(true);
-    expect(trend.engineSeries.find((series) => series.id === "bing_lp")?.buckets.some((bucket) => bucket.fail === 1 && bucket.skip === 1)).toBe(true);
+    expect(trend.engineSeries.find((series) => series.id === "bing")?.buckets.some((bucket) => bucket.fail === 1 && bucket.skip === 1)).toBe(true);
     expect(trend.buckets.some((bucket) => bucket.total === 0)).toBe(true);
   });
 
@@ -59,7 +59,7 @@ describe("activity trends", () => {
     database.prepare("INSERT INTO activity_events (ts, tool, category, ok, error) VALUES (?, ?, ?, ?, ?)").run(now, "web_search", "web", 1, "");
     const insertAttempt = database.prepare("INSERT INTO engine_attempts (search_id, ts, engine, backend, status, result_count, duration_ms, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
     insertAttempt.run(null, now, "duckduckgo_api", "api", "ok", 1, 10, "");
-    insertAttempt.run(null, now, "bing_lp", "lightpanda", "fail", 0, 10, "blocked");
+    insertAttempt.run(null, now, "bing", "lightpanda", "fail", 0, 10, "blocked");
 
     const trend = activity.getActivityTrend({ range: "minutes", engine: "duckduckgo_api", now });
 

@@ -24,9 +24,8 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class MojeekLpDriver extends BrowserSearchDriver {
-  id = "mojeek_lp";
-  backend = "lightpanda";
+export class MojeekEngine extends BrowserSearchDriver {
+  id = "mojeek";
   pool = "shared";
   homeUrl = "https://www.mojeek.com/";
   inputSelectors = ["input[name='q']", "input.js-search-input"];

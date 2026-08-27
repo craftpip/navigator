@@ -6,8 +6,8 @@
 ## Goal
 
 Replace three hardcoded browser backends with a dynamic system where:
-- **Built-in browsers** (Chromium, Lightpanda) ship with Navigator and are managed internally
-- **Add-on browsers** (CloakBrowser, or any CDP-compatible browser) connect via a CDP WebSocket URL provided by the user
+- **Built-in browsers** (Chromium) ship with Navigator and are managed internally
+- **Add-on browsers** (Lightpanda, CloakBrowser, or any CDP-compatible browser) connect via a CDP WebSocket URL provided by the user
 
 Navigator never downloads, bundles, or redistributes add-on browser binaries. Users run them externally and point Navigator at the CDP URL.
 
@@ -20,7 +20,6 @@ Navigator never downloads, bundles, or redistributes add-on browser binaries. Us
 | Browser | Launch method | Docker image |
 |---------|--------------|-------------|
 | **Chromium** | `puppeteer.launch()` — Navigator spawns the process | Binary baked into image (`/usr/bin/chromium`) |
-| **Lightpanda** | `puppeteer.connect()` to `ws://127.0.0.1:{port}`, spawns if not running | Binary baked into image (optional, or connect to external) |
 
 Built-in browsers have full lifecycle management: Navigator launches, monitors, and shuts them down.
 
@@ -28,6 +27,7 @@ Built-in browsers have full lifecycle management: Navigator launches, monitors, 
 
 | Browser | Launch method | Docker image |
 |---------|--------------|-------------|
+| **Lightpanda** (or any CDP browser) | `puppeteer.connect({ browserWSEndpoint: cdpUrl })` | **NOT in image** — user runs it externally |
 | **CloakBrowser** (or any CDP browser) | `puppeteer.connect({ browserWSEndpoint: cdpUrl })` | **NOT in image** — user runs it externally |
 
 Add-on browsers are pure CDP clients — Navigator connects to an already-running browser. No lifecycle management (no launch, no shutdown). The user is responsible for starting/stopping the browser.
@@ -48,16 +48,20 @@ Add-on browsers are pure CDP clients — Navigator connects to an already-runnin
 Replaces `BROWSER_BACKEND` and `DEVTOOLS_BROWSER_BACKEND` entirely.
 
 ```bash
-# Default — built-in browsers only
+# Default — built-in browser only
 BROWSERS='[
-  {"name":"chromium","role":["default"]},
-  {"name":"lightpanda","role":["search"]}
+  {"name":"chromium","role":["default"]}
 ]'
 
-# With CloakBrowser add-on for search
+# With Lightpanda as an add-on (external)
 BROWSERS='[
   {"name":"chromium","role":["default"]},
-  {"name":"lightpanda","role":["search"]},
+  {"name":"lightpanda","role":["search"],"cdpUrl":"ws://127.0.0.1:9222","connect":"lightpanda"}
+]'
+
+# With CloakBrowser add-on
+BROWSERS='[
+  {"name":"chromium","role":["default"]},
   {"name":"cloakbrowser","role":["search"],"cdpUrl":"ws://127.0.0.1:9222","connect":"cloakbrowser"}
 ]'
 ```
@@ -102,7 +106,7 @@ A browser can have multiple roles. `"role": ["search", "fetch"]` means it handle
 // loadConfig() return adds:
 browsers: [
   { name: "chromium",     role: ["default"],        short: "ch",  addOn: false },
-  { name: "lightpanda",   role: ["search"],          short: "lp",  addOn: false },
+  { name: "lightpanda",   role: ["search"],          short: "lp",  addOn: true, cdpUrl: "ws://127.0.0.1:9222", connect: "lightpanda" },
   { name: "cloakbrowser", role: ["search"],          short: "cb",  addOn: true, cdpUrl: "ws://...", connect: "cloakbrowser" },
 ],
 
@@ -450,7 +454,7 @@ Key properties:
 | File | Change |
 |------|--------|
 | `docker-compose.yml` | Replace `BROWSER_BACKEND` / `DEVTOOLS_BROWSER_BACKEND` with `BROWSERS` |
-| `.env` | Default: `[{"name":"chromium","role":["default"]},{"name":"lightpanda","role":["search"]}]` |
+| `.env` | Default: `[{"name":"chromium","role":["default"]}]` |
 | `.env.example` | Update with new format + add-on example |
 | `docker/Dockerfile` | **Remove** `npx --no-install cloakbrowser install` (line 35) |
 
@@ -478,7 +482,7 @@ Key properties:
 {
   "browsers": [
     {"name": "chromium", "role": ["default"], "type": "builtin", "connected": true},
-    {"name": "lightpanda", "role": ["search"], "type": "builtin", "connected": true},
+    {"name": "lightpanda", "role": ["search"], "type": "addon", "connected": true, "cdpUrl": "ws://lightpanda:9222"},
     {"name": "cloakbrowser", "role": ["search"], "type": "addon", "connected": true, "cdpUrl": "ws://cloakbrowser:9222"}
   ]
 }
@@ -563,6 +567,506 @@ When `browser` is omitted, uses the first browser with `"devtools"` or `"default
 6. Rebuild console
 7. **Test:** `docker compose build && docker compose up -d` → health check → full test suite
 
+### Phase 8: Console UI for BROWSERS config
+1. `manage/index.jsx` — Replace `BROWSER_BACKEND` / `DEVTOOLS_BROWSER_BACKEND` group with `BROWSERS` JSON editor (textarea with validation, shows parsed entries)
+2. `manage/index.jsx` — Mark old keys as DEPRECATED in the config panel (still editable for migration, but BROWSERS takes precedence)
+3. `status/index.jsx` Drivers panel — Show role badges per browser (`search`, `fetch`, `screenshot`, `devtools` pills next to the name)
+4. `status/index.jsx` Drivers panel — Show add-on details: `cdpUrl`, connection status, reconnect count
+5. `status/index.jsx` Engines panel — Show which browser each engine routes to (derived from pool: `shared` → lightpanda, `engine` → defaultBackend)
+6. `status/index.jsx` Engines panel — Add browser badge to each engine card (e.g. "google → CH", "bing → LP")
+7. `status/index.jsx` LiveFeed — For search rows: show engine name + browser used (e.g. "google · CH", "bing · LP"). For page op rows: show browser name instead of just the tool backend short code
+8. `status/index.jsx` LiveFeed — Expand `buildFeed()` to resolve engine → browser mapping using `config.engines` pool data + `health.browsers` data. When `attempt.backend` is null (from DB), derive it from the engine's pool
+9. `lib/format.js` `formatBackend()` — Make dynamic: derive short names from `config.browsers` instead of hardcoded map. Fallback to current map for unknown names
+10. `main.jsx` — If any BROWSER_BACKEND/DEVTOOLS_BROWSER_BACKEND env vars are set, show a migration banner pointing to BROWSERS
+11. Rebuild console, verify all panels render correctly with new `health.browsers` data
+
+### Phase 8a: Environment variable cleanup
+
+**Removed (replaced by BROWSERS):**
+| Variable | Was | Replaced by | Reason |
+|----------|-----|-------------|--------|
+| `BROWSER_BACKEND` | Primary browser for page tools | `BROWSERS` with `role: ["default"]` | Role-based routing replaces single-backend selection |
+| `DEVTOOLS_BROWSER_BACKEND` | Browser for devtools tools | `BROWSERS` with `role: ["devtools"]` or `role: ["default"]` | Role-based routing replaces explicit devtools backend |
+| `CLOAKBROWSER_BINARY_PATH` | Path to CloakBrowser binary | `BROWSERS` with `cdpUrl` field | CloakBrowser is now an add-on — user connects via CDP URL, no binary needed |
+
+**Still needed (built-in browsers have lifecycle management):**
+| Variable | Purpose | Notes |
+|----------|---------|-------|
+| `CHROME_PATH` | Path to Chromium binary | Still needed — Chromium is built-in |
+| `CHROME_USER_DATA_DIR` | Chrome profile directory | Still needed |
+| `CHROME_PROFILE_DIR` | Chrome profile folder name | Still needed |
+
+**Search engine defaults updated (old `_cb`/`_lp` IDs removed):**
+| Variable | Old default | New default |
+|----------|-------------|-------------|
+| `SEARCH_ROUTE_WARMUP_ENGINES` | `duckduckgo_api,google_cb,google_lp,bing_lp,duckduckgo_cb,bing_cb` | `brave,duckduckgo_api,duckduckgo` |
+| `SEARCH_ENABLED_ENGINES` | `duckduckgo_cb,bing_cb,brave_cb,yahoo_cb,startpage_cb` + API keys | `duckduckgo,bing,brave,yahoo,startpage` + API keys |
+
+**Manage page changes (`manage/index.jsx`):**
+1. Remove `BROWSER_BACKEND` and `DEVTOOLS_BROWSER_BACKEND` from `MANAGE_GROUPS` "Browser Defaults" group
+2. Add `BROWSERS` as a new group "Browser Array" with JSON textarea editor
+3. Remove `CLOAKBROWSER_BINARY_PATH` from "Backend Installations" group (CloakBrowser is no longer a built-in binary)
+4. Keep `CHROME_PATH`, `CHROME_USER_DATA_DIR`, `CHROME_PROFILE_DIR`, `LIGHTPANDA_PATH`, `LIGHTPANDA_PORT` in "Backend Installations"
+5. `config-schema.js` — Mark `BROWSER_BACKEND`, `DEVTOOLS_BROWSER_BACKEND`, `CLOAKBROWSER_BINARY_PATH` as `deprecated: true` (keep for migration, hide from UI)
+
+**Engine name changes (old → new):**
+| Old ID | New ID | Pool | Browser routing |
+|--------|--------|------|----------------|
+| `duckduckgo_cb`, `duckduckgo_ch` | `duckduckgo` | `engine` | defaultBackend (CH) |
+| `google_cb`, `google_ch` | `google` | `engine` | defaultBackend (CH) |
+| `bing_cb`, `bing_lp` | `bing` | `shared` | lightpanda (LP) |
+| `brave_cb` | `brave` | `engine` | defaultBackend (CH) |
+| `startpage_cb` | `startpage` | `engine` | defaultBackend (CH) |
+| `yahoo_cb` | `yahoo` | `engine` | defaultBackend (CH) |
+| `mojeek_lp` | `mojeek` | `shared` | lightpanda (LP) |
+| `duckduckgo_api` | `duckduckgo_api` | `null` | no browser (API) |
+| `exa_api` | `exa_api` | `null` | no browser (API) |
+| `linkup_api` | `linkup_api` | `null` | no browser (API) |
+| `tavily_api` | `tavily_api` | `null` | no browser (API) |
+| `firecrawl_api` | `firecrawl_api` | `null` | no browser (API) |
+
+### Phase 8b: API key browser access control + browser params on tools
+
+API keys gain per-browser access control. Tools that use browsers get explicit browser selection and fallback chains.
+
+#### Browser params — which tools get them
+
+| Tool | `browser` param | Notes |
+|------|:---:|-------|
+| `web_search` | **No** | Routes through engine pools (metadata-driven) |
+| `web_fetch` | **No** | Uses domain hint `browserEngine` → `defaultBrowser` → array fallback |
+| `web_page_screenshot` | **Yes** | explicit `browser` → `defaultBrowser` → array fallback |
+| `web_page_ascii` | **Yes** | explicit `browser` → `defaultBrowser` → array fallback |
+| `web_page_svg` | **Yes** | explicit `browser` → `defaultBrowser` → array fallback |
+| `Target.createTarget` | **Yes** | explicit `browser` → `defaultBrowser` → **fail** (no fallback) |
+| Other 18 devtools | **No** | Use existing tab's browser (indirect) |
+
+#### Browser resolution order
+
+**Tools with `browser` param** (`web_page_screenshot`, `web_page_ascii`, `web_page_svg`):
+1. User-specified `browser` param → check `allowedBrowsers` → use if allowed
+2. `config.defaultBrowser` (first in browsers array) → check `allowedBrowsers` → use if allowed
+3. Next browser in `browsers[]` that passes `allowedBrowsers` check
+4. Error: "no allowed browser available"
+
+**`web_fetch`** (no `browser` param, uses domain hints):
+1. If matched hint has `browserEngine` → check `allowedBrowsers` → use if allowed
+2. `config.defaultBrowser` → check `allowedBrowsers` → use if allowed
+3. Next browser in `browsers[]` that passes `allowedBrowsers` check
+4. Error: "no allowed browser available"
+
+**`Target.createTarget`** (devtools):
+1. User-specified `browser` → check `allowedBrowsers` → use if allowed, else reject
+2. `config.defaultBrowser` → use
+3. No fallback — fail with clear error
+
+**`web_search`** — no browser param, no change. Routes through engine pool metadata.
+
+#### Domain hints: new `browserEngine` field
+
+Add `browserEngine` to domain hints schema. Optional string — the browser name to use when extracting this hint's URLs.
+
+```json
+{
+  "domain": "nse.co.in",
+  "pathPattern": "/api/**",
+  "browserEngine": "lightpanda",
+  "default": { "format": "readability_to_markdown" }
+}
+```
+
+- Validated against configured browser names (warning if name not in browsers array)
+- Stored in `TOP_LEVEL_KEYS` in `src/domain-hints.js`
+- Used by `browserOpenAndExtract()` to select browser before `manager.newPage()`
+
+#### API key `allowedBrowsers` semantics
+
+- `allowedBrowsers: null` = all browsers allowed (default, backward-compatible)
+- `allowedBrowsers: ["chromium"]` = only chromium
+- `allowedBrowsers: ["chromium", "lightpanda"]` = both allowed
+- Empty array `[]` = no browsers allowed (all browser-using tools blocked)
+- Console API key = always full access (bypasses check)
+
+#### Files to change
+
+**Files to change:**
+
+#### 1. `src/db.js` — schema + functions
+
+**Migration** (add to `MIGRATIONS` array):
+```sql
+ALTER TABLE api_keys ADD COLUMN allowed_browsers TEXT;
+```
+
+**Updated functions:**
+```js
+// listMcpApiKeys — add allowed_browsers to SELECT
+export function listMcpApiKeys() {
+  return getDb().prepare(
+    "SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys ORDER BY created_at DESC, id DESC"
+  ).all();
+}
+
+// createMcpApiKey — accept allowedBrowsers
+export function createMcpApiKey({ name, secret, allowedTools = null, allowedBrowsers = null }) {
+  const result = getDb().prepare(
+    "INSERT INTO api_keys (name, secret, created_at, allowed_tools, allowed_browsers) VALUES (?, ?, ?, ?, ?)"
+  ).run(name, secret, Date.now(),
+    allowedTools === null ? null : JSON.stringify(allowedTools),
+    allowedBrowsers === null ? null : JSON.stringify(allowedBrowsers)
+  );
+  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys WHERE id = ?").get(result.lastInsertRowid);
+}
+
+// NEW — set browser access for an existing key
+export function setMcpApiKeyBrowsers(id, allowedBrowsers) {
+  return getDb().prepare("UPDATE api_keys SET allowed_browsers = ? WHERE id = ?")
+    .run(JSON.stringify(allowedBrowsers), id).changes > 0;
+}
+```
+
+#### 2. `src/mcp-server.js` — endpoint + access control
+
+**`getConsoleApiKeysPayload()`** — add `browsers` list + per-key `allowedBrowsers`:
+```js
+async function getConsoleApiKeysPayload(manager) {
+  const browsers = (manager.config.browsers || []).map((b) => ({
+    name: b.name,
+    role: b.role,
+    type: b.addOn ? "addon" : "builtin",
+  }));
+  return {
+    ok: true,
+    allowUnauthenticated: manager.config.mcpAllowUnauthenticated,
+    toolGroups: getToolGroups(),
+    browsers,                    // NEW — all available browsers
+    keys: listMcpApiKeys().map((key) => ({
+      id: key.id,
+      name: key.name,
+      preview: maskApiKey(key.secret),
+      createdAt: key.created_at,
+      allowedTools: parseAllowedTools(key.allowed_tools),
+      allowedBrowsers: parseAllowedTools(key.allowed_browsers),  // reuse parser (same JSON array format)
+    }))
+  };
+}
+```
+
+**`handleConsoleApiKeys()`** — add `set_browsers` action, update `create`:
+```js
+// In "create" action — add allowedBrowsers:
+const allowedBrowsers = Array.isArray(body?.allowedBrowsers)
+  ? [...new Set(body.allowedBrowsers.filter((b) => availableBrowserNames.has(b)))]
+  : null;  // null = all browsers (default)
+createMcpApiKey({ name, secret: key, allowedTools, allowedBrowsers });
+
+// NEW "set_browsers" action:
+if (action === "set_browsers") {
+  const id = Number(body?.id);
+  const availableBrowserNames = new Set(
+    (manager.config.browsers || []).map((b) => b.name)
+  );
+  const allowedBrowsers = Array.isArray(body?.allowedBrowsers)
+    ? [...new Set(body.allowedBrowsers.filter((b) => availableBrowserNames.has(b)))]
+    : [];
+  if (!Number.isInteger(id) || !setMcpApiKeyBrowsers(id, allowedBrowsers)) {
+    return { ok: false, error: "Unknown API key" };
+  }
+  return getConsoleApiKeysPayload(manager);
+}
+```
+
+**`getAllowedBrowsersForRequest()`** — new function (mirrors `getAllowedToolsForRequest`):
+```js
+function getAllowedBrowsersForRequest(headers, config) {
+  const key = getMcpApiKey(headers);
+  if (!key || key === CONSOLE_API_KEY) return null;  // console key = all access
+  const authorizedKey = getAuthorizedMcpKey(headers, config);
+  if (!authorizedKey) return null;
+  const record = listMcpApiKeys().find((entry) => entry.secret === authorizedKey);
+  const allowed = record ? parseAllowedTools(record.allowed_browsers) : null;
+  return allowed === null ? null : new Set(allowed);
+}
+```
+
+**`handleToolCall()`** — enforce browser access:
+```js
+// At the top of handleToolCall, after the tools check:
+if (allowedBrowsers && args.browser) {
+  const requested = String(args.browser).trim().toLowerCase();
+  // Built-in names always pass (chromium only)
+  const builtins = ["chromium"];
+  if (!builtins.includes(requested) && !allowedBrowsers.has(requested)) {
+    throw new Error(`Access denied: browser "${args.browser}" is not allowed for this API key`);
+  }
+}
+```
+
+**Wire it through:**
+- `createMcpServer(allowedTools)` → `createMcpServer(allowedTools, allowedBrowsers)`
+- `handleStatelessMcpPost(body, allowedTools)` → add `allowedBrowsers` param
+- HTTP handler: `const allowedBrowsers = getAllowedBrowsersForRequest(req.headers, authConfig);`
+- Both session and stateless paths pass `allowedBrowsers` to `handleToolCall`
+
+#### 3. `src/web-console/src/pages/keys/index.jsx` — UI
+
+**Create modal** — add "Browser access" section after "Tool access":
+```jsx
+const [allowedBrowsers, setAllowedBrowsers] = useState([]);
+const browsers = state?.browsers || [];
+
+// In load():
+setAllowedBrowsers(payload.browsers.map((b) => b.name));  // all checked by default
+
+// Toggle helpers (same pattern as tools):
+const toggleBrowser = (browser) => setAllowedBrowsers((current) =>
+  current.includes(browser) ? current.filter((n) => n !== browser) : [...current, browser],
+);
+const toggleBrowserGroup = (role, browsers) => setAllowedBrowsers((current) => {
+  const roleBrowsers = browsers.filter((b) => b.role.includes(role));
+  return roleBrowsers.every((b) => current.includes(b.name))
+    ? current.filter((n) => !roleBrowsers.find((b) => b.name === n))
+    : [...new Set([...current, ...roleBrowsers.map((b) => b.name)])];
+});
+```
+
+**Modal form** — new section between "Tool access" and actions:
+```jsx
+<div className="api-key-permissions-field">
+  <span>Browser access</span>
+  <details className="api-key-tools" open>
+    <summary>
+      {allowedBrowsers.length === browsers.length
+        ? "All browsers allowed"
+        : `${allowedBrowsers.length} of ${browsers.length} browsers allowed`}
+    </summary>
+    <div className="api-key-tool-groups">
+      <div className="api-key-tool-actions">
+        <button type="button" onClick={() => setAllowedBrowsers(browsers.map((b) => b.name))}>Allow all</button>
+        <button type="button" onClick={() => setAllowedBrowsers([])}>Clear all</button>
+      </div>
+      {["builtin", "addon"].map((type) => {
+        const group = browsers.filter((b) => b.type === type);
+        if (!group.length) return null;
+        return (
+          <div className="api-key-tool-group" key={type}>
+            <Check
+              label={type === "builtin" ? "Built-in" : "Add-on"}
+              checked={group.every((b) => allowedBrowsers.includes(b.name))}
+              onChange={() => toggleBrowserGroup(type, group)}
+            />
+            <div className="api-key-tool-items">
+              {group.map((b) => (
+                <Check
+                  key={b.name}
+                  label={`${b.name} (${b.role.join(", ")})`}
+                  checked={allowedBrowsers.includes(b.name)}
+                  onChange={() => toggleBrowser(b.name)}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  </details>
+</div>
+```
+
+**List view** — show browser count:
+```jsx
+// Update the access column:
+<small>
+  {key.allowedTools === null ? "all tools" : `${key.allowedTools.length} tools`}
+  {key.allowedBrowsers !== null && ` · ${key.allowedBrowsers.length} browsers`}
+</small>
+```
+
+**Submit** — pass `allowedBrowsers`:
+```jsx
+mutate({ action: "create", name: name.trim(), allowedTools, allowedBrowsers }, "API key created.");
+```
+
+#### 4. `src/domain-hints.js` — add `browserEngine` field
+
+Add `"browserEngine"` to `TOP_LEVEL_KEYS` array:
+```js
+const TOP_LEVEL_KEYS = [
+  "domain", "pathPattern", "pageType", "comment", "testUrls",
+  "requireSelector", "default", "flow", "flowOptions", "browserEngine"
+];
+```
+
+Add validation in `validateHintRule()`:
+```js
+if (hint.browserEngine !== undefined) {
+  if (typeof hint.browserEngine !== "string") {
+    errors.push({ field: "browserEngine", message: "must be a string (browser name)" });
+  } else if (!/^[a-z0-9_-]+$/.test(hint.browserEngine)) {
+    errors.push({ field: "browserEngine", message: "must be lowercase alphanumeric with dashes/underscores" });
+  }
+  // Warning if browser name not in configured browsers (checked at runtime, not here)
+}
+```
+
+#### 5. `src/search.js` — use `browserEngine` from hints in `browserOpenAndExtract()`
+
+In `browserOpenAndExtract()`, after hint is matched, before `manager.newPage()`:
+```js
+// Resolve browser from hint or default
+const requestedBrowser = matchedHint?.browserEngine || null;
+const resolved = resolveBrowser(requestedBrowser, manager.config.browsers, allowedBrowsers, true);
+const page = await manager.newPage({ backend: resolved.name });
+```
+
+This requires threading `allowedBrowsers` through `browserOpenAndExtract()` and `openTargetsParallel()`.
+
+#### 6. `src/mcp-server.js` — add `browser` param to tool schemas
+
+Add `browser` property to `web_page_screenshot`, `web_page_ascii`, `web_page_svg` input schemas:
+```js
+browser: {
+  type: "string",
+  description: "Browser name from the browsers array. If omitted, uses the default browser. Falls back to the next available browser if the requested one is down or not allowed."
+}
+```
+
+Update `handleToolCall()` for these tools to use `resolveBrowser()`.
+
+#### 7. Browser resolution helper
+
+New `resolveBrowser()` function in `src/mcp-server.js` (or `src/browser.js`):
+
+```js
+/**
+ * Resolve which browser to use for a tool call.
+ * @param {string|null} requestedBrowser - explicit browser param from user (or null)
+ * @param {Array} browsers - configured browsers array
+ * @param {Set|null} allowedBrowsers - allowed browsers for this API key (null = all)
+ * @param {boolean} allowFallback - true = try next in array, false = fail on first miss
+ * @returns {{ name: string, browser: object }} - resolved browser
+ * @throws if no allowed browser found
+ */
+function resolveBrowser(requestedBrowser, browsers, allowedBrowsers, allowFallback = true) {
+  const isAllowed = (name) => !allowedBrowsers || allowedBrowsers.has(name);
+
+  // Step 1: explicit request
+  if (requestedBrowser) {
+    const match = browsers.find((b) => b.name === requestedBrowser);
+    if (match && isAllowed(match.name)) return match;
+    if (!allowFallback) {
+      throw new Error(`Access denied: browser "${requestedBrowser}" is not allowed or not configured`);
+    }
+    // fall through to array traversal
+  }
+
+  // Step 2: traverse browsers array
+  for (const browser of browsers) {
+    if (isAllowed(browser.name)) return browser;
+  }
+
+  throw new Error("No allowed browser available for this request");
+}
+```
+
+#### 8. Access control flow
+
+```
+Client request with API key
+  → getAllowedBrowsersForRequest() reads allowed_browsers from DB → Set or null
+  → handleToolCall(name, args, allowedTools, allowedBrowsers)
+
+  Tools with browser param (web_page_screenshot, web_page_ascii, web_page_svg):
+    → resolveBrowser(args.browser, browsers, allowedBrowsers, allowFallback=true)
+    → tries: explicit → defaultBrowser → next in array
+    → first allowed+available browser wins
+
+  web_fetch (no browser param):
+    → if hint.browserEngine exists: resolveBrowser(hint.browserEngine, browsers, allowedBrowsers, allowFallback=true)
+    → else: resolveBrowser(null, browsers, allowedBrowsers, allowFallback=true)
+    → tries: hint → defaultBrowser → next in array
+
+  Target.createTarget (devtools):
+    → resolveBrowser(args.browser, browsers, allowedBrowsers, allowFallback=false)
+    → tries: explicit → defaultBrowser → fail
+
+  web_search:
+    → no browser check (engine pool routing)
+```
+
+**Edge cases:**
+- `null` allowedBrowsers = all browsers allowed (backward-compatible with existing keys)
+- Empty array `[]` = no browsers allowed → all browser-using tools fail
+- Console API key (`CONSOLE_API_KEY`) = always full access (bypasses check)
+- `web_search` → unaffected (no browser param)
+- `web_fetch` → hint `browserEngine` checked against `allowedBrowsers`; falls back to default
+- `web_page_screenshot` with `browser: "lightpanda"` → checked; falls back to chromium if not allowed
+- `Target.createTarget` with `browser: "lightpanda"` → checked; rejected if not allowed (no fallback)
+
+#### 9. Browser info in MCP responses
+
+Every tool that uses a browser tells the LLM which browser served the results. This matches the existing pattern where `web_search` shows engine names.
+
+**`web_fetch`** — add browser line to entry metadata:
+```
+### [Page Title](42)
+- Status: Success
+- URL: https://example.com
+- Browser: lightpanda          ← NEW
+```
+
+**`web_page_screenshot`** — add browser to response metadata:
+```
+- Screenshot captured (medium quality, 1920×1080)
+- Browser: chromium            ← NEW
+```
+
+**`web_page_ascii`** / **`web_page_svg`** — same pattern, add `Browser: <name>` line.
+
+**`web_search`** — engine is already in result data (`result.engine`), but not rendered. Add engine display:
+```
+- **Result Title** [example.com](1)  ← engine: duckduckgo
+  - Snippet text here
+```
+Or as a header line: `**Results (5) via duckduckgo:**`
+
+**Implementation:**
+- `formatOpenPageResponse()` — check `entry.browser` field, add `- Browser: <name>` line
+- `formatSearchMarkdown()` — render `result.engine` field
+- `browserOpenAndExtract()` — set `browser` field on each result entry from `resolved.name`
+- `browserCaptureScreenshot()` — set `browser` field on capture result
+
+---
+
+### Phase 9: Resilience implementation (Section 10)
+1. Add `AddOnHealthMonitor` class to `src/browser.js` — background 10s `setInterval`, `browser.version()` health check, auto-reconnect on disconnect, `.unref()` so it doesn't block exit
+2. Add browser backend circuit breakers — per-browser-name, trip on N connection failures, auto-recovery after cooldown
+3. Health-aware engine routing in `src/search.js` — skip engines whose backend browser is disconnected/unhealthy
+4. Browser fallback for `web_fetch` in `src/search.js` `browserOpenAndExtract()` — if default browser fails with connection error, try other built-in browsers, then add-ons
+5. Expose resilience state in `/health` endpoint — add-on reconnect counts, backend circuit breaker status
+6. **Test:** add-on routing with mock CDP endpoint, auto-reconnect test, fallback test
+
+---
+
+## Implementation Gap Status (updated 2026-08-26)
+
+### Completed (Phases 1–7 core)
+- Phase 1: `parseBrowsers()`, `ensureChromiumPresent()`, `synthesizeBrowsersFromLegacy()`, `loadConfig()` with `browsers` array ✅
+- Phase 2: `_connectAddOnPage()`, `_backendState` Map, `newPage()` add-on routing + engine-to-backend routing via pool ✅
+- Phase 3: Skipped — Phase 2 routing covers it ✅
+- Phase 4: 15 engine files → 7 consolidated, clean IDs, registry, `search.js` routeKey/pool checks ✅
+- Phase 5 (partial): `getHealth()` with `browsers`+`addOns`, `getInstanceStats()`, `shutdown()` disconnects add-ons ✅
+- Phase 6: `devtools.js` normalizeBackend, `search.js` pool checks, `mcp-server.js` `list_browsers` tool, console Drivers panel dynamic ✅
+- Phase 7 (partial): `docker-compose.yml` `BROWSERS`, `.env` files, Dockerfile updated, console rebuilt ✅
+
+### Missing
+- Phase 5: `AddOnHealthMonitor` (10s auto-reconnect), browser backend circuit breakers
+- Phase 7: `AGENTS.md`, `README.md` updates
+- Phase 8: Console UI for BROWSERS config ✅ (BrowserArrayEditor done)
+- Phase 8a: Env var cleanup (deprecated keys removed) ✅
+- Phase 8b: API key browser access control + browser params on tools + browser info in responses (DB + server + domain hints + UI)
+- Phase 9: Resilience implementation
+
 ---
 
 ## 8. Migration: Old Env Vars → New
@@ -590,12 +1094,6 @@ function synthesizeBrowsersFromLegacy() {
     browsers.push({ name: devtoolsBackend, role: ["devtools"], index: browsers.length });
     seen.add(devtoolsBackend);
   }
-  // Lightpanda for search
-  if (!seen.has("lightpanda")) {
-    browsers.push({ name: "lightpanda", role: ["search"], index: browsers.length });
-    seen.add("lightpanda");
-  }
-
   // Ensure Chromium is always present
   if (!browsers.some(b => b.name === "chromium")) {
     browsers.push({ name: "chromium", role: ["default"], index: browsers.length });
@@ -904,7 +1402,7 @@ The health endpoint exposes all resilience state:
   "ok": true,
   "browsers": {
     "chromium": { "role": ["default"], "connected": true, "type": "builtin" },
-    "lightpanda": { "role": ["search"], "connected": true, "type": "builtin" },
+    "lightpanda": { "role": ["search"], "connected": true, "type": "addon", "cdpUrl": "ws://lightpanda:9222" },
     "cloakbrowser": { "role": ["search"], "connected": true, "type": "addon", "cdpUrl": "ws://cloakbrowser:9222", "lastHealthy": 1693000000000 }
   },
   "circuitBreakers": {

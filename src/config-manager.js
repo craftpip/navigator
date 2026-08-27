@@ -39,6 +39,14 @@ function parseWithType(type, entry, raw) {
       const normalized = String(raw).trim().toLowerCase();
       return { valid: Array.isArray(values) && values.includes(normalized), value: normalized };
     }
+    case "json": {
+      try {
+        const value = JSON.parse(String(raw));
+        return { valid: true, value: JSON.stringify(value) };
+      } catch {
+        return { valid: false, value: undefined };
+      }
+    }
     default:
       return { valid: false, value: undefined };
   }

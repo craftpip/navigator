@@ -36,7 +36,10 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class DuckDuckGoBrowserDriver extends BrowserSearchDriver {
+export class DuckDuckGoEngine extends BrowserSearchDriver {
+  id = "duckduckgo";
+  pool = "engine";
+  homeUrl = "https://duckduckgo.com/";
   inputSelectors = [INPUT_SELECTOR];
   resultSelectors = RESULT_SELECTORS;
 

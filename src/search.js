@@ -161,8 +161,7 @@ export function getActivityCounters() {
 }
 
 function routeKey(engine) {
-  const meta = getEngineMetadata(engine);
-  return `${engine}/${meta?.backend || "browser"}`;
+  return engine;
 }
 
 export function isLocalBrowserFailure(error) {
@@ -265,7 +264,7 @@ export function recordEngineAttempt(engine, status, errorMsg, resultCount = 0, d
   persistEngineAttemptLog();
   recordDbEngineAttempt({
     engine,
-    backend: getEngineMetadata(engine)?.backend,
+    backend: null,
     status,
     resultCount,
     error: status === "ok" ? "" : readableErrorMessage(errorMsg),
@@ -977,9 +976,9 @@ async function mapWithConcurrency(items, concurrency, mapper) {
 
 async function runSearchEngine({ manager, query, engine, config, limit }) {
   const driver = getEngineDriver(engine, config);
-  const { backend } = getEngineMetadata(engine) || {};
+  const meta = getEngineMetadata(engine);
 
-  if (backend === "api") {
+  if (!meta?.isBrowser) {
     const t0 = performance.now();
     const result = await driver.search({ query, limit });
     const t1 = performance.now();
@@ -1016,8 +1015,8 @@ async function runSearchEngine({ manager, query, engine, config, limit }) {
 }
 
 function routeConcurrencyForEngines(engines, _config) {
-  const hasLightpandaRoute = engines.some((engine) => getEngineMetadata(engine)?.backend === "lightpanda");
-  if (hasLightpandaRoute) return 1;
+  const hasSharedPool = engines.some((engine) => getEngineMetadata(engine)?.pool === "shared");
+  if (hasSharedPool) return 1;
   return Math.max(1, engines.length);
 }
 
@@ -1076,7 +1075,7 @@ async function runSearchRoute({ manager, query, engine, config, explicit, limit 
     try {
       value = await execute();
     } catch (error) {
-      if (getEngineMetadata(engine)?.backend !== "lightpanda" || !/detached frame|targetalreadyloaded/i.test(String(error?.message || error))) {
+      if (getEngineMetadata(engine)?.pool !== "shared" || !/detached frame|targetalreadyloaded/i.test(String(error?.message || error))) {
         throw error;
       }
       value = await execute();

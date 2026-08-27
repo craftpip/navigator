@@ -1,38 +1,30 @@
-import { KNOWN_BACKENDS, POOL_POLICIES, SearchEngineDriver } from "./driver.js";
+import { POOL_POLICIES, SearchEngineDriver } from "./driver.js";
 import { DuckDuckGoApiDriver } from "./duckduckgo-api.js";
-import { DuckDuckGoCbDriver } from "./duckduckgo-cb.js";
-import { DuckDuckGoChDriver } from "./duckduckgo-ch.js";
+import { DuckDuckGoEngine } from "./duckduckgo.js";
 import { ExaApiDriver } from "./exa-api.js";
 import { FirecrawlApiDriver } from "./firecrawl-api.js";
 import { LinkupApiDriver } from "./linkup-api.js";
 import { TavilyApiDriver } from "./tavily-api.js";
-import { GoogleCbDriver } from "./google-cb.js";
-import { GoogleChDriver } from "./google-ch.js";
-import { GoogleLpDriver } from "./google-lp.js";
-import { BingCbDriver } from "./bing-cb.js";
-import { BingLpDriver } from "./bing-lp.js";
-import { BraveCbDriver } from "./brave-cb.js";
-import { MojeekLpDriver } from "./mojeek-lp.js";
-import { StartpageCbDriver } from "./startpage-cb.js";
-import { YahooCbDriver } from "./yahoo-cb.js";
+import { GoogleEngine } from "./google.js";
+import { BingEngine } from "./bing.js";
+import { BraveEngine } from "./brave.js";
+import { MojeekEngine } from "./mojeek.js";
+import { StartpageEngine } from "./startpage.js";
+import { YahooEngine } from "./yahoo.js";
 
 const DRIVER_CLASSES = [
-  BingCbDriver,
-  BingLpDriver,
-  BraveCbDriver,
+  DuckDuckGoEngine,
   DuckDuckGoApiDriver,
-  DuckDuckGoCbDriver,
-  DuckDuckGoChDriver,
+  GoogleEngine,
+  BingEngine,
+  BraveEngine,
+  MojeekEngine,
+  StartpageEngine,
+  YahooEngine,
   ExaApiDriver,
   FirecrawlApiDriver,
   LinkupApiDriver,
   TavilyApiDriver,
-  GoogleCbDriver,
-  GoogleChDriver,
-  GoogleLpDriver,
-  MojeekLpDriver,
-  StartpageCbDriver,
-  YahooCbDriver
 ];
 
 const REGISTRY = new Map();
@@ -47,20 +39,9 @@ for (const DriverClass of DRIVER_CLASSES) {
   if (REGISTRY.has(id)) {
     throw new Error(`Duplicate search engine id registered: ${id}`);
   }
-  if (!KNOWN_BACKENDS.has(instance.backend)) {
-    throw new Error(`Search engine ${id} has unknown backend: ${instance.backend}`);
-  }
-  if (instance.backend === "api") {
-    if (instance.pool != null) {
-      throw new Error(`Search engine ${id} is an API route but declares a pool: ${instance.pool}`);
-    }
-    if (instance.homeUrl) {
-      throw new Error(`Search engine ${id} is an API route but declares a homeUrl`);
-    }
-    if (typeof instance.search !== "function" || instance.search === SearchEngineDriver.prototype.search) {
-      throw new Error(`Search engine ${id} is an API route but does not implement search()`);
-    }
-  } else {
+
+  const isBrowser = instance.pool !== null;
+  if (isBrowser) {
     if (!instance.homeUrl) {
       throw new Error(`Search engine ${id} is a browser route but has no homeUrl`);
     }
@@ -73,14 +54,23 @@ for (const DriverClass of DRIVER_CLASSES) {
     if (typeof instance.extract !== "function" || instance.extract === SearchEngineDriver.prototype.extract) {
       throw new Error(`Search engine ${id} is a browser route but does not implement extract()`);
     }
+  } else {
+    if (instance.pool != null) {
+      throw new Error(`Search engine ${id} is an API route but declares a pool: ${instance.pool}`);
+    }
+    if (instance.homeUrl) {
+      throw new Error(`Search engine ${id} is an API route but declares a homeUrl`);
+    }
+    if (typeof instance.search !== "function" || instance.search === SearchEngineDriver.prototype.search) {
+      throw new Error(`Search engine ${id} is an API route but does not implement search()`);
+    }
   }
 
   REGISTRY.set(id, DriverClass);
   ENGINE_METADATA.set(id, {
-    backend: instance.backend,
     pool: instance.pool,
     homeUrl: instance.homeUrl,
-    isBrowser: instance.backend !== "api"
+    isBrowser
   });
 }
 

@@ -28,7 +28,10 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class BingDriver extends BrowserSearchDriver {
+export class BingEngine extends BrowserSearchDriver {
+  id = "bing";
+  pool = "shared";
+  homeUrl = "https://www.bing.com/";
   inputSelectors = ["textarea[name='q']", "input[name='q']", "input#sb_form_q"];
   resultSelectors = RESULT_SELECTORS;
 

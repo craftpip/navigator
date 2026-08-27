@@ -336,10 +336,12 @@ function Runtime({ health, stats, history }) {
 }
 function Drivers({ health, instances }) {
   const byBackend = new Map(instances.map((item) => [item.backend, item]));
+  const browsers = health.browsers || [];
   return (
     <Panel title="Browser drivers" sub="engines, tabs and close timers">
       <div className="list">
-        {["cloakbrowser", "lightpanda", "chromium"].map((backend) => {
+        {browsers.map((browser) => {
+          const backend = browser.name;
           const instance = byBackend.get(backend);
           const online = Boolean(instance?.connected);
           const defaultDriver = backend === health.backend;
@@ -347,13 +349,13 @@ function Drivers({ health, instances }) {
             ? `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
             : defaultDriver
               ? "Default driver is not connected"
-              : "Not started";
+              : browser.addOn ? "Add-on — not connected" : "Not started";
           return (
             <div className="item driver-item" key={backend}>
               <Dot tone={online ? "" : defaultDriver ? "err" : "off"} />
               <div className="item-main">
                 <div className="item-title">
-                  {backend} {defaultDriver && <Pill tone="info">default</Pill>}
+                  {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}
                 </div>
                 <div className="item-detail">{detail}</div>
                 {online && (instance.openTabs || []).length > 0 && (
@@ -450,7 +452,7 @@ function Engines({ config, health, stats, reload }) {
       </div>
       <div className="engine-grid">
         {engines.map((engine, index) => {
-          const circuit = circuits.get(`${engine.id}/${engine.backend}`);
+          const circuit = circuits.get(engine.id);
           const stat = attempts[engine.id] || {};
           const profile = profiles.get(engine.id) || {};
           const schedulerState = schedulingState(profile);
@@ -493,7 +495,7 @@ function Engines({ config, health, stats, reload }) {
                    <Pill tone={tone}>{route}</Pill>
                   <button className="button small engine-reset" onClick={() => resetEngine(engine.id)} disabled={resetStatus?.engine === engine.id && resetStatus.text === "resetting..."}>{resetStatus?.engine === engine.id ? resetStatus.text : "reset"}</button>
                 </div>
-                <div className="engine-inline-meta"><span className="feed-backend">{formatBackend(engine.backend)}</span> · {role}</div>
+                <div className="engine-inline-meta"><span className="feed-backend">{engine.pool || "api"}</span> · {role}</div>
                 <div className="ordering-factors">
                   <span title="Scheduler eligibility state — ready means the route can be dispatched right now"><b>{schedulerState.replace("_", " ")}</b> eligibility</span>
                   <span title="Composite score: success rate, result yield, recent stability, failure recency, recovery, and response latency"><b>{Number(profile.score || 0).toFixed(3)}</b> score</span>

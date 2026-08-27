@@ -74,10 +74,21 @@ function assertEnabled(manager) {
 function normalizeBackend(manager, backend) {
   const normalized = String(backend || "").trim().toLowerCase();
   if (!normalized) return manager.config.devtoolsBackend || manager.config.defaultBackend;
-  if (!["chromium", "cloakbrowser", "lightpanda"].includes(normalized)) {
-    throw new Error("Invalid input: backend must be one of chromium, cloakbrowser, lightpanda");
+
+  // Built-in backends
+  const builtins = ["chromium"];
+  if (builtins.includes(normalized)) return normalized;
+
+  // Add-on backends (from config.browsers with "devtools" or "default" role)
+  if (manager.config.browsers) {
+    const addOn = manager.config.browsers.find(
+      (b) => b.addOn && b.name.toLowerCase() === normalized &&
+        (b.role.includes("devtools") || b.role.includes("default"))
+    );
+    if (addOn) return normalized;
   }
-  return normalized;
+
+  throw new Error(`Invalid input: backend must be a built-in (${builtins.join(", ")}) or a configured add-on browser name`);
 }
 
 export function getTargetState(targetId) {

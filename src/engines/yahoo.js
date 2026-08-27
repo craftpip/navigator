@@ -28,7 +28,10 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class YahooDriver extends BrowserSearchDriver {
+export class YahooEngine extends BrowserSearchDriver {
+  id = "yahoo";
+  pool = "engine";
+  homeUrl = "https://search.yahoo.com/";
   inputSelectors = ["input[name='p']", "input#yschsp"];
   resultSelectors = RESULT_SELECTORS;
 

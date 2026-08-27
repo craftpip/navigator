@@ -207,7 +207,7 @@ describe("loadConfig (parse engine behavior)", () => {
     vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", undefined);
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.searchRouteWarmupEngines).toEqual(["brave_cb", "duckduckgo_api", "duckduckgo_cb"]);
+    expect(config.searchRouteWarmupEngines).toEqual(["brave", "duckduckgo_api", "duckduckgo"]);
   });
 
   it("parses MCP API key settings", async () => {
@@ -222,10 +222,10 @@ describe("loadConfig (parse engine behavior)", () => {
 
   it("parses SEARCH_ROUTE_WARMUP_ENGINES correctly", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", "google_cb,bing_lp,invalid_engine");
+    vi.stubEnv("SEARCH_ROUTE_WARMUP_ENGINES", "google,bing,invalid_engine");
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.searchRouteWarmupEngines).toEqual(["google_cb", "bing_lp"]);
+    expect(config.searchRouteWarmupEngines).toEqual(["google", "bing"]);
   });
 
   it("allows an explicitly empty SEARCH_ROUTE_WARMUP_ENGINES (no warmup)", async () => {
@@ -238,10 +238,10 @@ describe("loadConfig (parse engine behavior)", () => {
 
   it("parses SEARCH_ENABLED_ENGINES correctly", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ENABLED_ENGINES", "duckduckgo_api,google_ch");
+    vi.stubEnv("SEARCH_ENABLED_ENGINES", "duckduckgo_api,google");
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.searchEnabledEngines).toEqual(["duckduckgo_api", "google_ch"]);
+    expect(config.searchEnabledEngines).toEqual(["duckduckgo_api", "google"]);
   });
 
   it("uses the shared default for an empty SEARCH_ENABLED_ENGINES", async () => {
@@ -250,9 +250,8 @@ describe("loadConfig (parse engine behavior)", () => {
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
     expect(config.searchEnabledEngines).toEqual([
-      "duckduckgo_api", "brave_cb", "google_lp", "google_cb", "duckduckgo_cb",
-      "bing_cb", "bing_lp", "google_ch", "duckduckgo_ch", "mojeek_lp", "yahoo_cb",
-      "startpage_cb"
+      "duckduckgo_api", "brave", "google", "duckduckgo",
+      "bing", "mojeek", "yahoo", "startpage"
     ]);
   });
 
@@ -391,7 +390,11 @@ describe("loadConfig (parse engine behavior)", () => {
     }
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.defaultBackend).toBe("cloakbrowser");
+    expect(config.defaultBackend).toBe("chromium");
+    expect(config.browsers).toBeDefined();
+    expect(Array.isArray(config.browsers)).toBe(true);
+    expect(config.browsers.some((b) => b.name === "chromium")).toBe(true);
+    expect(config.browsers[0].role).toContain("default");
     expect(config.browserOpTimeoutMs).toBe(60000);
     expect(config.mcpApiPort).toBe(1994);
     expect(config.enableHttpMcp).toBe(false);
@@ -403,9 +406,8 @@ describe("loadConfig (parse engine behavior)", () => {
     expect(config.searchMaxWorkingWindows).toBeGreaterThanOrEqual(2);
     expect(config.searchRouteCircuitOpenMs).toBe(300000);
     expect(config.searchEnabledEngines).toEqual([
-      "duckduckgo_api", "brave_cb", "google_lp", "google_cb", "duckduckgo_cb",
-      "bing_cb", "bing_lp", "google_ch", "duckduckgo_ch", "mojeek_lp", "yahoo_cb",
-      "startpage_cb"
+      "duckduckgo_api", "brave", "google", "duckduckgo",
+      "bing", "mojeek", "yahoo", "startpage"
     ]);
     expect(config.searchQueueMinIntervalMs).toBe(30000);
     expect(config.searchQueueMaxIntervalMs).toBe(1800000);
@@ -470,7 +472,7 @@ describe("loadConfig (parse engine behavior)", () => {
     await fs.writeFile(
       envFile,
       [
-        "SEARCH_ENABLED_ENGINES=duckduckgo_cb,bing_cb",
+        "SEARCH_ENABLED_ENGINES=duckduckgo,bing",
         'BROWSER_BACKEND="lightpanda"',
         "# commented = ignored",
         "SEARCH_QUEUE_MIN_INTERVAL_MS=45000"
@@ -479,14 +481,14 @@ describe("loadConfig (parse engine behavior)", () => {
     );
     process.env.NAVIGATOR_ENV_FILE = envFile;
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
-    vi.stubEnv("SEARCH_ENABLED_ENGINES", "google_cb");
+    vi.stubEnv("SEARCH_ENABLED_ENGINES", "google");
     vi.stubEnv("BROWSER_BACKEND", "chromium");
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
     delete process.env.NAVIGATOR_ENV_FILE;
     await fs.unlink(envFile);
 
-    expect(config.searchEnabledEngines).toEqual(["duckduckgo_cb", "bing_cb"]);
+    expect(config.searchEnabledEngines).toEqual(["duckduckgo", "bing"]);
     expect(config.defaultBackend).toBe("lightpanda");
     expect(config.searchQueueMinIntervalMs).toBe(45000);
   });

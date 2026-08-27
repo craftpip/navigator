@@ -34,9 +34,8 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class StartpageCbDriver extends BrowserSearchDriver {
-  id = "startpage_cb";
-  backend = "cloakbrowser";
+export class StartpageEngine extends BrowserSearchDriver {
+  id = "startpage";
   pool = "engine";
   homeUrl = "https://www.startpage.com/";
   inputSelectors = ["input#q", "input[name='query']"];

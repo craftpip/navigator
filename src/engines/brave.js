@@ -37,9 +37,8 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class BraveCbDriver extends BrowserSearchDriver {
-  id = "brave_cb";
-  backend = "cloakbrowser";
+export class BraveEngine extends BrowserSearchDriver {
+  id = "brave";
   pool = "engine";
   homeUrl = "https://search.brave.com/";
   inputSelectors = ["input#searchbox", "input[name='q']", "input[type='search']"];

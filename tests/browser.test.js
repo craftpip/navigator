@@ -88,8 +88,8 @@ describe("BrowserManager", () => {
   describe("getEnginePool", () => {
     it("creates a new pool for unknown engine", () => {
       const manager = new BrowserManager(makeConfig());
-      const pool = manager.getEnginePool("google_cb");
-      expect(pool).toHaveProperty("engine", "google_cb");
+      const pool = manager.getEnginePool("google");
+      expect(pool).toHaveProperty("engine", "google");
       expect(pool).toHaveProperty("windows");
       expect(Array.isArray(pool.windows)).toBe(true);
       expect(pool.windows.length).toBe(0);
@@ -100,15 +100,15 @@ describe("BrowserManager", () => {
 
     it("returns same pool for same engine", () => {
       const manager = new BrowserManager(makeConfig());
-      const pool1 = manager.getEnginePool("google_cb");
-      const pool2 = manager.getEnginePool("google_cb");
+      const pool1 = manager.getEnginePool("google");
+      const pool2 = manager.getEnginePool("google");
       expect(pool1).toBe(pool2);
     });
 
     it("normalizes engine key", () => {
       const manager = new BrowserManager(makeConfig());
-      const pool1 = manager.getEnginePool("  GOOGLE_CB  ");
-      const pool2 = manager.getEnginePool("google_cb");
+      const pool1 = manager.getEnginePool("  GOOGLE  ");
+      const pool2 = manager.getEnginePool("google");
       expect(pool1).toBe(pool2);
     });
 
@@ -120,8 +120,8 @@ describe("BrowserManager", () => {
 
     it("tracks separate pools for different engines", () => {
       const manager = new BrowserManager(makeConfig());
-      const pool1 = manager.getEnginePool("google_cb");
-      const pool2 = manager.getEnginePool("bing_lp");
+      const pool1 = manager.getEnginePool("google");
+      const pool2 = manager.getEnginePool("bing");
       expect(pool1).not.toBe(pool2);
       expect(manager.engineWorkingWindows.size).toBe(2);
     });
@@ -146,18 +146,18 @@ describe("BrowserManager", () => {
     it("includes stats for specific engine when scoped", () => {
       const manager = new BrowserManager(makeConfig());
       // Add a window to the pool
-      const pool = manager.getEnginePool("google_cb");
+      const pool = manager.getEnginePool("google");
       pool.windows.push({
         page: { isClosed: () => false },
         inUse: true,
         pending: false,
-        engine: "google_cb",
+        engine: "google",
       });
-      const stats = manager.buildWindowStats("google_cb");
+      const stats = manager.buildWindowStats("google");
       expect(stats.totalOpen).toBe(1);
       expect(stats.totalInUse).toBe(1);
-      expect(stats.byEngine["google_cb"].open).toBe(1);
-      expect(stats.byEngine["google_cb"].inUse).toBe(1);
+      expect(stats.byEngine["google"].open).toBe(1);
+      expect(stats.byEngine["google"].inUse).toBe(1);
     });
 
     it("prunes closed windows before counting", () => {
@@ -266,74 +266,63 @@ describe("BrowserManager", () => {
   });
 
   describe("_poolEngine", () => {
-    it("returns exact engine for cloakbrowser routes", () => {
+    it("returns engine name for engine-pool engines", () => {
       const manager = new BrowserManager(makeConfig({ defaultBackend: "cloakbrowser" }));
-      expect(manager._poolEngine("duckduckgo_cb")).toBe("duckduckgo_cb");
-      expect(manager._poolEngine("google_cb")).toBe("google_cb");
-      expect(manager._poolEngine("bing_cb")).toBe("bing_cb");
-      expect(manager._poolEngine("brave_cb")).toBe("brave_cb");
+      expect(manager._poolEngine("duckduckgo")).toBe("duckduckgo");
+      expect(manager._poolEngine("google")).toBe("google");
+      expect(manager._poolEngine("brave")).toBe("brave");
+      expect(manager._poolEngine("startpage")).toBe("startpage");
+      expect(manager._poolEngine("yahoo")).toBe("yahoo");
     });
 
-    it("returns exact engine for chromium routes", () => {
-      const manager = new BrowserManager(makeConfig({ defaultBackend: "chromium" }));
-      expect(manager._poolEngine("duckduckgo_ch")).toBe("duckduckgo_ch");
-      expect(manager._poolEngine("google_ch")).toBe("google_ch");
-    });
-
-    it("returns the engine key for cloakbrowser routes", () => {
-      const manager = new BrowserManager(makeConfig());
-      expect(manager._poolEngine("yahoo_cb")).toBe("yahoo_cb");
-    });
-
-    it("returns _shared for lightpanda routes", () => {
-      const manager = new BrowserManager(makeConfig());
-      expect(manager._poolEngine("bing_lp")).toBe("_shared");
-      expect(manager._poolEngine("google_lp")).toBe("_shared");
-      expect(manager._poolEngine("mojeek_lp")).toBe("_shared");
-    });
-
-    it("returns engine key for cloakbrowser default and known engines", () => {
+    it("returns _shared for shared-pool engines", () => {
       const manager = new BrowserManager(makeConfig({ defaultBackend: "cloakbrowser" }));
-      // non-listed engine should use the engine key via the defaultBackend check
+      expect(manager._poolEngine("bing")).toBe("_shared");
+      expect(manager._poolEngine("mojeek")).toBe("_shared");
+    });
+
+    it("returns engine key for unknown engine with cloakbrowser default", () => {
+      const manager = new BrowserManager(makeConfig({ defaultBackend: "cloakbrowser" }));
       const result = manager._poolEngine("some_engine");
       expect(result).toBe("some_engine");
     });
 
-    it("returns _shared for lightpanda default", () => {
+    it("returns _shared for unknown engine with non-chromium default", () => {
       const manager = new BrowserManager(makeConfig({ defaultBackend: "lightpanda" }));
       expect(manager._poolEngine("some_engine")).toBe("_shared");
+    });
+
+    it("returns engine name for unknown engine with chromium default", () => {
+      const manager = new BrowserManager(makeConfig({ defaultBackend: "chromium" }));
+      expect(manager._poolEngine("some_engine")).toBe("some_engine");
     });
   });
 
   describe("newPage engine dispatch", () => {
-    const cases = [
-      ["bing_cb", "cloakbrowser"],
-      ["brave_cb", "cloakbrowser"],
-      ["duckduckgo_cb", "cloakbrowser"],
-      ["google_cb", "cloakbrowser"],
-      ["yahoo_cb", "cloakbrowser"],
-      ["duckduckgo_ch", "chromium"],
-      ["google_ch", "chromium"],
-      ["bing_lp", "lightpanda"],
-      ["google_lp", "lightpanda"],
-      ["mojeek_lp", "lightpanda"],
-    ];
+    it("uses provided backend option", async () => {
+      const manager = new BrowserManager(makeConfig());
+      const pages = {
+        cloakbrowser: { id: "cb" },
+        chromium: { id: "ch" },
+        lightpanda: { id: "lp" },
+      };
+      manager._newCloakbrowserPage = vi.fn().mockResolvedValue(pages.cloakbrowser);
+      manager._newChromiumPage = vi.fn().mockResolvedValue(pages.chromium);
+      manager._newLightpandaPage = vi.fn().mockResolvedValue(pages.lightpanda);
 
-    for (const [engine, backend] of cases) {
-      it(`routes ${engine} through ${backend}`, async () => {
-        const manager = new BrowserManager(makeConfig());
-        const pages = {
-          cloakbrowser: { id: "cb" },
-          chromium: { id: "ch" },
-          lightpanda: { id: "lp" },
-        };
-        manager._newCloakbrowserPage = vi.fn().mockResolvedValue(pages.cloakbrowser);
-        manager._newChromiumPage = vi.fn().mockResolvedValue(pages.chromium);
-        manager._newLightpandaPage = vi.fn().mockResolvedValue(pages.lightpanda);
+      await expect(manager.newPage({ backend: "cloakbrowser" })).resolves.toBe(pages.cloakbrowser);
+      await expect(manager.newPage({ backend: "chromium" })).resolves.toBe(pages.chromium);
+      await expect(manager.newPage({ backend: "lightpanda" })).resolves.toBe(pages.lightpanda);
+    });
 
-        await expect(manager.newPage({ engine })).resolves.toBe(pages[backend]);
-      });
-    }
+    it("falls back to defaultBackend when no backend option", async () => {
+      const manager = new BrowserManager(makeConfig({ defaultBackend: "chromium" }));
+      const page = { id: "ch" };
+      manager._newChromiumPage = vi.fn().mockResolvedValue(page);
+
+      await expect(manager.newPage({})).resolves.toBe(page);
+      await expect(manager._newChromiumPage).toHaveBeenCalledOnce();
+    });
   });
 
   describe("backend isolation", () => {
@@ -365,7 +354,7 @@ describe("BrowserManager", () => {
     it("starts only the configured default backend and warms browser routes", async () => {
       const manager = new BrowserManager(makeConfig({
         defaultBackend: "cloakbrowser",
-        searchRouteWarmupEngines: ["google_cb", "bing_lp"]
+        searchRouteWarmupEngines: ["google", "bing"]
       }));
       manager.getCloakbrowserBrowser = vi.fn().mockResolvedValue({});
       manager.getBrowser = vi.fn();
@@ -376,11 +365,11 @@ describe("BrowserManager", () => {
       expect(manager.getCloakbrowserBrowser).toHaveBeenCalledOnce();
       expect(manager.getBrowser).not.toHaveBeenCalled();
       expect(manager.ensureMinWorkingWindows).toHaveBeenCalledWith(
-        "google_cb",
+        "google",
         expect.objectContaining({ reason: "warmup" })
       );
       expect(manager.ensureMinWorkingWindows).toHaveBeenCalledWith(
-        "bing_lp",
+        "bing",
         expect.objectContaining({ reason: "warmup" })
       );
     });
@@ -394,7 +383,7 @@ describe("BrowserManager", () => {
 
     it("returns searchMaxWorkingWindows for non-shared pool", () => {
       const manager = new BrowserManager(makeConfig({ searchMaxWorkingWindows: 10 }));
-      expect(manager._poolMaxWindows("google_cb")).toBe(10);
+      expect(manager._poolMaxWindows("google")).toBe(10);
     });
 
     it("keeps the Lightpanda shared pool to one page with chromium", () => {
@@ -424,19 +413,19 @@ describe("BrowserManager", () => {
   });
 
   describe("acquireSearchWindow", () => {
-    it("preserves the Lightpanda engine while using its shared pool", async () => {
+    it("preserves the engine while using its shared pool", async () => {
       const manager = new BrowserManager(makeConfig({ searchKeepMinWorkingWindows: 0 }));
       const page = { isClosed: () => false, on: vi.fn() };
       manager.ensureMinWorkingWindows = vi.fn();
       manager.newPage = vi.fn().mockResolvedValue(page);
 
-      await manager.acquireSearchWindow("bing_lp");
+      await manager.acquireSearchWindow("bing");
 
       expect(manager.ensureMinWorkingWindows).toHaveBeenCalledWith(
-        "bing_lp",
+        "bing",
         expect.any(Object)
       );
-      expect(manager.newPage).toHaveBeenCalledWith({ engine: "bing_lp" });
+      expect(manager.newPage).toHaveBeenCalledWith({ engine: "bing" });
       expect(manager.getEnginePool("_shared").windows[0].page).toBe(page);
     });
 
@@ -455,8 +444,8 @@ describe("BrowserManager", () => {
         .mockResolvedValueOnce(firstPage)
         .mockResolvedValueOnce(replacementPage);
 
-      await manager.acquireSearchWindow("google_cb");
-      const queued = manager.acquireSearchWindow("google_cb");
+      await manager.acquireSearchWindow("google");
+      const queued = manager.acquireSearchWindow("google");
       await Promise.resolve();
       handlers.get("close")();
 
@@ -473,8 +462,8 @@ describe("BrowserManager", () => {
         .mockRejectedValueOnce(new Error("browser unavailable"))
         .mockResolvedValueOnce(replacementPage);
 
-      const first = manager.acquireSearchWindow("google_cb");
-      const queued = manager.acquireSearchWindow("google_cb");
+      const first = manager.acquireSearchWindow("google");
+      const queued = manager.acquireSearchWindow("google");
 
       await expect(first).rejects.toThrow("browser unavailable");
       await expect(queued).resolves.toBe(replacementPage);
@@ -489,10 +478,10 @@ describe("BrowserManager", () => {
       }));
       const close = vi.fn().mockResolvedValue(undefined);
       const page = { isClosed: () => false, close };
-      const pool = manager.getEnginePool("google_cb");
-      pool.windows.push({ page, inUse: true, pending: false, persistent: true, engine: "google_cb" });
+      const pool = manager.getEnginePool("google");
+      pool.windows.push({ page, inUse: true, pending: false, persistent: true, engine: "google" });
 
-      await manager.releaseSearchWindow("google_cb", page);
+      await manager.releaseSearchWindow("google", page);
 
       expect(close).toHaveBeenCalledOnce();
       expect(pool.windows).toEqual([]);
@@ -514,7 +503,7 @@ describe("BrowserManager", () => {
 
     it("relaunches an active graphical search backend when the default is Lightpanda", async () => {
       const manager = new BrowserManager(makeConfig({ defaultBackend: "lightpanda", devtoolsBackend: "cloakbrowser" }));
-      const cloakPool = manager.getEnginePool("google_cb");
+      const cloakPool = manager.getEnginePool("google");
       cloakPool.windows.push({ backend: "cloakbrowser", page: { isClosed: () => false } });
       const previousBrowser = { close: vi.fn().mockResolvedValue(undefined) };
       manager.cloakbrowserBrowser = previousBrowser;
@@ -538,9 +527,9 @@ describe("BrowserManager", () => {
       const page = { isClosed: () => false, on: vi.fn(), goto: vi.fn() };
       manager.newPage = vi.fn().mockResolvedValue(page);
 
-      await manager.ensureMinWorkingWindows("bing_lp");
+      await manager.ensureMinWorkingWindows("bing");
 
-      expect(manager.newPage).toHaveBeenCalledWith({ engine: "bing_lp" });
+      expect(manager.newPage).toHaveBeenCalledWith({ engine: "bing" });
       expect(manager.getEnginePool("_shared").windows).toHaveLength(1);
     });
   });
@@ -682,19 +671,19 @@ describe("BrowserManager", () => {
 
     it("includes pool stats per engine", async () => {
       const manager = new BrowserManager(makeConfig());
-      const pool = manager.getEnginePool("google_cb");
+      const pool = manager.getEnginePool("google");
       pool.windows.push({
         page: { isClosed: () => false },
         inUse: true,
         pending: false,
         persistent: true,
-        engine: "google_cb",
+        engine: "google",
       });
       const health = await manager.getHealth();
       expect(health.searchWindows.total).toBe(1);
-      expect(health.searchWindows.byEngine["google_cb"]).toBeDefined();
-      expect(health.searchWindows.byEngine["google_cb"].total).toBe(1);
-      expect(health.searchWindows.byEngine["google_cb"].inUse).toBe(1);
+      expect(health.searchWindows.byEngine["google"]).toBeDefined();
+      expect(health.searchWindows.byEngine["google"].total).toBe(1);
+      expect(health.searchWindows.byEngine["google"].inUse).toBe(1);
     });
   });
 

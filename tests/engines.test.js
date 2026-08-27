@@ -10,8 +10,6 @@ import { POOL_POLICIES } from "../src/engines/driver.js";
 import { DuckDuckGoApiDriver } from "../src/engines/duckduckgo-api.js";
 import { normalizeQueryText, normalizeUrl } from "../src/engines/util.js";
 
-const KNOWN_BACKENDS = new Set(["api", "cloakbrowser", "chromium", "lightpanda"]);
-
 function makeFakePage(dom, url = "https://duckduckgo.com/") {
   return {
     async evaluate(fn) {
@@ -34,19 +32,11 @@ afterEach(() => {
 });
 
 describe("engine registry", () => {
-  it("registers all 16 internal routes", () => {
+  it("registers all 12 internal routes", () => {
     expect([...SUPPORTED_ENGINES]).toEqual([
-      "bing_cb", "bing_lp",
-      "brave_cb",
-      "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch",
-      "exa_api",
-      "firecrawl_api",
-      "linkup_api",
-      "tavily_api",
-      "google_cb", "google_ch", "google_lp",
-      "mojeek_lp",
-      "startpage_cb",
-      "yahoo_cb",
+      "duckduckgo", "duckduckgo_api", "google", "bing", "brave",
+      "mojeek", "startpage", "yahoo",
+      "exa_api", "firecrawl_api", "linkup_api", "tavily_api",
     ]);
   });
 
@@ -66,14 +56,12 @@ describe("driver contract", () => {
     it(`validates ${id}`, () => {
       const metadata = getEngineMetadata(id);
       expect(metadata).not.toBeNull();
-      expect(KNOWN_BACKENDS.has(metadata.backend)).toBe(true);
-      expect(metadata.isBrowser).toBe(metadata.backend !== "api");
+      expect(typeof metadata.isBrowser).toBe("boolean");
 
       const driver = getEngineDriver(id, {});
       expect(driver.id).toBe(id);
-      expect(driver.backend).toBe(metadata.backend);
 
-      if (metadata.backend === "api") {
+      if (!metadata.isBrowser) {
         expect(metadata.pool).toBeNull();
         expect(metadata.homeUrl).toBeNull();
         expect(driver.pool).toBeNull();
@@ -93,7 +81,7 @@ describe("driver contract", () => {
 
 describe("browser driver extraction", () => {
   const cases = {
-    duckduckgo_cb: {
+    duckduckgo: {
       html: `
         <article data-testid="result">
           <a data-testid="result-title-a" href="https://example.com/one">Duck Example One</a>
@@ -106,7 +94,7 @@ describe("browser driver extraction", () => {
       snippet: "Duck snippet one.",
       answer: "The instant answer text.",
     },
-    google_cb: {
+    google: {
       html: `
         <div id="search">
           <div class="MjjYud">
@@ -121,7 +109,7 @@ describe("browser driver extraction", () => {
       snippet: "Google snippet two.",
       answer: "Google direct answer.",
     },
-    bing_cb: {
+    bing: {
       html: `
         <ol id="b_results">
           <li class="b_algo">
@@ -136,7 +124,7 @@ describe("browser driver extraction", () => {
       snippet: "Bing snippet three.",
       answer: "Bing answer text.",
     },
-    brave_cb: {
+    brave: {
       html: `
         <div id="results">
           <div class="snippet" data-type="web">
@@ -157,7 +145,7 @@ describe("browser driver extraction", () => {
       snippet: "Brave snippet four.",
       answer: "Brave AI answer.",
     },
-    mojeek_lp: {
+    mojeek: {
       html: `
         <ul class="results-standard">
           <li>
@@ -172,7 +160,7 @@ describe("browser driver extraction", () => {
       snippet: "Mojeek snippet five.",
       answer: "Mojeek infobox answer.",
     },
-    yahoo_cb: {
+    yahoo: {
       html: `
         <div id="web">
           <ol>
@@ -197,7 +185,7 @@ describe("browser driver extraction", () => {
       snippet: "Yahoo snippet six.",
       answer: "Yahoo card answer.",
     },
-    startpage_cb: {
+    startpage: {
       html: `
         <main>
           <div class="result">
@@ -244,32 +232,10 @@ describe("browser driver extraction", () => {
     });
   }
 
-  it("extracts google_lp with the Lightpanda selector variant", async () => {
-    const dom = domFromHtml(`
-      <div id="search">
-        <div class="g">
-          <a jsname="x" href="https://example.com/x"><h3>LP Google Example</h3></a>
-          <div class="VwiC3b">LP snippet.</div>
-        </div>
-      </div>
-    `);
-    try {
-      const driver = getEngineDriver("google_lp", {});
-      const page = makeFakePage(dom, "https://www.google.com/search");
-      const { results } = await driver.extract(page);
-
-      expect(results.length).toBe(1);
-      expect(results[0].title).toBe("LP Google Example");
-      expect(results[0].url).toBe("https://example.com/x");
-    } finally {
-      dom.window.close();
-    }
-  });
-
   it("handles pages with no results", async () => {
     const dom = domFromHtml("<div>nothing here</div>");
     try {
-      const driver = getEngineDriver("bing_cb", {});
+      const driver = getEngineDriver("bing", {});
       const page = makeFakePage(dom);
       const { results, directAnswers } = await driver.extract(page);
       expect(results).toEqual([]);
@@ -279,7 +245,7 @@ describe("browser driver extraction", () => {
     }
   });
 
-  it("yahoo_cb filters out non-result li blocks (related searches)", async () => {
+  it("yahoo filters out non-result li blocks (related searches)", async () => {
     const dom = domFromHtml(`
       <div id="web">
         <ol>
@@ -307,7 +273,7 @@ describe("browser driver extraction", () => {
       </div>
     `);
     try {
-      const driver = getEngineDriver("yahoo_cb", {});
+      const driver = getEngineDriver("yahoo", {});
       const page = makeFakePage(dom, "https://search.yahoo.com/search?p=test");
       const { results } = await driver.extract(page);
       expect(results).toHaveLength(2);
@@ -353,10 +319,10 @@ describe("api drivers", () => {
 });
 
 describe("browser driver block detection", () => {
-  it("duckduckgo_cb throws on an anomaly/bot page", async () => {
+  it("duckduckgo throws on an anomaly/bot page", async () => {
     const dom = domFromHtml('<div id="anomaly-modal"><h1>unusual traffic</h1></div>');
     try {
-      const driver = getEngineDriver("duckduckgo_cb", {});
+      const driver = getEngineDriver("duckduckgo", {});
       const page = makeFakePage(dom, "https://duckduckgo.com/?q=test");
       await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
     } finally {
@@ -364,10 +330,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("duckduckgo_cb passes on a normal results page", async () => {
+  it("duckduckgo passes on a normal results page", async () => {
     const dom = domFromHtml('<article data-testid="result"><a href="https://x.example">x</a></article>');
     try {
-      const driver = getEngineDriver("duckduckgo_cb", {});
+      const driver = getEngineDriver("duckduckgo", {});
       const page = makeFakePage(dom, "https://duckduckgo.com/?q=test");
       await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
     } finally {
@@ -375,10 +341,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("bing_cb throws on a CAPTCHA/verification page", async () => {
+  it("bing throws on a CAPTCHA/verification page", async () => {
     const dom = domFromHtml('<div>Please verify you are a human — captcha required.</div>');
     try {
-      const driver = getEngineDriver("bing_cb", {});
+      const driver = getEngineDriver("bing", {});
       const page = makeFakePage(dom, "https://www.bing.com/search");
       await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
     } finally {
@@ -386,10 +352,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("bing_cb passes on a normal results page", async () => {
+  it("bing passes on a normal results page", async () => {
     const dom = domFromHtml('<ol id="b_results"><li class="b_algo"><h2><a href="https://y.example">y</a></h2></li></ol>');
     try {
-      const driver = getEngineDriver("bing_cb", {});
+      const driver = getEngineDriver("bing", {});
       const page = makeFakePage(dom, "https://www.bing.com/search");
       await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
     } finally {
@@ -397,10 +363,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("mojeek_lp throws on a CAPTCHA challenge page", async () => {
+  it("mojeek throws on a CAPTCHA challenge page", async () => {
     const dom = domFromHtml('<title>Captcha</title><p>JavaScript is required to complete this challenge. Please enable it and reload the page.</p>');
     try {
-      const driver = getEngineDriver("mojeek_lp", {});
+      const driver = getEngineDriver("mojeek", {});
       const page = makeFakePage(dom, "https://www.mojeek.com/search?q=test");
       await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
     } finally {
@@ -408,10 +374,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("mojeek_lp passes on a normal results page", async () => {
+  it("mojeek passes on a normal results page", async () => {
     const dom = domFromHtml('<ul class="results-standard"><li><h2><a class="title" href="https://z.example">z</a></h2><p class="s">Mojeek snippet.</p></li></ul>');
     try {
-      const driver = getEngineDriver("mojeek_lp", {});
+      const driver = getEngineDriver("mojeek", {});
       const page = makeFakePage(dom, "https://www.mojeek.com/search?q=test");
       await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
     } finally {
@@ -419,10 +385,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("yahoo_cb throws on a CAPTCHA/verification page", async () => {
+  it("yahoo throws on a CAPTCHA/verification page", async () => {
     const dom = domFromHtml('<div>We have detected unusual traffic. Please verify you are a human.</div>');
     try {
-      const driver = getEngineDriver("yahoo_cb", {});
+      const driver = getEngineDriver("yahoo", {});
       const page = makeFakePage(dom, "https://search.yahoo.com/search?p=test");
       await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
     } finally {
@@ -430,10 +396,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("yahoo_cb passes on a normal results page", async () => {
+  it("yahoo passes on a normal results page", async () => {
     const dom = domFromHtml('<div id="web"><ol><li class="first"><div class="compTitle"><a data-matarget="algo" href="https://w.example">w</a><h3 class="title"><span>w</span></h3></div></li></ol></div>');
     try {
-      const driver = getEngineDriver("yahoo_cb", {});
+      const driver = getEngineDriver("yahoo", {});
       const page = makeFakePage(dom, "https://search.yahoo.com/search?p=test");
       await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
     } finally {
@@ -441,10 +407,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("startpage_cb throws on a CAPTCHA/verification page", async () => {
+  it("startpage throws on a CAPTCHA/verification page", async () => {
     const dom = domFromHtml('<title>Blocked</title><p>Please verify you are human — captcha required.</p>');
     try {
-      const driver = getEngineDriver("startpage_cb", {});
+      const driver = getEngineDriver("startpage", {});
       const page = makeFakePage(dom, "https://www.startpage.com/sp/search?query=test");
       await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
     } finally {
@@ -452,10 +418,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("startpage_cb passes on a normal results page", async () => {
+  it("startpage passes on a normal results page", async () => {
     const dom = domFromHtml('<main><div class="result"><a class="result-link" href="https://s.example"><h2 class="wgl-title">s</h2></a></div></main>');
     try {
-      const driver = getEngineDriver("startpage_cb", {});
+      const driver = getEngineDriver("startpage", {});
       const page = makeFakePage(dom, "https://www.startpage.com/sp/search?query=test");
       await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
     } finally {
@@ -463,10 +429,10 @@ describe("browser driver block detection", () => {
     }
   });
 
-  it("startpage_cb retries a transient execution-context-destroyed error", async () => {
+  it("startpage retries a transient execution-context-destroyed error", async () => {
     const dom = domFromHtml('<main><div class="result"><a class="result-link" href="https://s.example"><h2 class="wgl-title">s</h2></a></div></main>');
     try {
-      const driver = getEngineDriver("startpage_cb", { browserOpTimeoutMs: 5000 });
+      const driver = getEngineDriver("startpage", { browserOpTimeoutMs: 5000 });
       let calls = 0;
       const page = {
         async evaluate(fn) {
@@ -478,15 +444,15 @@ describe("browser driver block detection", () => {
       };
       const { results } = await driver.extract(page);
       expect(calls).toBe(2);
-      expect(results[0].engine).toBe("startpage_cb");
+      expect(results[0].engine).toBe("startpage");
       expect(results[0].title).toBe("s");
     } finally {
       dom.window.close();
     }
   });
 
-  it("startpage_cb does not retry non-navigation errors", async () => {
-    const driver = getEngineDriver("startpage_cb", { browserOpTimeoutMs: 5000 });
+  it("startpage does not retry non-navigation errors", async () => {
+    const driver = getEngineDriver("startpage", { browserOpTimeoutMs: 5000 });
     let calls = 0;
     const page = {
       async evaluate() {
@@ -500,9 +466,9 @@ describe("browser driver block detection", () => {
   });
 });
 
-describe("startpage_cb search URL", () => {
+describe("startpage search URL", () => {
   it("builds a query-encoded /sp/search URL", () => {
-    const driver = getEngineDriver("startpage_cb", {});
+    const driver = getEngineDriver("startpage", {});
     expect(driver.searchUrl("test query")).toBe("https://www.startpage.com/sp/search?query=test%20query");
     expect(driver.searchUrl("a+b&c")).toBe("https://www.startpage.com/sp/search?query=a%2Bb%26c");
   });
@@ -511,9 +477,9 @@ describe("startpage_cb search URL", () => {
 describe("browser warmup filtering", () => {
   it("keeps only browser routes, in order, deduplicated", () => {
     expect(getBrowserWarmupEngines([
-      "duckduckgo_api", "bing_cb", "bing_cb",
-      "google_ch", "duckduckgo_cb", "unknown_engine", "",
-    ])).toEqual(["bing_cb", "google_ch", "duckduckgo_cb"]);
+      "duckduckgo_api", "bing", "bing",
+      "google", "duckduckgo", "unknown_engine", "",
+    ])).toEqual(["bing", "google", "duckduckgo"]);
   });
 
   it("returns an empty array for no browser routes", () => {

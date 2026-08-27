@@ -230,8 +230,8 @@ describe("mcp-server HTTP endpoints", () => {
       const searchMod = await import("../src/search.js");
       searchMod.getEngineAttemptStats.mockReturnValue({
         total: 4, ok: 3, fail: 1, skip: 0,
-        byEngine: { bing_lp: { total: 1, ok: 0, fail: 1, skip: 0 } },
-        recentFailures: [{ minutesAgo: 0, engine: "bing_lp", error: "captcha detected" }],
+        byEngine: { bing: { total: 1, ok: 0, fail: 1, skip: 0 } },
+        recentFailures: [{ minutesAgo: 0, engine: "bing", error: "captcha detected" }],
       });
 
       const res = await fetch(`${MCP_BASE}/stats`);
@@ -241,7 +241,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body.requests).toHaveProperty("byTool");
       expect(body.engineAttempts).toMatchObject({
         total: 4, ok: 3, fail: 1, skip: 0,
-        recentFailures: [{ minutesAgo: 0, engine: "bing_lp", error: "captcha detected" }],
+        recentFailures: [{ minutesAgo: 0, engine: "bing", error: "captcha detected" }],
       });
       expect(body.engineProfiles).toEqual([]);
     });
@@ -250,9 +250,9 @@ describe("mcp-server HTTP endpoints", () => {
   describe("POST /engines/reset", () => {
     it("resets one scheduler profile", async () => {
       const searchMod = await import("../src/search.js");
-      const res = await fetch(`${MCP_BASE}/engines/reset`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "bing_lp" }) });
+      const res = await fetch(`${MCP_BASE}/engines/reset`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "bing" }) });
       expect(res.status).toBe(200);
-      expect(searchMod.resetSearchEngine).toHaveBeenCalledWith("bing_lp");
+      expect(searchMod.resetSearchEngine).toHaveBeenCalledWith("bing");
     });
 
     it("resets every scheduler profile through the all endpoint", async () => {
@@ -307,7 +307,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body.engines.length).toBeGreaterThan(0);
       expect(body.availableEngines.length).toBeGreaterThanOrEqual(body.engines.length);
       const ddgApi = body.engines.find((e) => e.id === "duckduckgo_api");
-      expect(ddgApi).toMatchObject({ backend: "api", isBrowser: false });
+      expect(ddgApi).toMatchObject({ isBrowser: false });
       expect(body.tools).toContain("web_search");
       expect(body.tools).toContain("Target.createTarget");
       expect(body.package).toMatchObject({ name: "navigator-mcp" });
@@ -953,14 +953,14 @@ describe("mcp-server HTTP endpoints", () => {
         jsonrpc: "2.0", id: 160, method: "tools/call",
         params: {
           name: "web_search",
-          arguments: { query: "explicit route", engine: "duckduckgo_ch" },
+          arguments: { query: "explicit route", engine: "duckduckgo" },
         },
       });
 
       expect(status).toBe(200);
       expect(body.result.content[0].text).toContain("Explicit Result");
       expect(searchMod.browserSearch).toHaveBeenCalledWith(
-        expect.objectContaining({ engines: ["duckduckgo_ch"] })
+        expect.objectContaining({ engines: ["duckduckgo"] })
       );
     });
 
@@ -1751,7 +1751,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(names).not.toContain("DOM.querySelector");
     });
 
-    it("returns the six public search and page tools (including web_page_svg)", async () => {
+    it("returns the seven public search, page, and browser tools (including web_page_svg and list_browsers)", async () => {
       const { status, body } = await mcpPost({
         jsonrpc: "2.0", id: 51, method: "tools/list",
       });
@@ -1765,6 +1765,7 @@ describe("mcp-server HTTP endpoints", () => {
         "web_page_links",
         "web_page_ascii",
         "web_page_svg",
+        "list_browsers",
       ]);
     });
   });

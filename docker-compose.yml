@@ -23,7 +23,7 @@ services:
       # All configuration is defined in the .env file (see .env.example).
       # These entries read from it and fall back to sane defaults when unset.
       HEADLESS: ${HEADLESS:-true}
-      BROWSER_BACKEND: ${BROWSER_BACKEND:-cloakbrowser}
+      BROWSERS: '${BROWSERS:-[{"name":"chromium","role":["default"]}]}'
       BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36}
       ENABLE_VNC: ${ENABLE_VNC:-1}
       ENABLE_WEB_CONSOLE: ${ENABLE_WEB_CONSOLE:-1}
@@ -31,7 +31,6 @@ services:
       MCP_API_KEYS: ${MCP_API_KEYS:-}
       MCP_ALLOW_UNAUTHENTICATED: ${MCP_ALLOW_UNAUTHENTICATED:-1}
       ENABLE_DEVTOOLS_MCP: ${ENABLE_DEVTOOLS_MCP:-1}
-      DEVTOOLS_BROWSER_BACKEND: ${DEVTOOLS_BROWSER_BACKEND:-${BROWSER_BACKEND:-cloakbrowser}}
       MCP_API_PORT: ${MCP_API_PORT:-1994}
       BROWSER_OP_TIMEOUT_MS: ${BROWSER_OP_TIMEOUT_MS:-25000}
       NAV_WAIT_UNTIL: ${NAV_WAIT_UNTIL:-domcontentloaded}

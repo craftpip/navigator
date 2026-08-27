@@ -4,8 +4,9 @@ import { formatLabel } from "../../lib/format.js";
 import { Pill } from "../../components/ui.jsx";
 
 const MANAGE_GROUPS = [
-  { label: "Browser Defaults", detail: "Shared defaults for direct page tools and DevTools.", keys: ["BROWSER_BACKEND", "DEVTOOLS_BROWSER_BACKEND", "BROWSER_USER_AGENT", "BROWSER_OP_TIMEOUT_MS"] },
-  { label: "Backend Installations", detail: "Executable and profile settings for Chromium, Cloakbrowser, and Lightpanda.", keys: ["CHROME_PATH", "CHROME_USER_DATA_DIR", "CHROME_PROFILE_DIR", "CLOAKBROWSER_BINARY_PATH", "LIGHTPANDA_PATH", "LIGHTPANDA_PORT"] },
+  { label: "Browser Array", detail: "JSON array of browser entries with role-based routing. Replaces BROWSER_BACKEND and DEVTOOLS_BROWSER_BACKEND.", keys: ["BROWSERS"] },
+  { label: "Browser Defaults", detail: "User agent and operation timeout for all browsers.", keys: ["BROWSER_USER_AGENT", "BROWSER_OP_TIMEOUT_MS"] },
+  { label: "Backend Installations", detail: "Executable and profile settings for built-in Chromium.", keys: ["CHROME_PATH", "CHROME_USER_DATA_DIR", "CHROME_PROFILE_DIR"] },
   { label: "Browser Startup And Desktop Access", detail: "VNC toggles HEADLESS automatically; use the header VNC action to change them together.", keys: ["PRELAUNCH_BROWSER", "STARTUP_URL", "HEADLESS", "ENABLE_VNC", "VNC_PORT", "NOVNC_PORT"] },
   { label: "Search Route Availability", detail: "Eligible engines, startup warming, route cooldowns, and browser-window capacity.", keys: ["SEARCH_ENABLED_ENGINES", "SEARCH_ROUTE_WARMUP_ENGINES", "SEARCH_ROUTE_CIRCUIT_OPEN_MS", "SEARCH_KEEP_MIN_WORKING_WINDOWS", "SEARCH_MAX_WORKING_WINDOWS"] },
   { label: "Search Scheduler", detail: "How select_best scores, backs off, and recovers eligible engines.", keys: ["SEARCH_QUEUE_MIN_INTERVAL_MS", "SEARCH_QUEUE_MAX_INTERVAL_MS", "SEARCH_QUEUE_ESCALATION_FACTOR", "SEARCH_QUEUE_ERROR_GAP_PERCENTILE", "SEARCH_QUEUE_ERROR_GAP_SAFETY", "SEARCH_QUEUE_DECAY_PER_SUCCESS", "SEARCH_QUEUE_W_SUCCESS", "SEARCH_QUEUE_W_RESULTS", "SEARCH_QUEUE_W_STABILITY", "SEARCH_QUEUE_W_RECENCY", "SEARCH_QUEUE_W_RECOVERY"] },
@@ -327,6 +328,156 @@ function PostProcessorModelsEditor({ value, onChange, ok, message }) {
   );
 }
 
+const BROWSER_ROLES = ["default", "search", "fetch", "screenshot", "devtools"];
+const BROWSER_EMPTY_ENTRY = { name: "", role: [], index: 0, cdpUrl: "", connect: "" };
+
+function parseBrowsersEntries(rawValue) {
+  try {
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed) ? parsed.map((e) => ({
+      name: e.name || "",
+      role: Array.isArray(e.role) ? e.role : [],
+      index: typeof e.index === "number" ? e.index : 0,
+      cdpUrl: e.cdpUrl || "",
+      connect: e.connect || "",
+      addOn: Boolean(e.addOn),
+    })) : [];
+  } catch { return []; }
+}
+
+function serializeBrowsersEntries(entries) {
+  return JSON.stringify(entries.map((e, i) => {
+    const out = { name: e.name, role: e.role, index: i };
+    if (e.cdpUrl) out.cdpUrl = e.cdpUrl;
+    if (e.connect) out.connect = e.connect;
+    return out;
+  }), null, 2);
+}
+
+function BrowserArrayEditor({ value, onChange, ok, message }) {
+  const [showJson, setShowJson] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState(value || "[]");
+  const [jsonError, setJsonError] = useState("");
+  const entries = parseBrowsersEntries(value || "[]");
+
+  const patch = (nextEntries) => {
+    const serialized = serializeBrowsersEntries(nextEntries);
+    setJsonDraft(serialized);
+    onChange(serialized);
+  };
+  const updateEntry = (index, field, fieldValue) => {
+    const next = entries.map((e, i) => i === index ? { ...e, [field]: fieldValue } : e);
+    patch(next);
+  };
+  const toggleRole = (index, role) => {
+    const e = entries[index];
+    const roles = e.role || [];
+    const next = roles.includes(role) ? roles.filter((r) => r !== role) : [...roles, role];
+    updateEntry(index, "role", next);
+  };
+  const addEntry = () => patch([...entries, { ...BROWSER_EMPTY_ENTRY }]);
+  const removeEntry = (index) => patch(entries.filter((_, i) => i !== index));
+  const duplicateEntry = (index) => {
+    const e = { ...entries[index], name: entries[index].name + "_copy" };
+    const next = [...entries];
+    next.splice(index + 1, 0, e);
+    patch(next);
+  };
+  const moveEntry = (index, dir) => {
+    const next = [...entries];
+    const swap = index + dir;
+    if (swap < 0 || swap >= next.length) return;
+    [next[index], next[swap]] = [next[swap], next[index]];
+    patch(next);
+  };
+
+  const switchToJson = () => { setJsonDraft(value || "[]"); setJsonError(""); setShowJson(true); };
+  const switchToForm = () => {
+    try { JSON.parse(jsonDraft); } catch (e) { setJsonError(`Invalid JSON: ${e.message}`); return; }
+    setJsonError(""); setShowJson(false);
+    if (jsonDraft !== value) onChange(jsonDraft);
+  };
+
+  return (
+    <div className="pp-editor">
+      <div className="pp-toolbar">
+        <button className="button small" onClick={showJson ? switchToForm : switchToJson}>
+          {showJson ? "Form view" : "JSON view"}
+        </button>
+        {!showJson && <button className="button small" onClick={addEntry}>+ Add browser</button>}
+        {!ok && <span className="field-error">{message}</span>}
+      </div>
+      {showJson ? (
+        <div className="pp-json-pane">
+          <textarea
+            className={`pp-json-textarea ${jsonError ? "invalid" : ""}`}
+            rows={Math.max(6, (jsonDraft.split("\n").length || 1) + 1)}
+            value={jsonDraft}
+            spellCheck={false}
+            onChange={(e) => { setJsonDraft(e.target.value); setJsonError(""); }}
+          />
+          {jsonError && <div className="field-error">{jsonError}</div>}
+        </div>
+      ) : (
+        <div className="pp-cards">
+          {entries.length === 0 && <div className="pp-empty">No browsers configured. Chromium is always present. Click "+ Add browser" to add one.</div>}
+          {entries.map((entry, index) => (
+            <div key={index} className="pp-card">
+              <div className="pp-card-header">
+                <div className="pp-card-title">
+                  <span>{entry.name || `Browser ${index + 1}`}</span>
+                  {entry.cdpUrl && <small className="pp-card-url">addon</small>}
+                </div>
+                <div className="pp-card-actions">
+                  <button className="button small" onClick={() => moveEntry(index, -1)} disabled={index === 0} title="Move up">↑</button>
+                  <button className="button small" onClick={() => moveEntry(index, 1)} disabled={index === entries.length - 1} title="Move down">↓</button>
+                  {entry.name !== "chromium" && (
+                    <>
+                      <button className="button small" onClick={() => duplicateEntry(index)} title="Duplicate">⧉</button>
+                      <button className="button small danger" onClick={() => removeEntry(index)} title="Remove">&times;</button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="pp-card-fields">
+                <div className="pp-field-row">
+                  <label>Name *<input className="config-input" value={entry.name} onChange={(e) => updateEntry(index, "name", e.target.value)} placeholder="chromium" /></label>
+                </div>
+                <div className="pp-field-row">
+                  <span className="pp-field-label">ROLES:</span>
+                  <div className="pp-checkbox-group">
+                    {BROWSER_ROLES.map((role) => (
+                      <span key={role} className="pp-checkbox" onClick={() => toggleRole(index, role)}>
+                        <input type="checkbox" checked={(entry.role || []).includes(role)} readOnly tabIndex={-1} />
+                        {role}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                {entry.name !== "chromium" && (
+                  <div className="pp-field-row">
+                    <label>CDP URL (add-on)<input className="config-input" value={entry.cdpUrl || ""} onChange={(e) => updateEntry(index, "cdpUrl", e.target.value)} placeholder="http://host:9222" /></label>
+                  </div>
+                )}
+                {entry.cdpUrl && (
+                  <div className="pp-field-row">
+                    <label>Connect driver<select className="config-input" value={entry.connect || ""} onChange={(e) => updateEntry(index, "connect", e.target.value)}>
+                      <option value="">auto-detect</option>
+                      <option value="chromium">chromium</option>
+                      <option value="cloakbrowser">cloakbrowser</option>
+                      <option value="lightpanda">lightpanda</option>
+                    </select></label>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const DEFAULT_FORMATS = [
   "trafilatura_to_markdown",
   "readability_to_markdown",
@@ -384,6 +535,33 @@ function ValueControl({ entry, value, changed, engines, tools, postProcessorMode
         ok={ok}
         message={message}
       />
+    );
+  }
+  if (entry.key === "BROWSERS") {
+    return (
+      <BrowserArrayEditor
+        value={value}
+        onChange={onChange}
+        ok={ok}
+        message={message}
+      />
+    );
+  }
+  if (type === "json") {
+    let jsonError = "";
+    try { JSON.parse(value || "[]"); } catch (e) { jsonError = e.message; }
+    return (
+      <>
+        <textarea
+          className={`config-input pp-textarea ${changed ? "changed" : ""} ${jsonError ? "invalid" : ""}`}
+          rows={Math.max(4, (String(value || "").split("\n").length || 1) + 1)}
+          value={value}
+          spellCheck={false}
+          onChange={(event) => onChange(event.target.value)}
+          aria-label={`${entry.key} JSON value`}
+        />
+        {jsonError && <div className="field-error">Invalid JSON: {jsonError}</div>}
+      </>
     );
   }
   if (type === "engines") {
@@ -447,6 +625,11 @@ function normalizeDraftValue(entry, value) {
     if (raw === "1" || raw === "true") return "true";
     if (raw === "0" || raw === "false") return "false";
     return String(value);
+  }
+  if (entry.type === "json") {
+    if (Array.isArray(value)) return JSON.stringify(value, null, 2);
+    if (typeof value === "object" && value !== null) return JSON.stringify(value, null, 2);
+    return String(value ?? "");
   }
   return Array.isArray(value) ? value.join(",") : String(value ?? "");
 }
@@ -721,6 +904,7 @@ export {
   parseEntries,
   serializeEntries,
   PostProcessorModelsEditor,
+  BrowserArrayEditor,
   ValueControl,
   normalizeDraftValue,
   compareDraftValue,

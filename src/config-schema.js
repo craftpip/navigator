@@ -1,20 +1,20 @@
 import { DEFAULT_SEARCH_ENABLED_ENGINES } from "./config.js";
 
 export const CONFIG_SCHEMA = [
-  { key: "BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", description: "Primary browser backend for page fetch/screenshot." },
-  { key: "DEVTOOLS_BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", description: "Backend used by the devtools testing tools." },
+  { key: "BROWSERS", category: "backend", type: "json", fallback: '[{"name":"chromium","role":["default"]}]', applies: "recreate", description: 'JSON array of browser entries. Each entry: {name, role:[], index, cdpUrl?, connect?}. Roles: "default" (everything), "search" (web_search), "fetch" (web_fetch), "screenshot" (web_page_screenshot/ascii/svg), "devtools" (browser_* tools). Chromium is always present. Add-ons (Lightpanda, CloakBrowser, etc.) need cdpUrl. index = priority order (lower = tried first).' },
+  { key: "BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", deprecated: true, description: "DEPRECATED: use BROWSERS. Primary browser backend for page fetch/screenshot." },
+  { key: "DEVTOOLS_BROWSER_BACKEND", category: "backend", type: "enum", values: ["cloakbrowser", "lightpanda", "chromium"], fallback: "cloakbrowser", applies: "recreate", deprecated: true, description: "DEPRECATED: use BROWSERS. Backend used by the devtools testing tools." },
   { key: "HEADLESS", category: "backend", type: "boolean", fallback: true, applies: "recreate", description: "Run browsers without a UI. Toggled automatically by the VNC control." },
   { key: "CHROME_PATH", category: "backend", type: "string", fallback: "/usr/bin/chromium", applies: "recreate", description: "Path to the Chromium executable." },
   { key: "CHROME_USER_DATA_DIR", category: "backend", type: "string", fallback: "/data/chrome", applies: "recreate", description: "Persistent Chrome profile directory." },
   { key: "CHROME_PROFILE_DIR", category: "backend", type: "string", fallback: "Default", applies: "recreate", description: "Chrome profile folder name." },
-  { key: "LIGHTPANDA_PATH", category: "backend", type: "string", fallback: "auto-detect", applies: "recreate", description: "Path to the lightpanda binary." },
-  { key: "LIGHTPANDA_PORT", category: "backend", type: "number", fallback: 1997, applies: "recreate", description: "CDP port for lightpanda." },
-  { key: "CLOAKBROWSER_BINARY_PATH", category: "backend", type: "string", fallback: "auto-detect", applies: "recreate", description: "Path to the cloakbrowser chrome binary." },
+
+  { key: "CLOAKBROWSER_BINARY_PATH", category: "backend", type: "string", fallback: "auto-detect", applies: "recreate", deprecated: true, description: "DEPRECATED: CloakBrowser is now an add-on. Use BROWSERS with cdpUrl instead." },
   { key: "PRELAUNCH_BROWSER", category: "backend", type: "boolean", fallback: true, applies: "recreate", description: "Pre-launch browser on server start." },
   { key: "STARTUP_URL", category: "backend", type: "string", fallback: "about:blank", applies: "recreate", description: "URL opened in the browser on launch." },
   { key: "BROWSER_USER_AGENT", category: "backend", type: "string", fallback: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", applies: "recreate", description: "User agent string used by the browsers." },
 
-  { key: "SEARCH_ROUTE_WARMUP_ENGINES", category: "search", type: "engines", fallback: ["brave_cb", "duckduckgo_api", "duckduckgo_cb"], applies: "hot", description: "Browser routes prewarmed on start." },
+  { key: "SEARCH_ROUTE_WARMUP_ENGINES", category: "search", type: "engines", fallback: ["brave", "duckduckgo_api", "duckduckgo"], applies: "hot", description: "Browser routes prewarmed on start." },
   { key: "SEARCH_ENABLED_ENGINES", category: "search", type: "engines", fallback: DEFAULT_SEARCH_ENABLED_ENGINES, applies: "hot", description: "Search routes eligible for automatic select_best scheduling." },
   { key: "SEARCH_ROUTE_CIRCUIT_OPEN_MS", category: "search", type: "number", fallback: 300000, applies: "hot", description: "Route cooldown after failure (ms)." },
   { key: "EXA_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for exa_api search (https://dashboard.exa.ai/api-keys). When empty, exa_api is disabled." },

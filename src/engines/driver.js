@@ -1,9 +1,7 @@
-export const KNOWN_BACKENDS = new Set(["api", "cloakbrowser", "chromium", "lightpanda"]);
 export const POOL_POLICIES = new Set(["engine", "shared"]);
 
 export class SearchEngineDriver {
   id = "";
-  backend = "api";
   pool = null;
   homeUrl = null;
   inputSelectors = [];
@@ -14,7 +12,7 @@ export class SearchEngineDriver {
   }
 
   get isBrowser() {
-    return this.backend !== "api";
+    return this.pool !== null;
   }
 
   searchUrl(_query) {

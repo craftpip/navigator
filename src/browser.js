@@ -32,6 +32,8 @@ const BROWSER_LOG_EMOJI = {
   "lightpanda.exit": "🚪",
   "cloakbrowser.launch.ready": "✅",
   "cloakbrowser.launch.failed": "❌",
+  "addon.connected": "🔌",
+  "addon.disconnected": "🔌",
   "search.window.opened": "🪟",
   "search.window.closed": "🔒",
   "search.warmup.ready": "✅",
@@ -44,6 +46,8 @@ const BROWSER_LOG_LABEL = {
   "lightpanda.exit": "Lightpanda Exited",
   "cloakbrowser.launch.ready": "CloakBrowser Ready",
   "cloakbrowser.launch.failed": "CloakBrowser Failed",
+  "addon.connected": "Add-on Connected",
+  "addon.disconnected": "Add-on Disconnected",
   "search.window.opened": "Window Opened",
   "search.window.closed": "Window Closed",
   "search.warmup.ready": "Search Windows Warmed",
@@ -129,6 +133,9 @@ export class BrowserManager {
     // CloakBrowser
     this.cloakbrowserBrowser = null;
     this.cloakbrowserLaunching = null;
+
+    // Add-on browser state (keyed by `addon_${name}`)
+    this._backendState = new Map();
 
     // Shared
     this.engineWorkingWindows = new Map();
@@ -257,7 +264,7 @@ export class BrowserManager {
         entry.backend ||
         (pool.engine === "_shared"
           ? "lightpanda"
-          : getEngineMetadata(pool.engine)?.backend || this.config.defaultBackend);
+          : this.config.defaultBackend);
       const removed = pool.windows.some((entry) => entryBackend(entry) === backend);
       pool.windows = pool.windows.filter((entry) => entryBackend(entry) !== backend);
       if (removed) this.wakeSearchWaiter(pool);
@@ -821,6 +828,47 @@ export class BrowserManager {
     return page;
   }
 
+  _findAddOnForBackend(backend) {
+    if (!backend || !this.config.browsers) return null;
+    return this.config.browsers.find(
+      (b) => b.addOn && b.connect === backend
+    );
+  }
+
+  async _connectAddOnPage(addOnEntry) {
+    const stateKey = `addon_${addOnEntry.name}`;
+    let state = this._backendState.get(stateKey);
+
+    // Reuse existing connection if alive
+    if (state?.browser?.connected) {
+      return state.browser.newPage();
+    }
+
+    // Connect to external CDP
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: addOnEntry.cdpUrl,
+      defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
+    });
+
+    // Store state (owned: false = don't close on shutdown)
+    this._backendState.set(stateKey, {
+      browser,
+      owned: false,
+      connected: true,
+    });
+
+    // Track disconnection
+    browser.on("disconnected", () => {
+      this._backendState.delete(stateKey);
+      this.clearSearchWindowsForBackend(addOnEntry.name);
+    });
+
+    this.instanceSpawns[addOnEntry.name] = (this.instanceSpawns[addOnEntry.name] || 0) + 1;
+    logBrowserEvent("addon.connected", { name: addOnEntry.name, cdpUrl: addOnEntry.cdpUrl });
+
+    return browser.newPage();
+  }
+
   async _newChromiumPage() {
     const browser = await this.getBrowser();
     await this.ensureKeepAlivePage(browser);
@@ -833,22 +881,25 @@ export class BrowserManager {
   }
 
   async newPage(options = {}) {
-    const engine = (options && options.engine) || "";
-    const backend = (options && options.backend) || this.config.defaultBackend;
-    const lower = engine.toLowerCase();
-    const routeBackend = getEngineMetadata(lower)?.backend;
-    // Engine routes always use their own backend; unknown engines use the default.
-    if (routeBackend === "cloakbrowser") {
-      return this._newCloakbrowserPage();
+    let backend = (options && options.backend) || this.config.defaultBackend;
+
+    // Engine-specific backend routing: pool "shared" → lightpanda,
+    // pool "engine" → defaultBackend (chromium/cloakbrowser), API → defaultBackend
+    if (options?.engine && !options.backend) {
+      const meta = getEngineMetadata(options.engine);
+      if (meta?.pool === "shared") {
+        backend = "lightpanda";
+      }
     }
-    if (routeBackend === "chromium") {
-      return this._newChromiumPage();
-    }
-    if (routeBackend === "lightpanda") {
-      return this._newLightpandaPage();
-    }
+
+    // Check for add-on that connects as this backend type
+    const addOn = this._findAddOnForBackend(backend);
+    if (addOn) return this._connectAddOnPage(addOn);
+
+    // Built-in backend dispatch
     if (backend === "cloakbrowser") return this._newCloakbrowserPage();
-    return backend === "chromium" ? this._newChromiumPage() : this._newLightpandaPage();
+    if (backend === "chromium") return this._newChromiumPage();
+    return this._newLightpandaPage();
   }
 
   _poolEngine(engine) {
@@ -884,7 +935,7 @@ export class BrowserManager {
         persistent: true,
         pending: true,
         engine: poolEngine,
-        backend: getEngineMetadata(lower)?.backend || this.config.defaultBackend
+        backend: this.config.defaultBackend
       };
       pool.windows.push(entry);
 
@@ -945,7 +996,7 @@ export class BrowserManager {
           persistent: false,
           pending: true,
           engine: poolEngine,
-          backend: getEngineMetadata(engine)?.backend || this.config.defaultBackend
+          backend: this.config.defaultBackend
         };
         pool.windows.push(entry);
         try {
@@ -1045,8 +1096,33 @@ export class BrowserManager {
         maxConcurrentPageOps: this.config.maxConcurrentPageOps,
         inUse: this.pageSlotsInUse,
         queued: this.pageSlotWaiters.length
-      }
+      },
+      browsers: (this.config.browsers || []).map((b) => ({
+        name: b.name,
+        role: b.role,
+        index: b.index,
+        addOn: b.addOn,
+        cdpUrl: b.cdpUrl,
+        connect: b.connect,
+      })),
+      addOns: this._buildAddOnHealth()
     };
+  }
+
+  _buildAddOnHealth() {
+    const result = {};
+    if (!this.config.browsers) return result;
+    for (const entry of this.config.browsers) {
+      if (!entry.addOn) continue;
+      const state = this._backendState.get(`addon_${entry.name}`);
+      result[entry.name] = {
+        connected: Boolean(state?.browser?.connected),
+        cdpUrl: entry.cdpUrl,
+        connect: entry.connect,
+        role: entry.role,
+      };
+    }
+    return result;
   }
 
   async getInstanceStats() {
@@ -1055,14 +1131,40 @@ export class BrowserManager {
       ["lightpanda", this.lightpandaBrowser],
       ["cloakbrowser", this.cloakbrowserBrowser]
     ];
-    return Promise.all(instances.map(([backend, instance]) => this._instanceStatWithTimeout(backend, instance)));
+
+    // Add add-on browsers
+    const addOnInstances = [];
+    if (this.config.browsers) {
+      for (const entry of this.config.browsers) {
+        if (!entry.addOn) continue;
+        const state = this._backendState.get(`addon_${entry.name}`);
+        addOnInstances.push([entry.name, state?.browser || null, entry]);
+      }
+    }
+
+    const allInstances = [
+      ...instances.map(([backend, instance]) => ({ backend, instance, addOn: false })),
+      ...addOnInstances.map(([name, instance, entry]) => ({
+        backend: name,
+        instance,
+        addOn: true,
+        cdpUrl: entry.cdpUrl,
+        connect: entry.connect,
+      }))
+    ];
+
+    return Promise.all(
+      allInstances.map(({ backend, instance, addOn, cdpUrl, connect }) =>
+        this._instanceStatWithTimeout(backend, instance, { addOn, cdpUrl, connect })
+      )
+    );
   }
 
-  async _instanceStatWithTimeout(backend, instance) {
+  async _instanceStatWithTimeout(backend, instance, extra = {}) {
     let timeout;
     try {
       return await Promise.race([
-        this._instanceStat(backend, instance),
+        this._instanceStat(backend, instance, extra),
         new Promise((resolve) => {
           timeout = setTimeout(() => resolve({
             backend,
@@ -1071,7 +1173,8 @@ export class BrowserManager {
             openTabs: [],
             pid: null,
             spawns: this.instanceSpawns[backend] || 0,
-            timedOut: true
+            timedOut: true,
+            ...extra
           }), 750);
           timeout.unref?.();
         })
@@ -1081,7 +1184,7 @@ export class BrowserManager {
     }
   }
 
-  async _instanceStat(backend, instance) {
+  async _instanceStat(backend, instance, extra = {}) {
     const connected = Boolean(instance?.connected);
     let tabs = 0;
     let openTabs = [];
@@ -1129,7 +1232,8 @@ export class BrowserManager {
       tabs,
       openTabs,
       pid,
-      spawns: this.instanceSpawns[backend] || 0
+      spawns: this.instanceSpawns[backend] || 0,
+      ...extra
     };
   }
 
@@ -1293,6 +1397,16 @@ export class BrowserManager {
       }
       this.cloakbrowserBrowser = null;
     }
+
+    // Add-on shutdown — disconnect only (user owns the browser process)
+    for (const [stateKey, state] of this._backendState) {
+      try {
+        state.browser?.disconnect();
+      } catch {
+        // ignore disconnect errors on shutdown
+      }
+    }
+    this._backendState.clear();
 
     this.engineWorkingWindows.clear();
     this.keepAlivePage = null;

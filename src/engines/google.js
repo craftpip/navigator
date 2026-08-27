@@ -37,7 +37,10 @@ const EXTRACT_PAGE = () => {
   return { results, directAnswers };
 };
 
-export class GoogleDriver extends BrowserSearchDriver {
+export class GoogleEngine extends BrowserSearchDriver {
+  id = "google";
+  pool = "engine";
+  homeUrl = "https://www.google.com/";
   inputSelectors = ["textarea[name='q']", "input[name='q']"];
   resultSelectors = RESULT_SELECTORS;
 

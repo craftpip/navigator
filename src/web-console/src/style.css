@@ -290,6 +290,9 @@ p,
   background: var(--blue);
   color: #fff;
 }
+html[data-theme="dark"] .mode-switch button.active {
+  color: #000;
+}
 
 .overview {
   display: grid;
@@ -1525,6 +1528,15 @@ select.config-input option {
   min-width: 120px;
   flex: 1;
 }
+.pp-field-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
 .pp-field-row > label .config-input,
 .pp-field-row > label select.config-input {
   font-size: 11px;
@@ -1541,7 +1553,6 @@ select.config-input option {
 .pp-checkbox-group {
   display: flex;
   gap: 10px;
-  margin-top: 2px;
 }
 .pp-checkbox {
   display: inline-flex;
@@ -1999,6 +2010,21 @@ select.config-input option {
 .api-key-modal-head small {
   color: var(--muted);
   font: 11px var(--sans);
+}
+.api-key-modal-head .clear {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 10px var(--sans);
+  flex-shrink: 0;
+}
+.api-key-modal-head .clear:hover {
+  background: var(--blue-bg);
+  color: var(--text);
 }
 .api-key-modal-actions {
   justify-content: flex-end;

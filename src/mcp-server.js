@@ -52,7 +52,6 @@ const CONSOLE_ENGINE_REGISTRY = SUPPORTED_ENGINES.map((id) => {
   const meta = getEngineMetadata(id);
   return {
     id,
-    backend: meta.backend,
     pool: meta.pool,
     homeUrl: meta.homeUrl,
     isBrowser: meta.isBrowser
@@ -65,7 +64,7 @@ const CONSOLE_ENGINE_BY_ID = new Map(
 const screenshotDownloadById = new Map();
 const screenshotStorageDir = path.join(process.cwd(), "screenshots");
 const CONSOLE_API_KEY = `nvg_console_${randomBytes(32).toString("base64url")}`;
-const WEB_TOOL_NAMES = new Set(["web_search", "web_fetch", "web_page_screenshot", "web_page_links", "web_page_ascii", "web_page_svg"]);
+const WEB_TOOL_NAMES = new Set(["web_search", "web_fetch", "web_page_screenshot", "web_page_links", "web_page_ascii", "web_page_svg", "list_browsers"]);
 let toolCacheTtlMs = 5 * 60 * 1000; // updated from manager.config after boot
 const SCREENSHOT_DOWNLOAD_TTL_MS = 60 * 60 * 1000;
 const MAX_HTTP_BODY_BYTES = 1024 * 1024;
@@ -1982,6 +1981,16 @@ function getToolsListResponse(allowedTools = null) {
           additionalProperties: false
         }
       },
+      {
+        name: "list_browsers",
+        description:
+          "List all configured browser backends with their roles, connection status, and type. Use to discover available browsers before routing devtools calls.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        }
+      },
       ...(devtoolsEnabled ? devtoolsToolDefinitions : [])
     ].filter((tool) => !disabledTools.has(String(tool.name).toLowerCase()) && (!allowedTools || allowedTools.has(tool.name)))
   };
@@ -2665,6 +2674,24 @@ async function handleToolCallInner(name, args = {}) {
     timer.step("format_response", mark);
     timer.end({ status: "ok" });
     return asMarkdownContent(linesOut.join("\n"));
+  }
+
+  if (name === "list_browsers") {
+    const manager = await getBrowserManager();
+    const browsers = (manager.config.browsers || []).map((b) => {
+      const state = b.addOn ? manager._backendState.get(`addon_${b.name}`) : manager._backendState.get(b.name);
+      const connected = Boolean(state?.browser?.connected);
+      return {
+        name: b.name,
+        role: b.role,
+        index: b.index,
+        type: b.addOn ? "addon" : "builtin",
+        connected,
+        ...(b.addOn ? { cdpUrl: b.cdpUrl, connect: b.connect } : {}),
+      };
+    });
+    timer.end({ status: "ok" });
+    return asMarkdownContent(JSON.stringify({ browsers }, null, 2));
   }
 
   if (name === "web_page_links") {

@@ -31,9 +31,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# Install CloakBrowser stealth Chromium binary
-RUN npx --no-install cloakbrowser install
-
 COPY src ./src
 COPY docker/entrypoint.sh /entrypoint.sh
 
