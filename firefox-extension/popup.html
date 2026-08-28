@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 360px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #16161d; color: #e8e8ec; font-size: 13px; }
+
+.header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #2a2a34; }
+.header h1 { font-size: 15px; font-weight: 600; }
+.header .status-row { display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 9px; height: 9px; border-radius: 50%; }
+.status-dot.connecting { background: #ff9800; box-shadow: 0 0 5px #ff9800; }
+.status-dot.connected { background: #4caf50; box-shadow: 0 0 5px #4caf50; }
+.status-dot.error { background: #f44336; box-shadow: 0 0 5px #f44336; }
+.status-dot.off { background: #757575; }
+.status-label { font-size: 12px; color: #aaa; }
+
+.body { padding: 14px 16px; }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; color: #999; margin-bottom: 5px; }
+.field input { width: 100%; background: #1f1f28; border: 1px solid #33333f; border-radius: 6px; padding: 8px 10px; color: #e8e8ec; font-size: 13px; outline: none; transition: border-color 0.15s, background 0.15s; }
+.field input:focus { border-color: #4a9eff; }
+.field input::placeholder { color: #5a5a68; }
+.field.error input { border-color: #f44336; background: rgba(244,67,54,0.07); }
+.field.error input:focus { border-color: #f44336; box-shadow: 0 0 0 2px rgba(244,67,54,0.15); }
+.field-error { color: #ff6b6b; font-size: 11px; line-height: 1.4; margin-top: 5px; display: none; }
+.field.error .field-error { display: block; }
+.field-hint { font-size: 11px; color: #666; margin-top: 4px; line-height: 1.4; }
+.field.error .field-hint { display: none; }
+
+.connected-summary { background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.32); border-radius: 8px; padding: 13px 13px 11px; margin-bottom: 12px; display: none; }
+.connected-summary.visible { display: block; }
+.connected-summary .summary-title { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #4caf50; margin-bottom: 10px; font-size: 13px; }
+.connected-summary .summary-title .status-dot { width: 8px; height: 8px; }
+.summary-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12px; }
+.summary-row:last-of-type { border-bottom: none; margin-bottom: 2px; }
+.summary-label { color: #999; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; }
+.summary-value { color: #e8e8ec; font-weight: 500; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.conn-fields.hidden { display: none; }
+
+.pin-box { background: #2a2a34; border: 1px solid #ff9800; border-radius: 8px; padding: 12px; margin-bottom: 12px; display: none; }
+.pin-box .pin-title { color: #ff9800; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.pin-box .pin-hint { color: #aaa; font-size: 12px; line-height: 1.4; margin-bottom: 8px; }
+.pin-box .pin-row { display: flex; gap: 8px; }
+.pin-box input { flex: 1; background: #1f1f28; border: 1px solid #33333f; border-radius: 6px; padding: 8px 10px; color: #e8e8ec; font-size: 15px; letter-spacing: 4px; text-align: center; }
+.pin-box button { background: #ff9800; border: none; border-radius: 6px; padding: 8px 14px; color: #111; font-weight: 600; cursor: pointer; }
+.pin-box .pin-cancel { width: 100%; background: transparent; border: 1px solid #555560; border-radius: 6px; padding: 7px; margin-top: 8px; color: #bbb; font-weight: 500; font-size: 12px; cursor: pointer; }
+.pin-box .pin-cancel:hover { border-color: #f44336; color: #f44336; }
+    .pin-box .pin-error { color: #f44336; font-size: 11px; line-height: 1.4; margin-top: 8px; display: none; }
+    .pin-box .pin-error.visible { display: block; }
+
+.error-box { background: rgba(244, 67, 54, 0.09); border: 1px solid rgba(244, 67, 54, 0.35); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; color: #ff6b6b; line-height: 1.45; display: none; }
+
+.btn-full { width: 100%; background: linear-gradient(135deg, #4a9eff, #357abd); border: none; border-radius: 6px; padding: 11px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+.btn-full:hover { opacity: 0.88; }
+.btn-full.btn-off { background: linear-gradient(135deg, #f44336, #d32f2f); }
+
+.divider { margin: 14px 0; border-top: 1px solid #2a2a34; }
+
+.tabs-section h3 { font-size: 12px; color: #999; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tab-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+.tab-item:nth-child(odd) { background: rgba(255,255,255,0.04); }
+.tab-item .tab-info { overflow: hidden; }
+.tab-item .tab-title { color: #e8e8ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-item .tab-url { color: #777; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.tab-item .tab-action { display: flex; gap: 4px; flex-shrink: 0; }
+.tab-item button { background: #33333f; border: none; border-radius: 4px; color: #ccc; font-size: 11px; padding: 3px 7px; cursor: pointer; }
+.tab-item button:hover { background: #4a9eff; color: #fff; }
+.tab-item button.attached-btn { background: #4caf50; color: #fff; }
+.tab-empty { text-align: center; color: #666; padding: 10px 0; font-size: 12px; }
+
+.connected-time { text-align: center; color: #666; font-size: 11px; padding-top: 10px; }
+.footer { padding: 8px 16px; text-align: center; border-top: 1px solid #2a2a34; }
+.footer span { color: #555; font-size: 11px; }
+
+body { position: relative; }
+.progress-bar { position: absolute; top: 0; left: 0; height: 2px; width: 100%; overflow: hidden; display: none; z-index: 10; background: transparent; }
+.progress-bar.active { display: block; }
+.progress-bar::after { content: ''; position: absolute; top: 0; left: -40%; height: 100%; width: 40%; background: linear-gradient(90deg, #4a9eff, #ff9800); border-radius: 1px; animation: progress-slide 1.1s ease-in-out infinite; }
+@keyframes progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
+.spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; display: inline-block; animation: spin 0.65s linear infinite; flex-shrink: 0; }
+.spinner.spinner-sm { width: 12px; height: 12px; border-width: 2px; }
+.spinner.dark { border-color: rgba(0,0,0,0.2); border-top-color: #111; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.btn-full { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.btn-full:disabled { opacity: 0.75; cursor: wait; }
+.pin-box button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.pin-box button:disabled { opacity: 0.7; cursor: wait; }
+.tab-item button:disabled { opacity: 0.6; cursor: wait; }
+.bidi-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.bidi-actions button:disabled { opacity: 0.6; cursor: wait; }
+
+.probe-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.probe-btn { background: transparent; border: 1px solid #33333f; border-radius: 6px; padding: 6px 10px; color: #ccc; font-size: 12px; cursor: pointer; align-self: flex-start; }
+.probe-btn:hover { border-color: #4a9eff; color: #fff; }
+.probe-btn:disabled { opacity: 0.6; cursor: wait; }
+.probe-result { font-size: 11px; line-height: 1.45; color: #aaa; word-break: break-word; display: none; }
+.probe-result.ok { color: #4caf50; display: block; }
+.probe-result.err { color: #ff6b6b; display: block; }
+.probe-result.running { color: #ff9800; display: block; }
+</style>
+</head>
+<body>
+<div class="progress-bar" id="progressBar"></div>
+<div class="header">
+  <h1>Navigator Relay</h1>
+  <div class="status-row">
+    <span class="status-dot off" id="statusDot"></span>
+    <span class="status-label" id="statusLabel">Off</span>
+  </div>
+</div>
+
+<div class="body">
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- Firefox BiDi bridge — hidden, kept for popup.js wiring but not shown (same UI as Chrome) -->
+  <div class="bidi-box" id="bidiBox" style="display:none">
+    <div class="bidi-head">
+      <span>Firefox BiDi (Remote Agent)</span>
+      <span class="bidi-status" id="bidiStatus"><span class="status-dot off" id="bidiDot"></span><span id="bidiLabel">Off</span></span>
+    </div>
+    <input type="text" id="bidiUrl" placeholder="ws://127.0.0.1:9222/session" spellcheck="false">
+    <div class="bidi-actions">
+      <button id="bidiConnectBtn">Connect</button>
+      <button id="bidiDisconnectBtn">Disconnect</button>
+    </div>
+    <div class="bidi-hint" id="bidiHint">Firefox must be started with --remote-debugging-port 9222 — run ./launch-firefox.sh</div>
+  </div>
+
+  <div class="conn-form">
+    <div class="connected-summary" id="connectedSummary" aria-live="polite">
+      <div class="summary-title"><span class="status-dot connected"></span> Connected to Navigator</div>
+      <div class="summary-row"><span class="summary-label">Browser</span><span class="summary-value" id="summaryBrowser">—</span></div>
+      <div class="summary-row"><span class="summary-label">Server</span><span class="summary-value" id="summaryServer">—</span></div>
+      <div class="summary-row"><span class="summary-label">Status</span><span class="summary-value" id="summaryStatus">Connected</span></div>
+    </div>
+
+    <div class="conn-fields" id="connFields">
+      <div class="field" id="field-browserName">
+        <label for="browserName">Browser Name</label>
+        <input type="text" id="browserName" placeholder="Firefox" spellcheck="false" autocomplete="off">
+        <div class="field-error" id="browserNameError" role="alert"></div>
+      </div>
+
+      <div class="field" id="field-serverUrl">
+        <label for="serverUrl">Navigator Server</label>
+        <input type="text" id="serverUrl" placeholder="localhost:1994" spellcheck="false" autocomplete="off">
+        <div class="field-hint" id="serverHint">Just enter host:port — tries wss:// first, then ws://</div>
+        <div class="field-error" id="serverUrlError" role="alert"></div>
+      </div>
+      <div class="probe-row">
+        <button id="probeBtn" class="probe-btn" type="button">Test connection</button>
+        <div class="probe-result" id="probeResult"></div>
+      </div>
+    </div>
+
+    <button class="btn-full" id="connectBtn"><span class="spinner" id="connectSpinner" style="display:none"></span><span id="connectBtnText">Connect</span></button>
+
+    <div class="pin-box" id="pinBox">
+      <div class="pin-title">Enter the pairing PIN</div>
+      <div class="pin-hint">Pairing happens only once. Copy the 6-digit PIN from the navigator console (<b>Browser drivers → PIN required</b>) and enter it within 60 seconds. After pairing, this browser remembers itself and reconnects without a PIN. If a PIN is rejected, a fresh one is issued — copy it again.</div>
+      <div class="pin-row">
+        <input id="pinInput" type="text" inputmode="numeric" maxlength="6" placeholder="------" autocomplete="one-time-code">
+        <button id="pinSubmitBtn"><span class="spinner spinner-sm dark" id="pinSpinner" style="display:none"></span><span id="pinBtnText">Verify</span></button>
+      </div>
+      <div class="pin-error" id="pinError"></div>
+      <button class="pin-cancel" id="pinCancelBtn">Cancel pairing · choose another server</button>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="tabs-section">
+    <h3>Open Tabs</h3>
+    <div id="tabList"><div class="tab-empty">No tabs listed yet</div></div>
+  </div>
+
+  <div class="connected-time" id="connectedTime"></div>
+</div>
+
+<div class="footer">
+  <span>Navigator Browser Relay v<span id="version"></span></span>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

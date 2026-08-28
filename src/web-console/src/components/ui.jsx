@@ -9,9 +9,9 @@ export function Pill({ tone = "ok", children }) {
   return <span className={`pill ${tone}`}>{children}</span>;
 }
 
-export function Panel({ title, sub, wide, children }) {
+export function Panel({ title, sub, wide, children, style, className }) {
   return (
-    <section className={`panel ${wide ? "panel-wide" : ""}`}>
+    <section className={`panel ${wide ? "panel-wide" : ""}${className ? ` ${className}` : ""}`} style={style}>
       <h2>
         {title}
         {sub && <span className="sub">{sub}</span>}
@@ -111,7 +111,7 @@ export function Check({ label, checked, onChange }) {
   );
 }
 
-export function SchemaField({ name, schema, value, onChange }) {
+export function SchemaField({ name, schema, value, onChange, browserOptions }) {
   const enums = Array.isArray(schema.enum) ? schema.enum : null;
   const type = schema.type;
   const hint = [
@@ -122,7 +122,75 @@ export function SchemaField({ name, schema, value, onChange }) {
     .filter(Boolean)
     .join(" · ");
   let control;
-  if (type === "boolean") {
+  if (name === "browser") {
+    const opts = Array.isArray(browserOptions) && browserOptions.length ? browserOptions : null;
+    control = (
+      <select value={value ?? ""} onChange={(event) => onChange(event.target.value)}>
+        <option value="">(default)</option>
+        {opts ? (
+          opts.map((b) => (
+            <option key={b.name} value={b.name}>
+              {b.name} — {b.status}{b.connected ? " ✓" : b.status === "available" ? " (standby)" : ""}
+            </option>
+          ))
+        ) : (
+          <>
+            <option value="chromium">chromium</option>
+            <option value="Chrome">Chrome</option>
+            <option value="cloakbrowser">cloakbrowser</option>
+            <option value="lightpanda">lightpanda</option>
+          </>
+        )}
+      </select>
+    );
+  } else if (type === "object" && schema.properties && typeof schema.properties.width !== "undefined") {
+    const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    control = (
+      <div className="viewport-group" style={{ display: "flex", gap: "8px" }}>
+        <input
+          type="number"
+          placeholder="width"
+          value={obj.width ?? ""}
+          onChange={(e) => {
+            const w = e.target.value === "" ? undefined : Number(e.target.value);
+            const next = { ...obj };
+            if (w === undefined || Number.isNaN(w)) delete next.width;
+            else next.width = w;
+            if (Object.keys(next).length === 0) onChange("");
+            else onChange(next);
+          }}
+          style={{ flex: 1 }}
+        />
+        <input
+          type="number"
+          placeholder="height"
+          value={obj.height ?? ""}
+          onChange={(e) => {
+            const h = e.target.value === "" ? undefined : Number(e.target.value);
+            const next = { ...obj };
+            if (h === undefined || Number.isNaN(h)) delete next.height;
+            else next.height = h;
+            if (Object.keys(next).length === 0) onChange("");
+            else onChange(next);
+          }}
+          style={{ flex: 1 }}
+        />
+      </div>
+    );
+  } else if (type === "object") {
+    const text = typeof value === "object" && value !== null && Object.keys(value).length ? JSON.stringify(value, null, 2) : typeof value === "string" ? value : "";
+    control = (
+      <textarea
+        value={text}
+        placeholder="JSON object"
+        onChange={(e) => {
+          const v = e.target.value.trim();
+          if (!v) { onChange(""); return; }
+          try { onChange(JSON.parse(v)); } catch { onChange(v); }
+        }}
+      />
+    );
+  } else if (type === "boolean") {
     control = (
       <Check
         label={value ? "true" : "false"}

@@ -173,7 +173,7 @@ export function parseBrowsersEnv(raw) {
       "⚠️  BROWSERS env var not set. Using the built-in Chromium browser only. " +
       "Set BROWSERS to configure add-on browsers."
     );
-    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }];
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
   }
 
   let parsed;
@@ -190,7 +190,7 @@ export function parseBrowsersEnv(raw) {
   }
   if (!parsed.length) {
     console.warn("⚠️  BROWSERS env var is an empty array. Adding the built-in Chromium browser.");
-    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }];
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
   }
 
   const seen = new Set();
@@ -236,24 +236,63 @@ export function parseBrowsersEnv(raw) {
       role = [normalized];
     }
 
+    // Browser type: "inbuilt" (the built-in Chromium — no options),
+    // "cdp" (user-provided cdpUrl) or "navigator-cdp" (our plugin
+    // interface — the extension dials us and navigator provides the endpoint).
+    const explicitType = entry.type === undefined || entry.type === null
+      ? ""
+      : (typeof entry.type === "string" ? String(entry.type).trim().toLowerCase() : "");
+    const type = explicitType || (name === "chromium" ? "inbuilt" : "cdp");
+    if (type !== "inbuilt" && type !== "cdp" && type !== "navigator-cdp") {
+      throw new Error(
+        `BROWSERS browser "${name}" has an unknown type "${type}" — valid types: inbuilt, cdp, navigator-cdp`
+      );
+    }
+    if (name === "chromium" && type !== "inbuilt") {
+      throw new Error(
+        `BROWSERS browser "chromium" is the built-in browser — its type must be "inbuilt" (got "${type}")`
+      );
+    }
+    if (type === "inbuilt" && name !== "chromium") {
+      throw new Error(
+        `BROWSERS browser "${name}" has type "inbuilt" — that type is reserved for the built-in Chromium`
+      );
+    }
+
+    // Plugin identify the navigator-cdp extension kind. "auto" infers from the
+    // live connection (hello.platform or browserName).
+    const plugin = entry.plugin === undefined || entry.plugin === null
+      ? "auto"
+      : (typeof entry.plugin === "string" ? String(entry.plugin).trim().toLowerCase() : "");
+    if (plugin !== "auto" && plugin !== "chrome" && plugin !== "firefox") {
+      throw new Error(
+        `BROWSERS browser "${name}" has an unknown plugin "${plugin}" — valid plugins: auto, chrome, firefox`
+      );
+    }
+
     const cdpUrl = typeof entry.cdpUrl === "string" && entry.cdpUrl.trim()
       ? String(entry.cdpUrl).trim()
       : undefined;
 
-    if (!cdpUrl && name !== "chromium") {
+    if (type === "cdp" && !cdpUrl) {
       throw new Error(
-        `BROWSERS browser "${name}" has no cdpUrl — only Chromium (the built-in) may be managed by Navigator; ` +
-        "every other browser is an add-on and must provide a cdpUrl"
+        `BROWSERS browser "${name}" has no cdpUrl — a cdp-type browser needs a CDP endpoint; ` +
+        "use type \"navigator-cdp\" to let navigator provide the endpoint"
+      );
+    }
+    if (type !== "cdp" && cdpUrl) {
+      throw new Error(
+        `BROWSERS browser "${name}" should not carry a cdpUrl for type "${type}" — only cdp-type browsers take a direct endpoint`
       );
     }
     if (name === "chromium") chromiumSeen = true;
 
-    return { name, role, cdpUrl, addOn: !!cdpUrl };
+    return { name, role, cdpUrl, type, plugin, addOn: type !== "inbuilt" };
   });
 
   if (!chromiumSeen) {
     console.warn("⚠️  BROWSERS is missing Chromium — adding the built-in browser at the end of the array.");
-    browsers.push({ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false });
+    browsers.push({ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false });
   }
 
   return browsers;

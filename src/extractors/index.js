@@ -113,11 +113,13 @@ export async function extractTextFromHtml({
   strict = false,
   defaultExtractSkipSelectors = [],
   config,
-  signal
+  signal,
+  dom: externalDom
 }) {
   if (debug) console.log(`[web_fetch] [${url}] extractTextFromHtml called`);
 
-  const dom = parseHtmlToDom(html, url);
+  const dom = externalDom || parseHtmlToDom(html, url);
+  const ownedDom = !externalDom;
 
   try {
     const doc = dom.window.document;
@@ -231,6 +233,7 @@ export async function extractTextFromHtml({
       textOriginalLength: fallback.length,
     };
   } finally {
-    dom?.window?.close();
+    // Only close a DOM we created — external DOMs are owned by the caller.
+    if (ownedDom) dom?.window?.close();
   }
 }

@@ -5,6 +5,41 @@ import puppeteer from "puppeteer-core";
 import { loadConfig } from "./config.js";
 import { getBrowserWarmupEngines, getEngineMetadata } from "./engines/index.js";
 import { getTabTimings } from "./tab-timers.js";
+import { relayServer } from "./relay-server.js";
+
+/**
+ * User-facing display filter for cross-browser target listings (Target.getTargets,
+ * /stats). Hides browser chrome and plugin surfaces — chrome://omnibox-popup,
+ * chrome://tab-search, chrome://extensions, chrome-extension:// background
+ * pages/service workers, about:blank strays — keeping only real web pages.
+ * The relay CDP gateway itself still exposes every target to puppeteer; this
+ * only controls what the human-facing listings show.
+ */
+export function isVisiblePageUrl(url = "") {
+  return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
+function isPageTargetType(target) {
+  if (!target || typeof target.type !== "string") return true;
+  return target.type === "page" || target.type === "tab";
+}
+
+/**
+ * Browser ownership — who the browser window belongs to.
+ *
+ * - "user"  – type "navigator-cdp" (the relay browser): the USER's real,
+ *             visible, non-headless window. Every tab/click/navigation the
+ *             agent does there appears on the user's screen.
+ * - "agent" – everything else: navigator-owned browsers (builtin Chromium,
+ *             plain "cdp" add-ons like cloakbrowser/lightpanda). Headless /
+ *             off-screen; the user cannot see activity there.
+ *
+ * Derives purely from `type` so all listings agree (list_browsers,
+ * Target.getTargets, page-tool browser params).
+ */
+export function browserOwnership(type) {
+  return type === "navigator-cdp" ? "user" : "agent";
+}
 
 const LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
 const CLONE_EXCLUDE_NAMES = new Set([
@@ -496,30 +531,63 @@ export class BrowserManager {
     throw lastError || new Error("Browser target is not found");
   }
 
+  /**
+   * Effective add-on list = configured add-ons (config order, roles honored)
+   * + registry navigator-cdp entries (pre-declared merged by name, dynamic
+   * registrations appended with role ["default"]) + relay status for each.
+   * This is the single source the routing decision and every status surface
+   * read from — never iterate config.browsers directly for add-on routing.
+   */
+  _effectiveAddOns() {
+    return relayServer.getStatusEntries(this.config.browsers);
+  }
+
   _findAddOnByName(name) {
-    if (!name || !this.config.browsers) return null;
-    return this.config.browsers.find((b) => b.addOn && b.name === name) || null;
+    if (!name) return null;
+    const lower = String(name).toLowerCase();
+    return this._effectiveAddOns().find((b) => b.name.toLowerCase() === lower) || null;
   }
 
   async _connectAddOnPage(addOnEntry) {
+    const browser = await this._ensureAddOnConnection(addOnEntry);
+    return browser.newPage();
+  }
+
+  /**
+   * Ensure a CDP connection to an add-on exists and return the connected
+   * Browser (without opening a new page). Reuses a live connection. Used by
+   * both `_connectAddOnPage` and `attachToExistingTarget` (which must not open
+   * a new tab when adopting an existing one).
+   */
+  async _ensureAddOnConnection(addOnEntry) {
     const stateKey = `addon_${addOnEntry.name}`;
     let state = this._addOnState.get(stateKey);
 
     // Reuse existing connection if alive
     if (state?.browser?.connected) {
-      return state.browser.newPage();
+      return state.browser;
     }
 
-    // Connect to external CDP - no launch logic, the user owns the process.
-    // HTTP(S) cdpUrls are CDP servers (e.g. CloakBrowser's cloakserve, Chrome
-    // --remote-debugging-port) — puppeteer resolves /json/version via browserURL.
-    // ws:// cdpUrls are direct browser WebSocket endpoints (puppeteer-connected).
-    const usesHttp = /^https?:\/\//i.test(String(addOnEntry.cdpUrl || ""));
+    // navigator-cdp add-ons dial OUR /browser/<name> CDP gateway (the extension
+    // dials us over /relay); plain cdp add-ons dial their configured endpoint.
+    const isRelay = addOnEntry.type === "navigator-cdp";
+    const endpoint = isRelay
+      ? relayServer.gatewayWsUrl(addOnEntry.name)
+      : addOnEntry.cdpUrl;
+    const usesHttp = !isRelay && /^https?:\/\//i.test(String(endpoint || ""));
+    // Relay add-ons (navigator-cdp) are the USER's real browser window — never
+    // force the 1920x1080 puppeteer default viewport onto their tabs, or every
+    // adopted/created tab renders wider than their actual window (Emulation
+    // device-metrics override). Connecting with defaultViewport:null lets real
+    // tabs keep their natural window size. Navigator-owned browsers (chromium,
+    // plain cdp like cloakbrowser/lightpanda) keep the fixed monitor viewport.
     const browser = await puppeteer.connect({
-      defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
+      defaultViewport: isRelay
+        ? null
+        : { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
       ...(usesHttp
-        ? { browserURL: addOnEntry.cdpUrl }
-        : { browserWSEndpoint: addOnEntry.cdpUrl }),
+        ? { browserURL: endpoint }
+        : { browserWSEndpoint: endpoint }),
     });
 
     // Store state (disconnect-only: never close a browser we don't own)
@@ -536,7 +604,7 @@ export class BrowserManager {
     this.instanceSpawns[addOnEntry.name] = (this.instanceSpawns[addOnEntry.name] || 0) + 1;
     logBrowserEvent("addon.connected", { name: addOnEntry.name, cdpUrl: addOnEntry.cdpUrl });
 
-    return browser.newPage();
+    return browser;
   }
 
   _addOnConnection(name) {
@@ -544,7 +612,90 @@ export class BrowserManager {
   }
 
   _isAddOnConnected(name) {
+    const entry = this._findAddOnByName(name);
+    if (entry && entry.type === "navigator-cdp") return entry.status === "connected";
     return Boolean(this._addOnState.get(`addon_${name}`)?.browser?.connected);
+  }
+
+  /**
+   * Adopt an EXISTING browser-origin tab (a real tab in the user's browser,
+   * e.g. one listed by Target.getTargets as origin:"browser") so navigator's
+   * devtools tooling can drive it, without opening a new tab.
+   *
+   * Scans every connected add-on's CDP connection for a target whose CDP
+   * targetId matches `targetId`, then returns that target's Page. Interacting
+   * with the page triggers the relay's on-demand Target.attachToTarget.
+   *
+   * @returns {Promise<{page: import("puppeteer-core").Page, backend: string} | null>}
+   *   null when `targetId` doesn't match any existing tab on a connected add-on.
+   */
+  /**
+   * Adopt an EXISTING browser-origin tab (a real tab in the user's browser,
+   * e.g. one listed by Target.getTargets as origin:"browser") so navigator's
+   * devtools tooling can drive it, without opening a new tab.
+   *
+   * Connects to the add-on, asks the relay to synthesize an attachedToTarget
+   * for the tab (so puppeteer creates a managed Page), then waits for that
+   * page to appear in browser.pages(). Interacting with the page drives the
+   * user's real tab through the relay.
+   *
+   * @returns {Promise<{page: import("puppeteer-core").Page, backend: string} | null>}
+   *   null when `targetId` doesn't match any existing tab on a connected add-on.
+   */
+  async attachToExistingTarget(targetId) {
+    const tid = String(targetId || "").trim();
+    if (!tid) return null;
+
+    const candidates = this._effectiveAddOns().filter((b) => b.connected || b.status === "connected");
+    for (const entry of candidates) {
+      let browser;
+      try {
+        browser = await this._ensureAddOnConnection(entry);
+      } catch {
+        continue;
+      }
+      if (!browser || !browser.connected) continue;
+
+      // Refresh the relay's tab list so the targetId is present, then make the
+      // relay synthesize an attachedToTarget -> puppeteer creates a Page.
+      const gotBackend = typeof entry.name === "string" && entry.name;
+      const res = await relayServer.attachExistingTabToClients(
+        gotBackend,
+        tid
+      );
+      if (!res || !res.found || !res.attached) continue;
+
+      // There is no public `Target.id()` in puppeteer v24 — the target id lives
+      // on the internal `_targetId` field of the underlying CdpTarget, which
+      // `attachExistingTabToClients` populates from the real extension targetId.
+      const targetIdOf = (p) => {
+        try { const t = p?.target?.(); if (!t) return ""; return String(t._targetId ?? ""); } catch { return ""; }
+      };
+
+      // Poll browser.pages() until the adopted page materializes.
+      const deadline = Date.now() + Math.min(this.config?.browserOpTimeoutMs || 60000, 5000);
+      let page = null;
+      while (Date.now() < deadline) {
+        try {
+          const pages = await browser.pages();
+          // Match on the CDP target id, not URL — the user frequently has several
+          // tabs open to the same page (e.g. multiple boniface.pe/eira tabs), so
+          // URL matching would drive the wrong one. Never fall back to a wrong
+          // target: wait for the exact tid to appear.
+          page = pages.find((p) => !p.isClosed() && targetIdOf(p) === tid) || null;
+        } catch {
+          break;
+        }
+        if (page) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (page) {
+        return { page, backend: gotBackend };
+      }
+    }
+
+    return null;
   }
 
   async _newChromiumPage() {
@@ -767,24 +918,39 @@ export class BrowserManager {
         inUse: this.pageSlotsInUse,
         queued: this.pageSlotWaiters.length
       },
-      browsers: (this.config.browsers || []).map((b) => ({
+      browsers: this._effectiveAddOns().map((b) => ({
         name: b.name,
         role: b.role,
-        addOn: b.addOn,
+        type: b.type,
+        plugin: b.plugin,
+        configured: b.configured,
+        status: b.status,
+        paired: b.paired ?? (b.type === "navigator-cdp" ? relayServer.isPaired(b.name) : undefined),
+        connected: b.type === "navigator-cdp"
+          ? b.status === "connected"
+          : this._isAddOnConnected(b.name),
         cdpUrl: b.cdpUrl,
-        connected: b.addOn ? this._isAddOnConnected(b.name) : Boolean(this.browser?.connected),
+        relayWsUrl: b.type === "navigator-cdp" && b.status === "connected"
+          ? relayServer.gatewayWsUrl(b.name)
+          : undefined,
+        pin: b.pin ?? undefined,
+        pinExpiresAt: b.pinExpiresAt ?? undefined,
+        extensionVersion: b.extensionVersion ?? undefined
       })),
-      addOns: this._buildAddOnHealth()
+      addOns: this._buildAddOnHealth(),
+      relay: this.getRelaySummary()
     };
   }
 
   _buildAddOnHealth() {
     const result = {};
-    if (!this.config.browsers) return result;
-    for (const entry of this.config.browsers) {
-      if (!entry.addOn) continue;
+    for (const entry of this._effectiveAddOns()) {
       result[entry.name] = {
-        connected: this._isAddOnConnected(entry.name),
+        type: entry.type,
+        status: entry.status,
+        connected: entry.type === "navigator-cdp"
+          ? entry.status === "connected"
+          : this._isAddOnConnected(entry.name),
         cdpUrl: entry.cdpUrl,
         role: entry.role,
       };
@@ -792,31 +958,98 @@ export class BrowserManager {
     return result;
   }
 
-  async getInstanceStats() {
-    // Built-in instances (chromium) plus configured add-ons (lazily connected)
-    const addOnInstances = [];
-    if (this.config.browsers) {
-      for (const entry of this.config.browsers) {
-        if (!entry.addOn) continue;
-        addOnInstances.push([entry.name, this._addOnConnection(entry.name), entry]);
-      }
-    }
+  getRelaySummary() {
+    const entries = this._effectiveAddOns().filter((e) => e.type === "navigator-cdp");
+    return {
+      pending: entries.filter((e) => e.status === "auth_pending").map(this._relaySummaryItem),
+      connected: entries.filter((e) => e.status === "connected").map(this._relaySummaryItem)
+    };
+  }
 
-    const allInstances = [
-      { backend: "chromium", instance: this.browser, addOn: false },
-      ...addOnInstances.map(([name, instance, entry]) => ({
-        backend: name,
-        instance,
-        addOn: true,
-        cdpUrl: entry.cdpUrl,
-      }))
+  _relaySummaryItem(entry) {
+    return {
+      name: entry.name,
+      plugin: entry.plugin,
+      status: entry.status,
+      pin: entry.pin ?? undefined,
+      pinExpiresAt: entry.pinExpiresAt ?? undefined,
+      connectedAt: entry.connectedAt ?? undefined,
+      extensionVersion: entry.extensionVersion ?? undefined,
+      wsUrl: relayServer.gatewayWsUrl(entry.name)
+    };
+  }
+
+  async getInstanceStats() {
+    // Built-in instances (chromium) plus each effective add-on. navigator-cdp
+    // entries report directly from the relay registry (no puppet connection
+    // needed until a page tool actually drives them); plain cdp add-ons are
+    // lazily connected and report via their puppet Browser.
+    const statResults = [
+      this._instanceStatWithTimeout("chromium", this.browser, { addOn: false })
     ];
 
-    return Promise.all(
-      allInstances.map(({ backend, instance, addOn, cdpUrl }) =>
-        this._instanceStatWithTimeout(backend, instance, { addOn, cdpUrl })
-      )
-    );
+    for (const entry of this._effectiveAddOns()) {
+      if (entry.type === "navigator-cdp") {
+        statResults.push(this._navigatorCdpStat(entry));
+        continue;
+      }
+      statResults.push(this._instanceStatWithTimeout(
+        entry.name,
+        this._addOnConnection(entry.name),
+        { addOn: true, cdpUrl: entry.cdpUrl }
+      ));
+    }
+
+    return Promise.all(statResults);
+  }
+
+  async _navigatorCdpStat(entry) {
+    const live = relayServer.getEntry(entry.name);
+    if (!live) {
+      return {
+        backend: entry.name,
+        connected: false,
+        tabs: 0,
+        openTabs: [],
+        pid: null,
+        spawns: 0,
+        type: "navigator-cdp",
+        plugin: entry.plugin || "auto",
+        status: "disconnected",
+        cdpUrl: relayServer.gatewayWsUrl(entry.name)
+      };
+    }
+    const conn = this._addOnConnection(entry.name);
+    const isConn = relayServer.isConnected(entry.name);
+    // Refresh the relay's tab list so newly user-opened tabs are visible,
+    // rather than serving a stale cache. Bounded by GATEWAY_WAIT_MS (3s).
+    let tabs;
+    if (isConn) {
+      tabs = await relayServer.refreshTabList(entry.name);
+    } else {
+      tabs = [];
+    }
+    const visible = tabs.filter((t) => isVisiblePageUrl(t.url) && isPageTargetType(t));
+    return {
+      backend: live.name,
+      connected: isConn,
+      tabs: visible.length,
+      openTabs: visible.map((t) => ({
+        title: t.title || "Untitled",
+        url: t.url || "",
+        targetId: t.targetId || null
+      })),
+      pid: null,
+      spawns: 0,
+      type: "navigator-cdp",
+      plugin: entry.plugin,
+      status: isConn ? "connected" : live.status === "auth_pending" ? "auth_pending" : "disconnected",
+      extensionVersion: live.extensionVersion,
+      connectedAt: live.connectedAt || null,
+      puppeteerClients: live.clients && live.clients.size,
+      viaPuppeteer: Boolean(conn?.browser?.connected),
+      cdpUrl: relayServer.gatewayWsUrl(entry.name)
+    };
   }
 
   async _instanceStatWithTimeout(backend, instance, extra = {}) {
@@ -873,6 +1106,7 @@ export class BrowserManager {
         tabs = 0;
         openTabs = [];
       }
+      if (!extra.addOn) openTabs = openTabs.filter((t) => isVisiblePageUrl(t.url));
 
       try {
         pid = instance.process()?.pid ?? null;
@@ -881,14 +1115,19 @@ export class BrowserManager {
       }
     }
 
+    const status = connected
+      ? (extra.status || "connected")
+      : (extra.cdpUrl ? "available" : (extra.status || "disconnected"));
     return {
       backend,
       connected,
+      status,
       tabs,
       openTabs,
       pid,
       spawns: this.instanceSpawns[backend] || 0,
-      ...extra
+      ...extra,
+      status
     };
   }
 
@@ -1033,24 +1272,34 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     if (explicit === "chromium" || explicit === "Chromium") {
       return { page: await mgr._newChromiumPage(), browser: "chromium", rollbackNotes: [] };
     }
-    const entry = (cfg.browsers || []).find((b) => b.addOn && b.name.toLowerCase() === explicit.toLowerCase());
+    const entry = mgr._effectiveAddOns().find((b) => b.name.toLowerCase() === explicit.toLowerCase());
     if (!entry) {
-      throw new Error(`unknown browser "${explicit}" — add a BROWSERS entry with a cdpUrl for it`);
+      throw new Error(`unknown browser "${explicit}" — add a BROWSERS entry with a cdpUrl or type "navigator-cdp" for it`);
     }
     if (roles && !entry.role.some((r) => roles.has(r))) {
       throw new Error(`browser "${explicit}" lacks a required role (${[...roles].join(", ")})`);
+    }
+    if (entry.type === "navigator-cdp" && entry.status !== "connected") {
+      throw new Error(`browser "${explicit}" is ${entry.status} — pair the browser extension (PIN) before routing to it`);
     }
     try {
       const page = await mgr._connectAddOnPage(entry);
       return { page, browser: entry.name, rollbackNotes: [] };
     } catch (error) {
-      throw new Error(`browser "${explicit}" unreachable (${entry.cdpUrl}): ${error?.message || error}`);
+      const endpoint = entry.type === "navigator-cdp"
+        ? relayServer.gatewayWsUrl(entry.name)
+        : entry.cdpUrl;
+      throw new Error(`browser "${explicit}" unreachable (${endpoint}): ${error?.message || error}`);
     }
   }
 
   const rollbackNotes = [];
-  const candidates = (cfg.browsers || []).filter((b) => b.addOn && (!roles || b.role.some((r) => roles.has(r))));
+  const candidates = mgr._effectiveAddOns().filter((b) => !roles || b.role.some((r) => roles.has(r)));
   for (const entry of candidates) {
+    if (entry.type === "navigator-cdp" && entry.status !== "connected") {
+      rollbackNotes.push(`${entry.name}: ${entry.status}`);
+      continue;
+    }
     try {
       const page = await mgr._connectAddOnPage(entry);
       return { page, browser: entry.name, rollbackNotes };

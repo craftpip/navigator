@@ -1369,10 +1369,12 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
     if (result.length === 1) {
       activityCounters.searchResults += result[0].resultCount;
       incrementUsageTotal("resultsServed", result[0].resultCount);
+      const preview = (result[0].results || []).map((r) => r.llmText || `${r.title || ""} ${r.url || ""}`.trim()).join("\n\n").slice(0, 8000);
       recordSearchEnd(searchId, {
         ok: true,
         resultCount: result[0].resultCount,
-        durationMs: performance.now() - tSearchStart
+        durationMs: performance.now() - tSearchStart,
+        responsePreview: preview
       });
       return {
         query: result[0].query,
@@ -1415,10 +1417,12 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
     const totalResultCount = [...combinedByUrl.values()].length;
     activityCounters.searchResults += totalResultCount;
     incrementUsageTotal("resultsServed", totalResultCount);
+    const previewMulti = [...combinedByUrl.values()].slice(0, 5).map((r) => r.llmText || `${r.title || ""} ${r.url || ""}`.trim()).join("\n\n").slice(0, 8000);
     recordSearchEnd(searchId, {
       ok: true,
       resultCount: totalResultCount,
-      durationMs: performance.now() - tSearchStart
+      durationMs: performance.now() - tSearchStart,
+      responsePreview: previewMulti
     });
 
     return {
@@ -2436,11 +2440,11 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
     });
 
     await operation.finish("op_complete");
-    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: true });
+    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: true, responsePreview: result.text || "" });
     return result;
   } catch (error) {
     await operation.finish(operation.timedOut ? "op_timeout" : "op_failed");
-    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tOverall, ok: false, error: String(error?.message || error) });
+    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tOverall, ok: false, error: String(error?.message || error), responsePreview: "" });
     throw error;
   } finally {
     operation.dispose();

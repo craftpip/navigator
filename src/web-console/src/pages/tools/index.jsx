@@ -12,10 +12,48 @@ function Tools() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState("markdown");
+  const [browserOptions, setBrowserOptions] = useState([]);
 
   useEffect(() => {
     loadTools();
+    loadBrowserOptions();
   }, []);
+
+  const loadBrowserOptions = async () => {
+    try {
+      const res = await fetch("/health");
+      const data = await res.json();
+      const list = data?.browsers || data?.addOns && Object.entries(data.addOns).map(([name, info]) => ({ name, ...info })) || [];
+      const opts = [];
+      if (Array.isArray(data?.browsers)) {
+        for (const b of data.browsers) {
+          if (b.name) opts.push({ name: b.name, status: b.status || (b.connected ? "connected" : "available"), connected: Boolean(b.connected) });
+        }
+      }
+      if (!opts.find((b) => b.name === "chromium")) opts.unshift({ name: "chromium", status: "connected", connected: true });
+      if (!opts.length) {
+        // fallback via list_browsers tool
+        const mcp = await mcpRequest("tools/call", { name: "list_browsers", arguments: {} });
+        const text = mcp.json?.result?.content?.[0]?.text || "";
+        try {
+          const parsed = JSON.parse(text);
+          const blist = parsed.browsers || [];
+          for (const b of blist) opts.push({ name: b.name, status: b.status, connected: b.connected });
+        } catch {}
+      }
+      // ensure Chrome is present if not in list but available via health relay
+      if (data?.relay?.connected?.length) {
+        for (const r of data.relay.connected) {
+          if (!opts.find((b) => b.name === r.name)) opts.push({ name: r.name, status: "connected", connected: true });
+        }
+      }
+      // dedupe and sort: connected first, then available, then disconnected
+      const seen = new Set();
+      const uniq = opts.filter((b) => { if (seen.has(b.name)) return false; seen.add(b.name); return true; });
+      uniq.sort((a,b) => (b.connected - a.connected) || a.name.localeCompare(b.name));
+      setBrowserOptions(uniq);
+    } catch {}
+  };
 
   const mcpRequest = async (method, params) => {
     const t0 = performance.now();
@@ -167,6 +205,19 @@ function Tools() {
           propertySchema.items?.type === "integer"
             ? values.map((item) => Number(item))
             : values;
+      } else if (propertySchema.type === "object") {
+        if (raw === "" || raw === null || raw === undefined) continue;
+        if (typeof raw === "object" && !Array.isArray(raw)) {
+          if (!Object.keys(raw).length) continue;
+          args[name] = raw;
+        } else if (typeof raw === "string" && raw.trim()) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object" && Object.keys(parsed).length) args[name] = parsed;
+          } catch {
+            continue;
+          }
+        }
       } else {
         if (raw === "" || raw === null || raw === undefined) continue;
         args[name] = String(raw);
@@ -273,6 +324,7 @@ function Tools() {
                     schema={propertySchema}
                     value={form[name]}
                     onChange={(value) => setValue(name, value)}
+                    browserOptions={browserOptions}
                   />
                 ))}
                 {!Object.keys(props).length && (

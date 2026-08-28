@@ -98,7 +98,35 @@ const MIGRATIONS = [
    INSERT INTO usage_totals (key, value)
      VALUES ('toolCalls', (SELECT COUNT(*) FROM activity_events))
      ON CONFLICT(key) DO UPDATE SET value = CASE WHEN usage_totals.value > excluded.value THEN usage_totals.value ELSE excluded.value END;`,
-  `ALTER TABLE page_ops ADD COLUMN status TEXT;`
+   `ALTER TABLE page_ops ADD COLUMN status TEXT;`,
+   `CREATE TABLE IF NOT EXISTS relay_sessions (
+      name TEXT PRIMARY KEY,
+      session_token TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );`,
+   `ALTER TABLE searches ADD COLUMN response_preview TEXT;`,
+   `ALTER TABLE page_ops ADD COLUMN response_preview TEXT;`,
+   `CREATE TABLE IF NOT EXISTS mcp_calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      tool TEXT NOT NULL,
+      args_json TEXT,
+      response_preview TEXT,
+      ip TEXT,
+      api_key_id INTEGER REFERENCES api_keys(id),
+      api_key_name TEXT,
+      api_key_preview TEXT,
+      duration_ms INTEGER,
+      ok INTEGER NOT NULL,
+      error TEXT,
+      source TEXT NOT NULL DEFAULT 'mcp',
+      search_id INTEGER REFERENCES searches(id),
+      page_op_id INTEGER REFERENCES page_ops(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_calls_ts ON mcp_calls(ts);
+    CREATE INDEX IF NOT EXISTS idx_mcp_calls_tool ON mcp_calls(tool);
+    CREATE INDEX IF NOT EXISTS idx_mcp_calls_search_id ON mcp_calls(search_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_calls_page_op_id ON mcp_calls(page_op_id);`
 ];
 
 export function initDb(dataDir = path.join(process.cwd(), "data")) {
@@ -127,6 +155,23 @@ export function getDb() {
 
 export function isDbReady() {
   return Boolean(db);
+}
+
+export function saveRelaySession(name, sessionToken) {
+  if (!db) return;
+  getDb()
+    .prepare("INSERT OR REPLACE INTO relay_sessions (name, session_token, created_at) VALUES (?, ?, ?)")
+    .run(name, sessionToken, Date.now());
+}
+
+export function loadRelaySessions() {
+  if (!db) return [];
+  return getDb().prepare("SELECT name, session_token FROM relay_sessions").all();
+}
+
+export function deleteRelaySession(name) {
+  if (!db) return false;
+  return getDb().prepare("DELETE FROM relay_sessions WHERE name = ?").run(name).changes > 0;
 }
 
 export function incrementUsageTotal(key, amount = 1) {

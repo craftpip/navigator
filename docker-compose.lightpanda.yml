@@ -1,0 +1,61 @@
+name: navigator
+
+services:
+  # Lightpanda CDP sidecar (add-on browser, see plans/39 §12 and plan 42).
+  # Lightpanda is the fast, low-memory headless browser for bulk/fetch-heavy
+  # workloads. `lightpanda serve` exposes a WebSocket CDP endpoint on :9222
+  # (browser-level, puppeteer.connect({ browserWSEndpoint }) — unlike
+  # CloakBrowser's cloakserve which is an HTTP CDP server / browserURL).
+  #
+  # OPT-IN — independent of navigator: the main `docker compose up -d` runs
+  # built-in Chromium only. Start Lightpanda when you want it:
+  #
+  #   docker compose -f docker-compose.lightpanda.yml up -d
+  #
+  # Then point navigator at it by setting BROWSERS in .env.
+  #
+  # IMPORTANT — use the static IP, NOT the service name "lightpanda":
+  # Lightpanda's CDP WebSocket handshake rejects any `Host:` that is not an
+  # IP literal (it has a DNS-rebinding guard: only IP literals or the exact
+  # `localhost:<port>` form pass). The service hostname resolves to a
+  # container IP in the Host header and gets a 403 "Host not allowed". Hence
+  # the static IP below — reference it as `ws://172.22.0.222:9222`:
+  #
+  #   BROWSERS='[
+  #     {"name":"chromium","role":[]},
+  #     {"name":"lightpanda","role":["fetch","screenshot"],"cdpUrl":"ws://172.22.0.222:9222"}
+  #   ]'
+  #
+  # If 172.22.0.222 clashes with something on your compose network, change the
+  # static IP here AND the cdpUrl together — they must match.
+  #
+  # Cautions (see AGENTS.md "Lightpanda screenshot caveat"): Lightpanda has no
+  # graphical rendering engine — screenshots are placeholders, not faithful
+  # renders. Prefer it for speed/cost on fetch/extraction; keep Chromium for
+  # anything visual. If this container is down, implicit (browser-less) page
+  # tools fall back to the next candidate then Chromium; only an explicit
+  # browser:"lightpanda" call errors (strict, no silent reroute).
+  lightpanda:
+    container_name: "lightpanda"
+    image: lightpanda/browser:latest
+    restart: unless-stopped
+    # image default Cmd is already `lightpanda serve --host 0.0.0.0 --port 9222`
+    networks:
+      default:
+        # Static IP so navigator can dial `ws://172.22.0.222:9222` as an IP
+        # literal (Lightpanda rejects hostname Host headers — see above).
+        ipv4_address: 172.22.0.222
+    ports:
+      - "127.0.0.1:${LIGHTPANDA_CDP_PORT:-9223}:9222"
+    environment:
+      LIGHTPANDA_DISABLE_TELEMETRY: "true"
+    shm_size: "512m"
+    init: true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "1.0"
+          memory: 256m

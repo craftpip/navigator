@@ -1,0 +1,42 @@
+name: navigator
+
+services:
+  # CloakBrowser CDP sidecar (add-on browser, see plans/39 §12).
+  # cloakserve is a CDP multiplexer exposing an HTTP CDP server on :9222
+  # (one Chrome process per fingerprint seed); navigator connects to it as a
+  # BROWSERS add-on via browserURL.
+  #
+  # OPT-IN — independent of navigator: the main `docker compose up -d` runs
+  # built-in Chromium only. Start CloakBrowser when you want it:
+  #
+  #   docker compose -f docker-compose.cloak.yml up -d
+  #
+  # Then point navigator at it by setting BROWSERS in .env, e.g.:
+  #
+  #   BROWSERS='[
+  #     {"name":"chromium","role":[]},
+  #     {"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}
+  #   ]'
+  #
+  # If this container is down, navigator's implicit (browser-less) page tools
+  # fall back to Chromium automatically; only an explicit `browser:"cloakbrowser"`
+  # call errors (strict, no silent reroute).
+  cloak-browser:
+    container_name: "cloak-browser"
+    image: cloakhq/cloakbrowser
+    restart: unless-stopped
+    command: ["cloakserve"]   # image default CMD is `python`; run the CDP multiplexer
+    ports:
+      - "127.0.0.1:${CLOAK_CDP_PORT:-9222}:9222"
+    environment:
+      CLOAKBROWSER_LICENSE_KEY: ${CLOAKBROWSER_LICENSE_KEY:-}   # set for persistent licensed use
+    shm_size: "2gb"
+    init: true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+        reservations:
+          cpus: "2.0"
+          memory: 2g

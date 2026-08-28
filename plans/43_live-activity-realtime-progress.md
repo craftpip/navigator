@@ -224,10 +224,11 @@ Clicking any Live activity row opens a focused pop-up (modal) with **full reques
   * Footer: `Copy ID` / `Copy error` buttons, `Close` (primary).
 * **Live update:** Modal is fed from the same `feed` array (prop). If the underlying entry updates (`running→ok`), the modal content re-renders in place without closing. No new fetch required for v1. If user opened a row that later scrolls out of the 200-row window, keep last snapshot.
 
-### 13.4 Data — frontend-only v1, no new endpoint required
+### 13.4 Data — detail on demand (no response body)
 
-* `buildFeed` already retains `search.variants`, `requested_engine`, `engines`, `attempts[]` full objects, and `pageOps` full row. No backend change for v1; just pass the **selected entry object** from `feed` into the modal.
-* Optional follow-up: `GET /stats/activity/:id` (search or pageOp) for truncated `variants`/`error` beyond `300` chars or for `results` preview. Not needed for Phase 1 — `error` already `slice(0,300)` and `query` `slice(0,500)` are sufficient for detail view.
+* Listing `GET /stats/activity` stays light — `query` `80ch` preview in `buildFeed`, DB truncates `query` `500`/`error` `300`/`url` `2000` — `200` rows cheap. **Polling never loads response bodies** (`page_ops` stores only `response_chars`, `searches` stores only `result_count`).
+* **Detail endpoint (new, called only on click):** `GET /stats/activity/:key` (`key=s-{searchId}` or `p-{pageOpId}`) → single JSON `{ entry, attempts }` or `{ op }` with **full** `query`/`variants`/`requested_engine`/`engines`/`error`/`url`/`backend`/`status`/`duration_ms`/`ts` — **no `text`/`results`/`tables`/`response_chars` body**, no `activity_events`. Keeps payload `~1-2KB` and polling (`2s`) unaffiliated.
+* Fallback: if detail fetch fails, modal falls back to `feed` snapshot (preview).
 
 ### 13.5 Implementation steps (Phase 2)
 

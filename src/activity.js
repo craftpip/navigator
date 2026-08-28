@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { getDb, initDb, isDbReady, pruneActivity } from "./db.js";
 
 export const searchContext = new AsyncLocalStorage();
+export const mcpCallContext = new AsyncLocalStorage();
 
 const RETENTION_STATS_MS = 24 * 60 * 60 * 1000;
 export const ACTIVITY_TREND_RANGES = Object.freeze({
@@ -44,19 +45,35 @@ export function recordSearchStart({ query, variants, requestedEngine, engines })
   });
 }
 
-export function recordSearchEnd(searchId, { ok = true, error = "", resultCount = 0, durationMs = 0 } = {}) {
+export function recordSearchEnd(searchId, { ok = true, error = "", resultCount = 0, durationMs = 0, responsePreview = "" } = {}) {
   if (!searchId) return;
   runExclusive(() => {
-    getDb()
-      .prepare("UPDATE searches SET status = ?, ok = ?, error = ?, result_count = ?, duration_ms = ? WHERE id = ?")
-      .run(
-        ok ? "ok" : "fail",
-        ok ? 1 : 0,
-        ok ? "" : String(error || "").slice(0, 300),
-        Math.max(0, Number(resultCount) || 0),
-        Math.max(0, Math.round(durationMs) || 0),
-        searchId
-      );
+    const preview = String(responsePreview || "").slice(0, 8000);
+    try {
+      getDb()
+        .prepare("UPDATE searches SET status = ?, ok = ?, error = ?, result_count = ?, duration_ms = ?, response_preview = ? WHERE id = ?")
+        .run(
+          ok ? "ok" : "fail",
+          ok ? 1 : 0,
+          ok ? "" : String(error || "").slice(0, 300),
+          Math.max(0, Number(resultCount) || 0),
+          Math.max(0, Math.round(durationMs) || 0),
+          preview || null,
+          searchId
+        );
+    } catch {
+      // column may not exist yet before migration — fallback without preview
+      getDb()
+        .prepare("UPDATE searches SET status = ?, ok = ?, error = ?, result_count = ?, duration_ms = ? WHERE id = ?")
+        .run(
+          ok ? "ok" : "fail",
+          ok ? 1 : 0,
+          ok ? "" : String(error || "").slice(0, 300),
+          Math.max(0, Number(resultCount) || 0),
+          Math.max(0, Math.round(durationMs) || 0),
+          searchId
+        );
+    }
   });
 }
 
@@ -123,36 +140,70 @@ export function recordPageOpStart({ tool, url, backend, source = "mcp" }) {
   });
 }
 
-export function recordPageOp({ id = null, tool, url, backend, durationMs = 0, responseChars = 0, ok = true, error = "", source = "mcp" }) {
+export function recordPageOp({ id = null, tool, url, backend, durationMs = 0, responseChars = 0, ok = true, error = "", source = "mcp", responsePreview = "" }) {
+  const preview = String(responsePreview || "").slice(0, 8000);
   runExclusive(() => {
     if (id) {
+      try {
+        getDb()
+          .prepare("UPDATE page_ops SET duration_ms = ?, response_chars = ?, ok = ?, status = ?, error = ?, backend = COALESCE(?, backend), response_preview = ? WHERE id = ?")
+          .run(
+            Math.max(0, Math.round(durationMs) || 0),
+            Math.max(0, Math.round(responseChars) || 0),
+            ok ? 1 : 0,
+            ok ? "ok" : "fail",
+            ok ? "" : String(error || "").slice(0, 300),
+            backend || null,
+            preview || null,
+            id
+          );
+      } catch {
+        getDb()
+          .prepare("UPDATE page_ops SET duration_ms = ?, response_chars = ?, ok = ?, status = ?, error = ?, backend = COALESCE(?, backend) WHERE id = ?")
+          .run(
+            Math.max(0, Math.round(durationMs) || 0),
+            Math.max(0, Math.round(responseChars) || 0),
+            ok ? 1 : 0,
+            ok ? "ok" : "fail",
+            ok ? "" : String(error || "").slice(0, 300),
+            backend || null,
+            id
+          );
+      }
+      return;
+    }
+    try {
       getDb()
-        .prepare("UPDATE page_ops SET duration_ms = ?, response_chars = ?, ok = ?, status = ?, error = ?, backend = COALESCE(?, backend) WHERE id = ?")
+        .prepare("INSERT INTO page_ops (ts, tool, url, backend, duration_ms, response_chars, ok, status, error, source, response_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(
+          Date.now(),
+          String(tool),
+          String(url || "").slice(0, 2000),
+          backend || null,
           Math.max(0, Math.round(durationMs) || 0),
           Math.max(0, Math.round(responseChars) || 0),
           ok ? 1 : 0,
           ok ? "ok" : "fail",
           ok ? "" : String(error || "").slice(0, 300),
-          backend || null,
-          id
+          source,
+          preview || null
         );
-      return;
+    } catch {
+      getDb()
+        .prepare("INSERT INTO page_ops (ts, tool, url, backend, duration_ms, response_chars, ok, status, error, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          Date.now(),
+          String(tool),
+          String(url || "").slice(0, 2000),
+          backend || null,
+          Math.max(0, Math.round(durationMs) || 0),
+          Math.max(0, Math.round(responseChars) || 0),
+          ok ? 1 : 0,
+          ok ? "ok" : "fail",
+          ok ? "" : String(error || "").slice(0, 300),
+          source
+        );
     }
-    getDb()
-      .prepare("INSERT INTO page_ops (ts, tool, url, backend, duration_ms, response_chars, ok, status, error, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(
-        Date.now(),
-        String(tool),
-        String(url || "").slice(0, 2000),
-        backend || null,
-        Math.max(0, Math.round(durationMs) || 0),
-        Math.max(0, Math.round(responseChars) || 0),
-        ok ? 1 : 0,
-        ok ? "ok" : "fail",
-        ok ? "" : String(error || "").slice(0, 300),
-        source
-      );
   });
 }
 
@@ -171,17 +222,86 @@ export function getRecentActivity({ sinceId = 0, sinceOpId = 0, limit = 100, inc
     .prepare("SELECT * FROM searches WHERE id > ? OR ts >= ? ORDER BY id DESC LIMIT ?")
     .all(Number(sinceId) || 0, recentCutoff, Math.min(500, Math.max(1, Number(limit) || 100)));
   const attemptStmt = db.prepare("SELECT * FROM engine_attempts WHERE search_id = ? ORDER BY id");
-  const entries = searches.map((search) => ({
-    ...search,
-    attempts: attemptStmt.all(search.id)
-  }));
+  const entries = searches.map((search) => {
+    const { response_preview, ...rest } = search;
+    return { ...rest, attempts: attemptStmt.all(search.id) };
+  });
   let pageOps = [];
   if (includePageOps) {
     pageOps = db
       .prepare("SELECT * FROM page_ops WHERE id > ? OR ts >= ? ORDER BY id DESC LIMIT ?")
       .all(Number(sinceOpId) || 0, recentCutoff, Math.min(500, Math.max(1, Number(limit) || 100)));
+    // Strip preview for polling — detail endpoint serves it on demand
+    pageOps = pageOps.map(({ response_preview, ...rest }) => rest);
   }
   return { entries, pageOps };
+}
+
+export function getSearchDetail(id) {
+  const search = getDb().prepare("SELECT * FROM searches WHERE id = ?").get(Number(id) || 0);
+  if (!search) return null;
+  const attempts = getDb().prepare("SELECT * FROM engine_attempts WHERE search_id = ? ORDER BY id").all(search.id);
+  return { ...search, attempts };
+}
+
+export function getPageOpDetail(id) {
+  return getDb().prepare("SELECT * FROM page_ops WHERE id = ?").get(Number(id) || 0) || null;
+}
+
+export function recordMcpCall({ tool, args, responsePreview, ip, apiKeyId, apiKeyName, apiKeyPreview, durationMs, ok, error, source = "mcp", searchId = null, pageOpId = null }) {
+  return runExclusive(() => {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO mcp_calls (ts, tool, args_json, response_preview, ip, api_key_id, api_key_name, api_key_preview, duration_ms, ok, error, source, search_id, page_op_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(
+        Date.now(),
+        String(tool || "unknown"),
+        args != null ? String(JSON.stringify(args)).slice(0, 8000) : null,
+        String(responsePreview || "").slice(0, 8000) || null,
+        ip ? String(ip).slice(0, 100) : null,
+        apiKeyId ? Number(apiKeyId) : null,
+        apiKeyName ? String(apiKeyName).slice(0, 100) : null,
+        apiKeyPreview ? String(apiKeyPreview).slice(0, 20) : null,
+        Math.max(0, Math.round(durationMs) || 0),
+        ok ? 1 : 0,
+        ok ? "" : String(error || "").slice(0, 500),
+        String(source || "mcp"),
+        searchId ? Number(searchId) : null,
+        pageOpId ? Number(pageOpId) : null
+      );
+    return Number(info.lastInsertRowid);
+  });
+}
+
+export function getMcpCallById(id) {
+  return getDb().prepare("SELECT * FROM mcp_calls WHERE id = ?").get(Number(id) || 0) || null;
+}
+
+export function getMcpCallForActivity(key) {
+  // key is s-<id> or p-<id>
+  if (typeof key !== "string") return null;
+  if (key.startsWith("s-")) {
+    const searchId = Number(key.slice(2)) || 0;
+    const direct = getDb().prepare("SELECT * FROM mcp_calls WHERE search_id = ? ORDER BY id DESC LIMIT 1").get(searchId);
+    if (direct) return direct;
+    const search = getDb().prepare("SELECT ts FROM searches WHERE id = ?").get(searchId);
+    if (search) {
+      return getDb().prepare("SELECT * FROM mcp_calls WHERE tool = 'web_search' AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1").get(search.ts - 10000, search.ts + 10000, search.ts) || null;
+    }
+    return null;
+  }
+  if (key.startsWith("p-")) {
+    const pageOpId = Number(key.slice(2)) || 0;
+    const direct = getDb().prepare("SELECT * FROM mcp_calls WHERE page_op_id = ? ORDER BY id DESC LIMIT 1").get(pageOpId);
+    if (direct) return direct;
+    const op = getDb().prepare("SELECT ts, tool FROM page_ops WHERE id = ?").get(pageOpId);
+    if (op) {
+      return getDb().prepare("SELECT * FROM mcp_calls WHERE tool = ? AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1").get(op.tool, op.ts - 10000, op.ts + 10000, op.ts) || null;
+    }
+    return null;
+  }
+  return null;
 }
 
 export function getEngineSuccessStats({ sinceMs = Date.now() - RETENTION_STATS_MS } = {}) {

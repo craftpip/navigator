@@ -33,3 +33,8 @@ docs/node_modules/
 # Browser plugin — packed build + signing key (secret, defines extension ID)
 chrome-extension/dist/
 chrome-extension/chrome-extension-key.pem
+
+# Firefox browser plugin — build artifacts + dev profile
+firefox-extension/dist/
+firefox-extension/dist-firefox/
+firefox-extension/firefox-profile/

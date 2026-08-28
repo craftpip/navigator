@@ -14,13 +14,15 @@ import {
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import { DEFAULT_MAX_CHARS } from "./config.js";
-import { getBrowserManager, resolveBrowserParam } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam, browserOwnership } from "./browser.js";
+import { relayServer } from "./relay-server.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
-import { getActivityTrend, getRecentActivity, recordActivityEvent, recordPageOp, recordPageOpStart } from "./activity.js";
+import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
+import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, revokeMcpApiKey, setMcpApiKeyTools } from "./db.js";
 import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
@@ -37,6 +39,28 @@ const PACKAGE_JSON = require("../package.json");
 
 const webConsoleDir = path.join(process.cwd(), "src", "web-console", "dist");
 const webConsoleIndexPath = path.join(webConsoleDir, "index.html");
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim().slice(0, 100);
+  }
+  const realIp = req.headers["x-real-ip"];
+  if (typeof realIp === "string" && realIp.trim()) return realIp.trim().slice(0, 100);
+  return (req.socket?.remoteAddress || "").slice(0, 100);
+}
+
+function getMcpCallKeyInfo(headers) {
+  const rawKey = getMcpApiKey(headers);
+  if (!rawKey) return { id: null, name: null, preview: null };
+  const keys = listMcpApiKeys();
+  const match = keys.find((k) => k.secret === rawKey);
+  if (match) {
+    return { id: match.id, name: match.name, preview: maskApiKey(match.secret) };
+  }
+  // Fallback: show preview of provided key even if not found (e.g., console key)
+  return { id: null, name: null, preview: maskApiKey(rawKey) };
+}
 const WEB_CONSOLE_CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -1825,7 +1849,7 @@ function getToolsListResponse(allowedTools = null) {
             },
             browser: {
               type: "string",
-              description: "Browser to use (chromium default, or an add-on name from list_browsers). Defaults to the matching hint's browserEngine."
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). Defaults to the matching hint's browserEngine. NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
             }
           },
           description: "Provide one of: urls (string[]) or ref_ids (number[]) from a previous web_search call. Prefer ref_ids when available.",
@@ -1855,7 +1879,7 @@ function getToolsListResponse(allowedTools = null) {
             },
             browser: {
               type: "string",
-              description: "Browser to use (chromium default, or an add-on name from list_browsers). Screenshots an existing tab for a targetId when no value is set."
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). Screenshots an existing tab for a targetId when no value is set. NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
             },
             viewport: {
               type: "object",
@@ -1945,7 +1969,7 @@ function getToolsListResponse(allowedTools = null) {
             includeXpath: { type: "boolean", default: true },
             browser: {
               type: "string",
-              description: "Browser to use (chromium default, or an add-on name from list_browsers)."
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
             }
           },
           additionalProperties: false
@@ -1958,13 +1982,11 @@ function getToolsListResponse(allowedTools = null) {
         inputSchema: {
           type: "object",
           properties: {
-            url: { type: "string", description: "Single URL to snapshot (prefer this for one page)" },
             urls: {
               type: "array",
               items: { type: "string" },
-              description: "One or more URLs to open"
+              description: "One or more URLs to snapshot"
             },
-            ref_id: { type: "number", description: "Result id from a previous web_search call (single)" },
             ref_ids: {
               type: "array",
               items: { type: "number" },
@@ -1998,7 +2020,7 @@ function getToolsListResponse(allowedTools = null) {
             includeXpath: { type: "boolean", default: true },
             browser: {
               type: "string",
-              description: "Browser to use (chromium default, or an add-on name from list_browsers)."
+              description: "Browser to use (chromium default, or an add-on name from list_browsers). NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
             },
             hybrid: { type: "boolean", default: false, description: "When true, SVG includes <foreignObject> with inlined HTML for 100% visual fidelity (hybrid: foreignObject visual + rect data-* geometry). Use for pixel-perfect replication of http://10.69.1.164:1994/." },
             output: {
@@ -2014,7 +2036,7 @@ function getToolsListResponse(allowedTools = null) {
       {
         name: "list_browsers",
         description:
-          "List all configured browser backends with their roles, connection status, and type. Use to discover available browsers before routing devtools calls.",
+          "List all configured browser backends with their roles, connection status, type, and ownership. ownership \"user\" = a `navigator-cdp` relay browser — that is the USER's real, visible, NON-headless browser window; everything the agent does there (tabs, clicks, navigation, screenshots input) appears on the user's screen, so the user can see it. ownership \"agent\" = navigator-owned browsers (builtin Chromium, plain `cdp` add-ons like cloakbrowser/lightpanda) that are headless/invisible to the user. Use to discover available browsers and know whether activity is user-visible before routing devtools calls.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -2574,7 +2596,7 @@ async function handleToolCallInner(name, args = {}) {
 
     if (hasTargetId) {
       const targetId = String(args.targetId).trim();
-      const state = getTargetState(targetId);
+      const state = await getTargetState(targetId);
       let prevViewport = null;
       let didOverride = false;
       if (viewportOverride) {
@@ -2634,6 +2656,9 @@ async function handleToolCallInner(name, args = {}) {
     }
 
     // Non-targetId path — ephemeral pages, batch support
+    if (Object.prototype.hasOwnProperty.call(args, "url") || Object.prototype.hasOwnProperty.call(args, "ref_id")) {
+      throw new Error('Invalid input: web_page_svg no longer accepts singular "url" / "ref_id" — use "urls" / "ref_ids"');
+    }
     const targetUrls = (() => {
       try {
         return resolveOpenTarget(args);
@@ -2717,17 +2742,31 @@ async function handleToolCallInner(name, args = {}) {
 
   if (name === "list_browsers") {
     const manager = await getBrowserManager();
-    const browsers = (manager.config.browsers || []).map((b) => {
-      const state = manager._addOnState.get(b.addOn ? `addon_${b.name}` : b.name);
-      const connected = b.addOn ? Boolean(state?.browser?.connected) : Boolean(manager.browser?.connected);
-      return {
+    const effective = manager._effectiveAddOns();
+    const browsers = [
+      {
+        name: "chromium",
+        role: manager.config.browsers?.find((b) => b.name === "chromium")?.role || ["default"],
+        type: "builtin",
+        ownership: browserOwnership("builtin"),
+        connected: Boolean(manager.browser?.connected),
+        status: manager.browser?.connected ? "connected" : "disconnected"
+      },
+      ...effective.map((b) => ({
         name: b.name,
         role: b.role,
-        type: b.addOn ? "addon" : "builtin",
-        connected,
-        ...(b.addOn ? { cdpUrl: b.cdpUrl } : {}),
-      };
-    });
+        type: b.type,
+        ownership: browserOwnership(b.type),
+        plugin: b.plugin,
+        configured: b.configured,
+        status: b.status,
+        paired: b.paired ?? (b.type === "navigator-cdp" ? relayServer.isPaired(b.name) : undefined),
+        connected: b.type === "cdp" ? manager._isAddOnConnected(b.name) : b.status === "connected",
+        ...(b.type === "navigator-cdp"
+          ? { cdpUrl: relayServer.gatewayWsUrl(b.name) }
+          : b.cdpUrl ? { cdpUrl: b.cdpUrl } : {})
+      }))
+    ];
     timer.end({ status: "ok" });
     return asMarkdownContent(JSON.stringify({ browsers }, null, 2));
   }
@@ -2758,12 +2797,15 @@ async function handleToolCallInner(name, args = {}) {
 
   if (manager.config.enableDevtoolsMcp && devtoolsToolDefinitions.some((tool) => tool.name === name)) {
     const startedAt = performance.now();
+    // Target.getTargets aggregates across all browsers — it does not run on any
+    // single engine/backend, so we store no backend (pill hidden in Live activity).
+    const devtoolsBackend = name === "Target.getTargets" ? null : (args.browser || "chromium");
     try {
       const result = await runWithHangGuard(`mcp:${name}`, () => handleDevtoolsToolCall(name, args));
       recordPageOp({
         tool: name,
         url: args.url || args.targetId || "",
-        backend: args.browser || "chromium",
+        backend: devtoolsBackend,
         durationMs: performance.now() - startedAt,
         responseChars: JSON.stringify(result).length,
         source: "devtools"
@@ -2778,7 +2820,7 @@ async function handleToolCallInner(name, args = {}) {
         durationMs: performance.now() - startedAt,
         ok: false,
         error: String(error?.message || error),
-        backend: args.browser || "chromium",
+        backend: devtoolsBackend,
         source: "devtools"
       });
       throw error;
@@ -2882,14 +2924,28 @@ function createMcpServer(allowedTools = null) {
     try {
       const response = await handleToolCall(name, args, allowedTools);
       const ms = Date.now() - t0;
-      const ok = response?.content?.[0]?.text || "";
-      const okLabel = ok.length ? `${Math.round(ok.length / 1000)}k chars` : "";
+      const okText = response?.content?.[0]?.text || "";
+      const okLabel = okText.length ? `${Math.round(okText.length / 1000)}k chars` : "";
       console.error(`📨  ${ms}ms${okLabel ? " · " + okLabel : ""}`);
+      try {
+        const ctx = mcpCallContext.getStore();
+        const ip = ctx?.ip || null;
+        const keyInfo = ctx?.keyInfo || { id: null, name: null, preview: null };
+        const preview = String(okText || JSON.stringify(response || "")).slice(0, 8000);
+        recordMcpCall({ tool: name, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: ms, ok: true, error: "", source: "mcp" });
+      } catch {}
       return response;
     } catch (error) {
       console.error(`❌  tool ${name} failed: ${truncateStr(String(error?.message || error), 200)}`);
       if (error?.stack) console.error(`❌  stack: ${truncateStr(error.stack, 600)}`);
       logToolError({ tool: name, args, error, ms: Date.now() - t0, transport: "mcp" });
+      try {
+        const ctx = mcpCallContext.getStore();
+        const ip = ctx?.ip || null;
+        const keyInfo = ctx?.keyInfo || { id: null, name: null, preview: null };
+        const preview = String(error?.message || error).slice(0, 8000);
+        recordMcpCall({ tool: name, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: Date.now() - t0, ok: false, error: String(error?.message || error), source: "mcp" });
+      } catch {}
       const errorResponse = {
         isError: true,
         ...asMarkdownContent(`Error calling ${name}: ${String(error?.message || error)}`)
@@ -2905,7 +2961,10 @@ async function maybeStartHttpServer(managerOverride) {
   const manager = managerOverride || (await getBrowserManager());
   initDb();
   syncMcpApiKeys(manager);
-  if (!manager.config.enableHttpHealth && !manager.config.enableHttpMcp) return;
+  const wantsRelay = (manager.config.browsers || []).some(
+    (b) => b.addOn && b.type === "navigator-cdp"
+  );
+  if (!manager.config.enableHttpHealth && !manager.config.enableHttpMcp && !wantsRelay) return;
 
   const mcpTransports = new Map();
   const mcpServers = new Map();
@@ -3019,7 +3078,11 @@ async function maybeStartHttpServer(managerOverride) {
           {
             const existingTransport = sessionId ? (mcpTransports.get(sessionId) || null) : null;
             if (existingTransport) {
-              await existingTransport.handleRequest(req, res, body);
+              const ip = getClientIp(req);
+              const keyInfo = getMcpCallKeyInfo(req.headers);
+              await mcpCallContext.run({ ip, keyInfo }, async () => {
+                await existingTransport.handleRequest(req, res, body);
+              });
               return;
             }
           }
@@ -3036,6 +3099,19 @@ async function maybeStartHttpServer(managerOverride) {
           const resSum = mcpResponseSummary(response);
           if (isToolCall && reqSum) {
             console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
+          }
+          if (isToolCall) {
+            try {
+              const tool = body?.params?.name || "unknown";
+              const args = body?.params?.arguments || {};
+              const ip = getClientIp(req);
+              const keyInfo = getMcpCallKeyInfo(req.headers);
+              const rawText = response?.result?.content?.[0]?.text ?? "";
+              const preview = String(rawText || JSON.stringify(response?.result || "")).slice(0, 8000);
+              const ok = !response?.result?.isError;
+              const error = ok ? "" : String(rawText || "error").slice(0, 500);
+              recordMcpCall({ tool, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: ms, ok, error, source: "mcp" });
+            } catch {}
           }
           sendJson(res, 200, response);
           return;
@@ -3107,6 +3183,12 @@ async function maybeStartHttpServer(managerOverride) {
         return;
       }
 
+      if (url.pathname === "/debug/detach_all") {
+        const result = relayServer.detachAllDebuggers();
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
       if (url.pathname === "/stats") {
         const instances = await manager.getInstanceStats();
         const memory = process.memoryUsage();
@@ -3127,6 +3209,7 @@ async function maybeStartHttpServer(managerOverride) {
             }
           },
           instances,
+          relay: manager.getRelaySummary(),
           counters: {
             ...getActivityCounters(),
             ...getDevtoolsCounters(),
@@ -3158,6 +3241,35 @@ async function maybeStartHttpServer(managerOverride) {
         return;
       }
 
+      if (url.pathname.startsWith("/stats/activity/")) {
+        const raw = decodeURIComponent(url.pathname.slice("/stats/activity/".length));
+        // key is s-<id> or p-<id>
+        if (/^s-\d+$/.test(raw)) {
+          const id = Number(raw.slice(2));
+          const detail = getSearchDetail(id);
+          if (!detail) {
+            sendJson(res, 404, { ok: false, error: "search not found" });
+            return;
+          }
+          const mcpCall = getMcpCallForActivity(raw);
+          sendJson(res, 200, { ok: true, kind: "search", entry: detail, mcpCall });
+          return;
+        }
+        if (/^p-\d+$/.test(raw)) {
+          const id = Number(raw.slice(2));
+          const detail = getPageOpDetail(id);
+          if (!detail) {
+            sendJson(res, 404, { ok: false, error: "page_op not found" });
+            return;
+          }
+          const mcpCall = getMcpCallForActivity(raw);
+          sendJson(res, 200, { ok: true, kind: "page_op", entry: detail, mcpCall });
+          return;
+        }
+        sendJson(res, 400, { ok: false, error: "invalid activity key — use s-<id> or p-<id>" });
+        return;
+      }
+
       if (url.pathname === "/stats/activity-trend") {
         const range = String(url.searchParams.get("range") || "hour").toLowerCase();
         const engine = String(url.searchParams.get("engine") || "all").toLowerCase();
@@ -3171,6 +3283,23 @@ async function maybeStartHttpServer(managerOverride) {
           sendJson(res, 400, { ok: false, error: String(error?.message || error) });
         }
         return;
+      }
+
+      if (url.pathname === "/console/relay/forget" && method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const name = String(body?.name || "").trim();
+          if (!name) {
+            sendJson(res, 400, { ok: false, error: "name required" });
+            return;
+          }
+          const ok = relayServer.forget(name);
+          sendJson(res, 200, { ok, name, removed: ok });
+          return;
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: String(error?.message || error) });
+          return;
+        }
       }
 
       if (url.pathname === "/console/api-keys") {
@@ -3304,7 +3433,10 @@ async function maybeStartHttpServer(managerOverride) {
             sendJson(res, 200, { ok: true, valid: validation.errors.length === 0, ...validation });
             return;
           }
-            const browserNames = (manager.config.browsers || []).map((b) => b.name);
+            const browserNames = [
+              "chromium",
+              ...manager._effectiveAddOns().map((b) => b.name)
+            ];
             if (method === "POST" && url.pathname === "/console/api/hints") {
               const body = await readJsonBody(req);
               const result = await createHint(hintsPath, body?.hint, modelIds, browserNames);
@@ -3788,6 +3920,19 @@ async function maybeStartHttpServer(managerOverride) {
   server.keepAliveTimeout = 300_000;
   server.headersTimeout = 300_000;
   server.timeout = 0;
+
+  // Mount the navigator-cdp relay (plans 38/40/41): /relay for the extensions,
+  // /browser/<name> as the pure-CDP gateway puppeteer dials. Host for the CDP
+  // ws URL must be reachable from this process (puppeteer runs in-container).
+  {
+    let relayHost = manager.config.mcpApiHost || "";
+    try { relayHost = new URL(relayHost).hostname || "127.0.0.1"; } catch { relayHost = "127.0.0.1"; }
+    relayServer.init({
+      server,
+      host: relayHost,
+      port: manager.config.mcpApiPort
+    });
+  }
 
   const keepaliveEncoder = new TextEncoder();
   const keepaliveFrame = keepaliveEncoder.encode(": keepalive\n\n");

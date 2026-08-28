@@ -231,8 +231,15 @@ describe("BrowserManager", () => {
         ]
       });
       const manager = new BrowserManager(config);
-      expect(manager._findAddOnByName("lightpanda")).toBe(config.browsers[1]);
-      expect(manager._findAddOnByName("chromium")).toBeNull();
+      const found = manager._findAddOnByName("lightpanda");
+      expect(found).toMatchObject({
+        name: "lightpanda",
+        role: ["fetch"],
+        cdpUrl: "http://127.0.0.1:9222",
+        type: "cdp",
+        configured: true
+      });
+      expect(manager._findAddOnByName("chromium")).toBeNull(); // built-in, not an add-on
       expect(manager._findAddOnByName("missing")).toBeNull();
     });
 
@@ -374,9 +381,8 @@ describe("BrowserManager", () => {
       expect(health).toHaveProperty("ok", true);
       expect(health).toHaveProperty("backend", "chromium");
       expect(health).toHaveProperty("browserConnected", false);
-      expect(health.browsers).toHaveLength(2);
-      expect(health.browsers[0]).toMatchObject({ name: "chromium", addOn: false, connected: false });
-      expect(health.browsers[1]).toMatchObject({ name: "lightpanda", addOn: true, connected: false, cdpUrl: "http://127.0.0.1:9222" });
+      expect(health.browsers).toHaveLength(1); // add-ons only; chromium is built-in
+      expect(health.browsers[0]).toMatchObject({ name: "lightpanda", configured: true, connected: false, cdpUrl: "http://127.0.0.1:9222" });
       expect(health).toHaveProperty("searchWindows");
     });
   });
@@ -453,6 +459,43 @@ describe("BrowserManager", () => {
       const m1 = await getBrowserManager();
       const m2 = await getBrowserManager();
       expect(m1).toBe(m2);
+    });
+  });
+
+  describe("getInstanceStats: relay browser tabs reach the cross-browser listing", () => {
+    it("reports live registry tabs, not the empty status projection", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      relayServer._entries.set("Chrome", {
+        name: "Chrome", plugin: "auto", platform: "chrome", extensionVersion: "0.3.0",
+        status: "connected", ws: { OPEN: 1, readyState: 1 }, connectedAt: 1787900000000,
+        tabs: [
+          { targetId: "T1", tabId: 11, url: "https://example.com/", title: "Example" },
+          { targetId: "T2", tabId: 12, url: "about:blank", title: "Untitled" },
+          { targetId: "T3", tabId: 13, url: "chrome-extension://abc/background.js", title: "Service Worker" },
+          { targetId: "T4", tabId: 14, url: "chrome://omnibox-popup.top-chrome/", title: "Omnibox Popup" }
+        ],
+        tabIdToTarget: new Map(), clients: new Map(), tabWaiters: [],
+        sessionForTarget: new Map(), extSessionToTarget: new Map(),
+        lastActivity: Date.now()
+      });
+      try {
+        const config = makeConfig({
+          browsers: [
+            { name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false },
+            { name: "Chrome", role: ["default"], type: "navigator-cdp", plugin: "auto", addOn: true }
+          ]
+        });
+        const manager = new BrowserManager(config);
+        const stats = await manager.getInstanceStats();
+        const chrome = stats.find((s) => s.backend === "Chrome");
+        expect(chrome.connected).toBe(true);
+        // Plugin windows / chrome-extension workers / about:blank hidden from display
+        expect(chrome.tabs).toBe(1);
+        expect(chrome.openTabs.map((t) => t.url)).toEqual(["https://example.com/"]);
+        expect(chrome.extensionVersion).toBe("0.3.0");
+      } finally {
+        relayServer._entries.delete("Chrome");
+      }
     });
   });
 });

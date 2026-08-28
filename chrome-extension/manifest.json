@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Navigator Browser Relay",
+  "version": "0.3.0",
+  "description": "Bridge your Chrome to the Navigator MCP server via WebSocket — control this browser with navigator's web tools.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "alarms",
+    "tabGroups"
+  ],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Navigator Browser Relay"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

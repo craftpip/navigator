@@ -399,7 +399,9 @@ Every devtools tool gains one optional `browser: string` param. No "devtools def
 
 | File | Change |
 |------|--------|
-| `docker-compose.yml` | Remove `BROWSER_BACKEND`, `DEVTOOLS_BROWSER_BACKEND`, `LIGHTPANDA_*`; add `BROWSERS` default |
+| Deploy file | Change |
+|------|--------|
+| `docker-compose.yml` | Remove `BROWSER_BACKEND`, `DEVTOOLS_BROWSER_BACKEND`, `LIGHTPANDA_*`; add `BROWSERS` default (chromium-only; add-ons moved to per-service `docker-compose.*.yml` files) |
 | `.env.example` | `BROWSERS='[{"name":"chromium","role":["default"]}]'` + add-on example comments |
 | `docker/Dockerfile` | **Remove** `npx --no-install cloakbrowser install` (line 35); remove lightpanda install lines |
 | `docker/navigator-mineru/` | Unaffected (extractor sidecar) |
@@ -729,8 +731,8 @@ Rationale: an add-on's lifecycle is the user's domain. Navigator must not poll, 
 - `_connectAddOnPage()` now supports **HTTP cdpUrls** (`browserURL` for CDP servers like cloakserve) alongside `ws://` (`browserWSEndpoint`)
 - Fallback-first BROWSERS shape: `{"name":"chromium","role":[]}` (empty role = backup only) + add-on with all roles
 - config.js honors an **explicit empty role array** (no warning / no forced `["default"]`); only missing role defaults
-- `docker-compose.yml` gained a `cloak-browser` sidecar service (stock `cloakhq/cloakbrowser` image, `command: ["cloakserve"]`, port 9222, `CLOAKBROWSER_LICENSE_KEY` passthrough)
-- BROWSERS default/env/.env.example/config-schema all wired to the fallback-first shape
+- The `cloak-browser` sidecar (stock `cloakhq/cloakbrowser` image, `command: ["cloakserve"]`, port 9222, `CLOAKBROWSER_LICENSE_KEY` passthrough) lives in its **own** optional `docker-compose.cloak.yml` (opt-in, like the MinerU sidecar) — NOT in the main `docker-compose.yml`
+- Main compose/`.env.example` `BROWSERS` default is chromium-only (self-contained fresh install); the fallback-first cloak shape is documented but opt-in
 - Unit tests: HTTP-vs-WS connect path (2 in browser.test.js), empty-role parsing (config.test.js) — all green; full suite 593/594 (1 pre-existing plan-37 SVG failure)
 - **Live validation passed** (§12 matrix): connect-over-network, explicit `browser:"cloakbrowser"` fetch, param-less fetch → cloakbrowser, rollback to chromium with `Browser rollback: cloakbrowser: down` when stopped, strict unreachable error on explicit call when down, connection reuse, devtools target + screenshot on cloak
 
@@ -850,9 +852,13 @@ The plan originally assumed `cdpUrl` was always a `ws://` WebSocket URL (`puppet
 
 `browserURL` handling was added to `_connectAddOnPage()` (§5) — scheme detection is the single fork point. This makes Chrome-with-`--remote-debugging-port` and every Playwright-ish CDP server work as add-ons too.
 
-### The compose service (CloakBrowser CDP container)
+### The compose service (CloakBrowser CDP container) — SEPARATE FILE
 
-A stock-image sidecar, no custom code — added to `docker-compose.yml` alongside the navigator service:
+A stock-image sidecar, no custom code — lives in its own **`docker-compose.cloak.yml`** (opt-in, same pattern as the MinerU `docker-compose.mineru.yml` sidecar). It is NOT in the main `docker-compose.yml`, so a fresh `docker compose up -d` runs built-in Chromium only. Start CloakBrowser explicitly:
+
+```bash
+docker compose -f docker-compose.cloak.yml up -d
+```
 
 ```yaml
   cloak-browser:

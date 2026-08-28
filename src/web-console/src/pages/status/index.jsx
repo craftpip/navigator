@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { formatBytes, formatMs, formatCountdown, formatTime, formatRelativeTime, formatBackend, formatBrowser, formatTrendLabel } from "../../lib/format.js";
 import { WEB_TOOLS, request, classifyError } from "../../lib/request.js";
 import { Panel, Empty, Dot, Pill, Trend, Metric, Item, Countdown } from "../../components/ui.jsx";
+import { ActivityDetailModal } from "../../components/ActivityDetailModal.jsx";
 
 const REQUEST_SERIES = [
   { key: "web-ok", label: "Web succeeded", color: "var(--series-web-ok)" },
@@ -157,6 +158,8 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
   const [expandedIssue, setExpandedIssue] = useState(null);
   const [feedMaxHeight, setFeedMaxHeight] = useState(null);
   const engineActivityRef = useRef(null);
+  const trendDriversRef = useRef(null);
+  const [driverHeight, setDriverHeight] = useState(null);
   const usage = stats.usage || {};
   const syncFeedHeight = useCallback(() => {
     const wrap = engineActivityRef.current;
@@ -173,6 +176,20 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
       ? grid.getBoundingClientRect().height
       : enginesPanel.getBoundingClientRect().height;
     setFeedMaxHeight((prev) => (Math.abs((prev || 0) - enginesHeight) > 1 ? enginesHeight : prev));
+  }, []);
+  const syncDriverHeight = useCallback(() => {
+    const wrap = trendDriversRef.current;
+    if (!wrap || wrap.children.length < 2) return;
+    const trendPanel = wrap.children[0];
+    const driversPanel = wrap.children[1];
+    const sideBySide = Math.abs(trendPanel.getBoundingClientRect().top - driversPanel.getBoundingClientRect().top) < 2;
+    if (!sideBySide) {
+      setDriverHeight((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const h = trendPanel.getBoundingClientRect().height;
+    if (h < 10) return;
+    setDriverHeight((prev) => (Math.abs((prev || 0) - h) > 1 ? h : prev));
   }, []);
   useEffect(() => {
     syncFeedHeight();
@@ -193,6 +210,23 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
   useEffect(() => {
     syncFeedHeight();
   }, [feed, syncFeedHeight]);
+  useEffect(() => {
+    syncDriverHeight();
+    window.addEventListener("resize", syncDriverHeight);
+    let observer;
+    const wrap = trendDriversRef.current;
+    if (wrap && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(syncDriverHeight);
+      for (const child of wrap.children) observer.observe(child);
+    }
+    return () => {
+      window.removeEventListener("resize", syncDriverHeight);
+      observer?.disconnect();
+    };
+  }, [syncDriverHeight]);
+  useEffect(() => {
+    syncDriverHeight();
+  }, [trend, health?.browsers, stats?.instances, syncDriverHeight]);
   return (
     <>
       <section className="overview">
@@ -237,12 +271,15 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
           />
         </section>
       </section>
-      <RequestActivityTrend
-        trend={trend}
-        range={trendRange}
-        error={trendError}
-        setRange={setTrendRange}
-      />
+      <section className="trend-drivers" ref={trendDriversRef}>
+        <RequestActivityTrend
+          trend={trend}
+          range={trendRange}
+          error={trendError}
+          setRange={setTrendRange}
+        />
+        <Drivers health={health} instances={instances} reload={reload} height={driverHeight} />
+      </section>
       {state.level !== "ok" && (
         <section
           className={`attention show ${state.level === "critical" ? "critical" : ""}`}
@@ -295,7 +332,6 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
           <Engines config={config} health={health} stats={stats} reload={reload} />
           <LiveFeed feed={feed} enabledEngines={engines.map((engine) => engine.id)} feedMaxHeight={feedMaxHeight} />
         </div>
-        <Drivers health={health} instances={instances} reload={reload} />
         <Runtime health={health} stats={stats} history={history} />
         <Logs logs={logs} />
       </section>
@@ -394,13 +430,13 @@ function RelayAuth({ browser }) {
   );
 }
 
-function Drivers({ health, instances, reload }) {
+function Drivers({ health, instances, reload, height }) {
   const byBackend = new Map(instances.map((item) => [item.backend, item]));
   const browsers = health.browsers || [];
   const [forgetting, setForgetting] = useState(null);
   const prevTabsRef = useRef({});
   return (
-    <Panel title="Browser drivers" sub="engines, tabs and close timers">
+    <Panel title="Browser drivers" sub="engines, tabs and close timers" style={height ? { height } : undefined}>
       <div className="list">
         {browsers.map((browser) => {
           const backend = browser.name;
@@ -414,13 +450,13 @@ function Drivers({ health, instances, reload }) {
             ? "Waiting for PIN authorization — unpaired incoming request"
             : online
               ? isRelay
-                ? "Extension bridge — drives page, screenshot and devtools work in this Chrome"
+                ? "navigator-cdp"
                 : `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
               : defaultDriver
                 ? "Default driver is not connected"
                 : isRelay
                   ? browser.paired
-                    ? "Paired — disconnected — click Connect in the extension to rejoin (no new PIN)"
+                    ? "Paired — disconnected"
                     : "Extension not paired — connect from the popup to request access"
                   : browser.addOn ? "Add-on — not connected" : "Not started";
           const statusPill = pending
@@ -752,6 +788,8 @@ function buildFeed(entries, pageOps) {
       return "running…";
     };
     const pageAction = op.tool === "web_page_screenshot" ? "capture" : "fetch";
+    // Target.getTargets is cross-browser (aggregates all browsers) — no single backend
+    const rawBackend = op.tool === "Target.getTargets" ? null : op.backend;
     rows.push({
       key: `p-${op.id}`,
       ts: op.ts,
@@ -759,7 +797,7 @@ function buildFeed(entries, pageOps) {
       status: op.status || (op.ok ? "ok" : "fail"),
       category: isDevtools ? "Dev" : "Web",
       tool: op.tool || "page",
-      backend: formatBrowser(op.backend) || "-",
+      backend: formatBrowser(rawBackend) || "-",
       requestLabel: isDevtools ? "tab" : "page",
       request: isDevtools ? devtoolsRequest(op.tool || "", op.url) : `${pageAction}: ${requestTarget(op.url)}`,
       response: isRunning
@@ -781,6 +819,7 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
   const [newKeys, setNewKeys] = useState(() => new Set());
   const knownAllKeys = useRef(null);
   const immediateAddedRef = useRef(new Set());
+  const [selectedKey, setSelectedKey] = useState(null);
   const enabledEngineIds = new Set(enabledEngines);
   const rows = (feed || [])
     .map((entry) =>
@@ -811,6 +850,7 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
     for (const k of immediateAddedRef.current) s.add(k);
     return s;
   })();
+  const selectedEntry = selectedKey ? (feed || []).find((e) => e.key === selectedKey) || null : null;
   useLayoutEffect(() => {
     const fullKeys = new Set((feed || []).map((entry) => entry.key));
     if (!knownAllKeys.current) {
@@ -870,7 +910,19 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
               const isNew = displayNewKeys.has(entry.key);
               return (
                 <div className={`activity-row-wrapper ${isNew ? "is-new" : ""}`} key={entry.key || `${entry.kind}-${entry.ts}`}>
-                  <div className={`activity-row ${tone}`}>
+                  <div
+                    className={`activity-row ${tone}`}
+                    role="button"
+                    tabIndex={0}
+                    title="Click for details"
+                    onClick={() => setSelectedKey(entry.key)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedKey(entry.key);
+                      }
+                    }}
+                  >
                     <div className="feed-time">
                       <span className="feed-time-top">
                         <b>{formatRelativeTime(entry.ts)}</b>
@@ -881,7 +933,7 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
                     <div className="activity-tool-cell">
                       <span className="feed-tool">
                         {entry.tool}
-                        {entry.tool !== "web_search" && entry.backend && entry.backend !== "-" ? (
+                        {entry.tool !== "web_search" && entry.tool !== "Target.getTargets" && entry.backend && entry.backend !== "-" ? (
                           <span className="feed-backend">{entry.backend}</span>
                         ) : null}
                       </span>
@@ -926,6 +978,9 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
           here as they happen.
         </Empty>
       )}
+      {selectedKey ? (
+        <ActivityDetailModal entryKey={selectedKey} fallbackEntry={selectedEntry} onClose={() => setSelectedKey(null)} />
+      ) : null}
     </Panel>
   );
 }

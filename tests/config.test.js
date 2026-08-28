@@ -18,7 +18,7 @@ describe("parseBrowsersEnv", () => {
   it("returns chromium-only (with warning) when BROWSERS is unset", async () => {
     const { parseBrowsersEnv } = await import("../src/config.js");
     const browsers = parseBrowsersEnv(undefined);
-    expect(browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }]);
+    expect(browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }]);
   });
 
   it("parses a valid array with an add-on", async () => {
@@ -30,8 +30,8 @@ describe("parseBrowsersEnv", () => {
       ])
     );
     expect(browsers).toEqual([
-      { name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false },
-      { name: "lightpanda", role: ["fetch", "screenshot"], cdpUrl: "http://127.0.0.1:9222", addOn: true }
+      { name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false },
+      { name: "lightpanda", role: ["fetch", "screenshot"], cdpUrl: "http://127.0.0.1:9222", type: "cdp", plugin: "auto", addOn: true }
     ]);
   });
 
@@ -213,7 +213,7 @@ describe("loadConfig (parse engine + browser behavior)", () => {
     vi.stubEnv("BROWSERS", JSON.stringify([{ name: "chromium", role: ["default"] }]));
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }]);
+    expect(config.browsers).toEqual([{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }]);
   });
 
   it("parses HEADLESS correctly", async () => {

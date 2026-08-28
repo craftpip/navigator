@@ -103,6 +103,7 @@ function makeMockManager(overrides = {}) {
       { backend: "chromium", connected: false, tabs: 0, pid: null, spawns: 0 },
       { backend: "cloakbrowser", connected: true, tabs: 2, pid: 42, spawns: 1 },
     ]),
+    getRelaySummary: vi.fn().mockReturnValue([]),
     shutdown: vi.fn().mockResolvedValue(undefined),
     prelaunchIfConfigured: vi.fn().mockResolvedValue(undefined),
     relaunchDefaultBackend: vi.fn().mockImplementation(async (headless) => ({ ok: true, backend: "cloakbrowser", relaunched: true, headless: Boolean(headless) })),
@@ -723,7 +724,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(linksProps).toEqual(["ref_ids"]);
     });
 
-    it("advertises web_page_svg with url/urls/ref_id/ref_ids/targetId and svg options", async () => {
+    it("advertises web_page_svg with urls/ref_ids/targetId and svg options (no singular url/ref_id)", async () => {
       const { status, body } = await mcpPost({
         jsonrpc: "2.0", id: 59, method: "tools/list"
       });
@@ -731,9 +732,9 @@ describe("mcp-server HTTP endpoints", () => {
       const svg = body.result.tools.find((tool) => tool.name === "web_page_svg");
       expect(svg).toBeDefined();
       const props = Object.keys(svg.inputSchema.properties);
-      expect(props).toContain("url");
+      expect(props).not.toContain("url");
       expect(props).toContain("urls");
-      expect(props).toContain("ref_id");
+      expect(props).not.toContain("ref_id");
       expect(props).toContain("ref_ids");
       expect(props).toContain("targetId");
       expect(props).toContain("fullPage");

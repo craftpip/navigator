@@ -18,10 +18,8 @@ The browser renders the page, the extractor captures geometry and computed style
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `url` | `string` | — | Single URL (prefer for one page) |
-| `urls` | `string[]` | — | Multiple URLs |
-| `ref_id` | `number` | — | Single ref from `web_search` |
-| `ref_ids` | `number[]` | — | Multiple refs from `web_search` |
+| `urls` | `string[]` | — | One or more URLs |
+| `ref_ids` | `number[]` | — | Refs from `web_search` |
 | `targetId` | `string` | — | Existing `Target.createTarget` tab — snapshots live JS state |
 | `fullPage` | `boolean` | `false` | `false` = viewport only, `true` = full scrollable document |
 | `elementLimit` | `number` | `100` (api default) / `5000` (tool max) | Max elements in the SVG (1–5000) |
@@ -73,7 +71,7 @@ Text layout is computed at build time via per-glyph em-bucket measurement — `w
 
 ```json
 {
-  "url": "https://example.com",
+  "urls": ["https://example.com"],
   "fullPage": true
 }
 ```
@@ -92,7 +90,7 @@ Text layout is computed at build time via per-glyph em-bucket measurement — `w
 
 ```json
 {
-  "url": "https://example.com",
+  "urls": ["https://example.com"],
   "includeSelector": false,
   "includeXpath": false
 }

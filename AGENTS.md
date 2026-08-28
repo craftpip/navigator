@@ -130,7 +130,7 @@ Captures a webpage as a structured SVG render — every element is a filled `<re
 
 **Input:**
 
-- `url: string` | `urls: string[]` | `ref_id: number` | `ref_ids: number[]`
+- `urls: string[]` | `ref_ids: number[]`
 - `targetId: string` — Screenshot an existing persistent devtools tab
 - `viewport: { width, height }`
 - `fullPage: boolean` (default `false`) — Capture full scrollable page (tall pages clip without it)
@@ -257,8 +257,8 @@ For visual verification, call `web_page_screenshot` with the same `ref_ids`.
 |----------|---------|-------------|
 | `CHROME_PATH` | `/usr/bin/chromium` | Path to Chromium executable |
 | `HEADLESS` | `true` | Run browser in headless mode |
-| `BROWSERS` | `[{"name":"chromium","role":["default"]}]` | JSON array of browser entries: `{name, role[], cdpUrl?}`. `chromium` is always present (built-in, no cdpUrl). Any other entry is an **add-on** — needs `cdpUrl`: `ws://` (direct browser WS endpoint → `puppeteer.connect({browserWSEndpoint})`) or `http://` (CDP server like CloakBrowser's `cloakserve` → `puppeteer.connect({browserURL})`). Roles: `default`, `search`, `fetch`, `screenshot`, `devtools`. An **empty role array** (`"role":[]`) marks a browser fallback/backup-only. Array order = rollback chain. |
-| `CLOAKBROWSER_LICENSE_KEY` | `` | License key passed to the optional `cloak-browser` compose sidecar (see below) |
+| `BROWSERS` | `[{"name":"chromium","role":["default"]}]` | JSON array of browser entries: `{name, role[], type, cdpUrl?, plugin?}`. Each entry has a **type**: `"inbuilt"` (the built-in Chromium — always present, no options), `"cdp"` (user-provided `cdpUrl`: `ws://` direct browser WS endpoint → `puppeteer.connect({browserWSEndpoint})` or `http://` CDP server like CloakBrowser's `cloakserve` → `puppeteer.connect({browserURL})`), or `"navigator-cdp"` (our plugin interface — the extension dials us over `/relay`, navigator provides the gateway endpoint; optional `plugin`: `auto`/`chrome`/`firefox`). Un-typed entries default: `chromium` → `inbuilt`, anything else → `cdp`. Roles: `default`, `search`, `fetch`, `screenshot`, `devtools`. An **empty role array** (`"role":[]`) marks a browser fallback/backup-only. Array order = rollback chain. |
+| `CLOAKBROWSER_LICENSE_KEY` | `` | License key for the `cloak-browser` CDP sidecar (optional for testing) — consumed by `docker-compose.cloak.yml`, not the main compose |
 | `BROWSER_OP_TIMEOUT_MS` | `60000` application / `25000` Compose | Per-operation timeout |
 | `SEARCH_ROUTE_WARMUP_ENGINES` | Application fallback routes / empty in Compose | Engines to warm up on startup; an explicit empty value disables warmup |
 | `SEARCH_ROUTE_CIRCUIT_OPEN_MS` | `300000` | Per-route cooldown after failure |
@@ -277,7 +277,8 @@ For visual verification, call `web_page_screenshot` with the same `ref_ids`.
 - Sticky search windows are reused for performance.
 - `BROWSERS` is parsed in `src/config.js` into `config.browsers`. Page tools (`web_fetch`, `web_page_screenshot`, `web_page_ascii`, `web_page_svg`) and devtools route through `resolveBrowserParam()` (`src/browser.js`): explicit `browser` param (strict, errors if down) → add-ons tried in `BROWSERS` array order (first to connect serves, each down add-on reported in `rollbackNotes`) → Chromium (always present, self-healing).
 - Add-on connections are lazy and reused (`_addOnState`); a `disconnected` event clears state and the next call reconnects. Navigator never launches/closes add-ons — the user owns the external CDP process.
-- The compose file ships an optional **`cloak-browser`** sidecar (stock `cloakhq/cloakbrowser` image, `command: ["cloakserve"]`, CDP multiplexer on :9222). It's the reference CDP add-on (see `plans/39_dynamic-browser-array.md` §12): the fallback-first BROWSERS shape is `[{"name":"chromium","role":[]},{"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}]`. `web_search` always runs on Chromium (engines never use add-ons).
+- An optional **`cloak-browser`** CDP sidecar (stock `cloakhq/cloakbrowser` image, `command: ["cloakserve"]`, CDP multiplexer on :9222) ships in a **separate** compose file, `docker-compose.cloak.yml` (opt-in, like the MinerU sidecar). It's the reference CDP add-on (see `plans/39_dynamic-browser-array.md` §12): the fallback-first BROWSERS shape is `[{"name":"chromium","role":[]},{"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}]`. `web_search` always runs on Chromium (engines never use add-ons). Start it with `docker compose -f docker-compose.cloak.yml up -d`; the main compose is chromium-only by default.
+- An optional **`lightpanda`** CDP sidecar (official `lightpanda/browser` image, `lightpanda serve` WebSocket CDP on :9222) ships in `docker-compose.lightpanda.yml` (opt-in, same pattern). **Caveat:** Lightpanda's CDP handshake rejects hostname `Host:` headers (DNS-rebinding guard) — only IP literals pass, so the BROWSERS `cdpUrl` must reference a **static IP** (`ws://172.22.0.222:9222`), NOT the service name. No graphical render engine → screenshots are placeholders; use for speed/cost on fetch/extraction, Chromium for visuals.
 - Before adding or changing config, trace the existing variable through `loadConfig()`, `BrowserManager`, and the actual call site first; do not invent a new env var or behavior until the current flow is verified end-to-end.
 
 ---
@@ -1087,3 +1088,93 @@ For each site:
 3. **Compare → Fix → Compare forever:** `scripts/svg-diff.mjs http://10.69.1.164:1994/` (benchmark) is ground truth; `example.com` must stay `<2%` as smoke test. Log every iteration to `logs/svg-diff.log` and `svg-diff/*.md` + `plans/37_svg-screenshot.md §12.4` matrix.
 4. **One file only:** All SVG conversion lives in `src/svg.js` (`svgExtractor` + `buildSvg` + `capturePageAsSvg`). `src/mcp-server.js:28` only imports. Fixes that touch other files violate the invariant.
 5. **Persistence:** This learning outlives any single session — every future agent that touches SVG must read `plans/37_svg-screenshot.md` §14 and continue the loop without being told.
+
+### Firefox Browser Extension — Real Firefox over WebDriver BiDi (Plan 40)
+
+**Created:** 2026-08-28
+
+**What:** `firefox-extension/` mirrors `chrome-extension/` but bridges the user's Firefox to navigator's `/relay` through Firefox's **Remote Agent (WebDriver BiDi)** instead of `chrome.debugger` (which Firefox does not have and has removed CDP entirely since FF141). Firefox is launched with `--remote-debugging-port=9222`; the extension opens `ws://127.0.0.1:9222/session`, does the `session.new` + `session.subscribe` dance, and **maps CDP → BiDi on the extension side** so navigator's Chromium-shaped world stays untouched (`cdp/bidi/mapper.js` = the route/transform tables, `remote-value.js` = RemoteValue⇄RemoteObject, `session-manager.js` = CDP sessions ↔ BiDi contexts ↔ tabs, incl. FIFO pairing of `browsingContext.create` replies with `tabs.onCreated`). No navigator-side changes were needed.
+
+**Verified:** 17/17 standalone vm-harness tests (`firefox-extension/test/unit-ff.mjs`, no Firefox needed) — handshake, hello, PIN, LOCAL/SPECIAL/FORWARD routing, translate+transform for navigate/evaluate/createTarget/input, event→CDP-event mapping, `-32601` for unmapped methods, TabList over `tabs.query`, token reuse, BidiUrl persistence. `test/mock-bidi-server.mjs` is an interactive Fake Remote Agent for manual smoke.
+
+**Protocol gotchas learned the hard way (harness caught these):**
+1. **Full BiDi reply shape:** `script.evaluate`/`callFunction` success replies carry `msg.result = {type:'success', result:<RemoteValue>, realm}` — the mapper's `toCdpResult` reads `payload.result`, so the mock must reply with the full payload, not the bare RemoteValue.
+2. **`SessionManager` vs `CDPSessionManager`:** mapper `translateEvent` referenced `SessionManager` — that single name mismatch dropped EVERY BiDi→CDP event (caught by test 6/11).
+3. **`ResponseBuilder.send`** hardcoded `code: -32000`, swallowing specific codes like `-32601` — it now accepts an error object and propagates `error.code`.
+4. **`remote-value.toCdp`** recursed into itself for `map`/`set` (stack overflow) — must use `deserialize()` for those shapes.
+5. **Local handler return values:** callback-style `tabs.query`-based lookalikes must resolve Promises (`Target.getTargets` returned `undefined` until wrapped).
+6. Firefox's `chrome.*` alias is callback-style — no `chrome.windows.getCurrent().then(...)`; wrap in a Promise. `runtime.sendMessage` may or may not return a promise — use a `broadcast()` helper that swallows errors either way.
+
+**Fix patterns:** `launch-firefox.sh` (web-ext preferred, native `--remote-debugging-port` fallback; profile at `firefox-extension/firefox-profile/`), `pack-firefox.sh` (zip preferred, tar.gz fallback — zip absent on this host), README. `BROWSERS` add-on entry: `{"name":"firefox","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://host.docker.internal:9222"}`.
+
+**Not yet done (Phase 2+):** real-Firefox end-to-end validation; object-handle bridging across BiDi realms; `-remote-allow-origins` origin pinning (extension ID unknown until first temp load). Details + tables: `plans/40_firefox-extension.md`.
+
+### Relay Pairing Contract — Pair Once, Remember Forever
+
+**Created:** 2026-08-28
+**What the user demanded (after several bad rounds):** the PIN is **one-time pairing only**. After the first successful pair, the plugin stores the session token and reconnects by itself — no PIN on every connect, and **no auto-connect on fresh install**.
+
+**The contract (both sides must obey):**
+- **Stable token:** the server issues ONE token at successful pairing and returns the SAME token on valid-token reconnect (never rotates on every hello). Session tokens are **persisted in SQLite** (`relay_sessions` table, migration in `src/db.js`; `saveRelaySession`/`loadRelaySessions`) and restored into `RelayServer._tokenToName` in `init()` — so a navigator container restart does NOT force a re-PIN. `PINs are in-memory` but tokens are durable. (Header comment at `src/relay-server.js:20` still wrongly says tokens are in-memory — update it.)
+- **Extension keeps the token on disconnect:** `ConnectionManager.disconnect()` must NOT clear the session token (it is the pairing proof). A manual Disconnect/Cancel returns to a clean Off state but the next Connect re-authenticates silently. Only a 4001 (server rejected the token, e.g. different server) clears it and re-pairs.
+- **`_intentionalDisconnect` flag** in connection-manager: user-initiated close must NOT be treated as a drop. Without it, the close handler auto-reconnects 3s later → phantom "Connected" (token reused) or phantom "PIN Required" (token cleared) — the classic "everything haywire" sequence.
+- **`isConnected()` = AUTH, not socket-open:** `State.isConnected()` returns a flag set only on the server's `connected` message. Before the auth round-trip the UI must show Connecting, not Connected. `connectedAt` is stamped at auth too, so the "Connected 0s/1s/0s" flicker during churn is gone. A separate `connecting` flag drives the popup's "Connecting…" state (button disabled, fields locked).
+- **Explicit PIN feedback:** on close 4000 the extension sets lastError `PIN rejected — wrong or expired. A fresh PIN is shown in the navigator console.` and re-dials in ~300ms for a new PIN. The benign `'PIN required from navigator console'` lastError was removed (the card explains itself); rejections are the only red-box message. `send-pin` with a dead socket stashes the PIN (`State.setPendingPin`) and submits it on the next `pin_required`.
+- **Auto-connect only after a real pairing:** `maybeAutoConnect()` requires BOTH a saved server URL AND a saved session token. Fresh install / cleared URL → stays Off.
+- **Popup field ownership:** `popup.js` prefills `serverUrl`/`browserName` only until the user types (`_urlDirty`/`_browserNameDirty` guards). The 3s `loadState` refresh must NEVER clobber a field being edited.
+- **MV3 gotcha:** any background `onMessage` branch that calls `sendResponse` asynchronously must `return true` or the popup's callback never fires and Connect looks dead.
+
+**Verified 2026-08-28:** e2e `pair → docker restart navigator → reconnect` returns `connected` with the SAME token and `pin_required` never sent. 13/13 `chrome-extension/test/unit-ext.mjs` tests pass (includes the disconnect-resets-cleanly-but-keeps-token regression test).
+
+### web_fetch Flow Latency — O(N) Link Headings, Shared DOM, No Double Stabilize
+
+**Created:** 2026-08-28
+
+**What:** Trimmed `web_fetch` on the NSE option-chain SPA flow hint from ~9-9.5s wall to ~4.8-6s. Identical output (17116 chars / 258 links / blocks: 3). Three structural fixes in `src/search.js` + `src/extractors/index.js`:
+
+1. **`extractLinksFromHtml` heading context is now `O(DOM)`, not `O(anchors × depth × siblings)`.** The old `findNearestHeading` walked every anchor's ancestors, and for each ancestor scanned all previous siblings calling `prev.querySelector("h1…")` — ~3.5s on the 641KB option-chain page (1192 anchors, 255 rows). Replaced with a single document-order stack walk that precomputes `nearestHeadingByElement` (last heading seen before each element). Measured: link loop 3560ms → ~40ms (plus the ~950ms JSDOM parse, which is untouched). Also fixes a latent bug — the old code took the FIRST heading in a previous-sibling subtree (farthest from the anchor); doc-order walk takes the truly nearest.
+2. **Flow extract steps share ONE JSDOM parse.** The flow extract step ran `extractLinksFromHtml` (parse #1) then `extractHintStage → extractTextFromHtml` (parse #2) over the same 641KB HTML — ~1.9s of parsing for a page we read once. Now `parseHtmlToDom(state.html, state.url)` runs once per extract step and the same `stageDom` is passed to both. Threaded via an optional `dom` param: `extractTextFromHtml`/`extractLinksFromHtml` take `{ dom }` and only close a DOM they created (`ownedDom`), so the caller owns lifecycle — `stageDom.window.close()` in a `finally`.
+3. **`browserOpenAndExtract` skips the generic `stabilize_page` when a flow hint leads with a `wait` step** (`flow[0].action === "wait" && flow[0].stabilizeStrategy !== "none"`). Flow hints own their stabilization — every gated step stabilizes per its `stabilizeStrategy`, so the pre-flow network-idle wait was pure waste (~1.5-2s on the SPA). Also removed the duplicate `detectBotChallenge` at the top of `runFlowExtraction`: `check_bot_early` runs immediately before with no intervening navigation; the flow's per-step `checkBot` still guards gated transitions.
+
+**Also fixed:** the `hint=wildcard_default (no domain hint matched)` debug line was a lie — it fired whenever `findMatchingHints` returned candidates that just hadn't been DOM-resolved yet. It now distinguishes `candidates pending DOM resolution` from `no domain hint matched`.
+
+**Measured warm trace (after):** `goto_page` 1.8-2.3s (network) · `stabilize_page: 0ms` (skipped) · `check_bot_early` 0.1-0.5s · `flow_step_1_wait` (the single remaining network_idle) 1.3-1.7s · `flow_step_2_extract` 0.9-1.5s · `close_page` ~30ms. The remaining floor is one JSDOM parse (~950ms), the 641KB `page.content()` CDP serialization, and the SPA's poll-timed `network_idle` wait — all inherent.
+
+**Debugging technique that worked:** rather than guess, capture the actual 641KB `document.documentElement.outerHTML` via `Runtime.evaluate` on a live tab, drop it in `/app/data/`, and run the exact function source (`new Function` extract from the module) against it in-container to isolate component costs. `docker.logs` `[web_fetch]` DEBUG lines gave per-step breakdown; the single-run trace (one request, `grep -A50 "📡  web_fetch"`) disambiguated interleaved concurrent requests.
+
+### Lightpanda Sidecar — Compose File + the Host-Header 403 Gotcha
+
+**Created:** 2026-08-28
+
+**What:** A Lightpanda CDP add-on sidecar now ships in its own optional `docker-compose.lightpanda.yml` (official `lightpanda/browser` image, image default Cmd is already `lightpanda serve --host 0.0.0.0 --port 9222`). Start with `docker compose -f docker-compose.lightpanda.yml up -d`; BROWSERS entry must use the **static IP** `ws://172.22.0.222:9222`, NOT the service name. No graphical rendering engine → screenshots are placeholders.
+
+**The gotcha that matters — Lightpanda's CDP handshake rejects hostname `Host:` headers:**
+- `puppeteer-core.connect({ browserWSEndpoint: "ws://lightpanda:9222" })` fails with **`Unexpected server response: 403`**.
+- Root cause is in `src/Server.zig` (`lightpanda-io/browser`): a DNS-rebinding guard accepts only **IP literals** or the exact `localhost:<port>` form in the `Host:` header; any hostname (a service name resolves to an IP in the Host header, but the literal string "lightpanda" is not an IP) → `403 Host not allowed`. It also rejects any `Origin:` header (browsers) — CDP drivers send none.
+- **`--advertise-host` does NOT fix it** — it only changes the `/json/version` response body's advertised `ws://host:port/` URL (`advertiseHost()` at `src/Server.zig:735`), not the handshake peer check. Tested: still 403 with `--advertise-host lightpanda-test`.
+- **Real fix:** connect by IP literal. Assign the container a static `ipv4_address` on the compose network (we used `172.22.0.222`) and reference `ws://172.22.0.222:9222` in BROWSERS. Verified end-to-end: raw `ws` + `puppeteer-core.connect({ browserWSEndpoint: "ws://172.22.0.222:9222" })` → `newPage()` + `goto()` + `title()` = "Example Domain" from inside navigator.
+- Welcome warning: "advertising loopback for wildcard bind... clients on other hosts will need --advertise-host" is misleading — the IP-literal connect path works fine without it.
+
+**Debug technique:** don't fight module resolution inside the container; `puppeteer-core` (not `puppeteer`) is the installed prod dep — `cd /app && node -e "require('puppeteer-core')"` connects. Raw `ws` module handshake isolates Host/Origin vs app-level issues.
+
+### Browser Ownership — Agent vs User (Plan 42), Adopted Tabs, defaultViewport
+
+**Created:** 2026-08-28
+
+**What:** Adopted browser-origin tabs (drive real tabs in the user's window in place) and a single-source ownership classification surfaced in tool metadata so the LLM knows user browsers are real/visible/non-headless.
+
+**Ownership rule** (`src/browser.js` `browserOwnership(type)`, the single source): `navigator-cdp` (relay, e.g. `maclap2`) = `ownership:"user"` — the user's real visible window; `builtin` (`chromium`) and `cdp` (`cloakbrowser`, `lightpanda`) = `ownership:"agent"` — navigator-owned headless/invisible. Emitted by `list_browsers` (mcp-server) and `Target.getTargets`/`listTargets` (devtools, `unknown -> "agent"` fallback). Tool descriptions warn about `user` visibility. The user actively uses `maclap2` — tabs mutate, drive only when they're not mid-use, verify on agent browsers by default.
+
+**Adoption:** `Target.createTarget({targetId, no url})` → `BrowserManager.attachToExistingTarget(targetId)` → `relayServer.attachExistingTabToClients(entryName, targetId)` synthesizes `Target.attachedToTarget` with the real extension sessionId (`_ensureTargetSession`) for a puppeteer Page (`isAutoAttached:true`). `devtools.js` guards `adopted:true`, `origin:"browser"`, skips `page.close()` on `closeTarget`/inactivity (releasing the handle never closes the user's real tab).
+
+**Width overflow — `defaultViewport` was the cause.** `_ensureAddOnConnection` applied `defaultViewport:{width:MONITOR_WIDTH(1920),height:MONITOR_HEIGHT(1080)}` to ALL connections including relay, so adopted tabs rendered `innerWidth:1633` vs `screenWidth:1470` → overflow. Fix: `defaultViewport: isRelay ? null : {width:1920,height:1080}` where `isRelay = addOnEntry.type==="navigator-cdp"` — relay tabs keep their natural window size. Note the extension `chrome-extension/cdp/handler/local.js` `getWindowForTarget` hardcodes `1920x1080` and `setWindowBounds` only handles `focused`, and `Emulation.*` is not in `CDP_HANDLERS` forwarded to `chrome.debugger` (`getDeviceMetricsOverride` → `-32601`).
+
+**Basic structure (user):** `Target.getTargets` lists the user's OPEN tabs with their `targetId`s; calling any devtools tool (`Runtime.evaluate`, `DOM.getDocument`, `Input.dispatch*`, etc.) with one of those `targetId`s MUST drive that exact tab directly — no `Target.createTarget` step. **Fix (2026-08-28):** `getTargetState(targetId)` is now `async` and auto-adopts a browser-origin tab on demand: fast-path check in `targetsById` → else `manager.attachToExistingTarget(tid)` → `registerAdoptedTarget` (shared helper so explicit `createTarget` adopt and on-demand adopt register identically). Verified: `getTargets` → `Runtime.evaluate`/`DOM.getDocument` on JellySort, boniface, YouTube without prior `createTarget` — correct tab, correct title, no `Unknown targetId`.
+
+**Relay adoption bug 2 FIXED (2026-08-28): mis-attach.** The fallback `pages.find(p=>!p.isClosed())` (src/browser.js:651-653) mis-attached a wrong page (adopted a JellySort tab but drove YouTube Music) and, with 4 identical boniface tabs, grabbed an arbitrary one. **Root cause:** there is NO public `Target.id()` in puppeteer v24 — the target id lives on the internal `p.target()._targetId` field. The old matcher `String(p.target()?.id?.())` always returned `""`, so it NEVER matched and ALWAYS fell through to the arbitrary-page fallback. **Fix:** match on `p.target()._targetId` (populated from the real extension targetId by `attachExistingTabToClients`) and **remove the fallback entirely** — wait for the exact `tid` to appear in `browser.pages()` (poll up to 5s), never drive a wrong tab. Verified: adopted a specific boniface tab among 4 identical ones, exact match, and after the fix `JellySort` no longer returns `OpenCode`.
+
+**Relay adoption bug 1 MITIGATED (2026-08-28): wedged session.** `Runtime.evaluate` on adopted relay tabs timed out at ~25s after repeated attaches left stale `chrome.debugger` sessions (multiple `sessionId → tabId` mappings, `entry.sessionForTarget` holding a dead session). Fresh tabs (`Target.createTarget` with new URL) always worked; adopted tabs wedged after several cycles. **Fix:** `GET /debug/detach_all` (mcp-server → `relayServer.detachAllDebuggers()`) sends `detach_all` to every extension, clears `sessionForTarget`/`extSessionToTarget`/`client.sessionForTarget`/`client.tabs`, and logs. After `detach_all`, the next `getTargets` → direct drive re-attaches fresh and succeeds (verified JellySort/boniface/YouTube). Also tightened `attachToExistingTarget` to require `res.attached` (not just `found`) before polling.
+
+**Lesson:** raw CDP commands against the relay gateway (`ws://10.69.1.164:1994/browser/maclap2`) for createTarget/closeTarget are visible to (and interfere with) the puppeteer session's auto-attach bookkeeping; prefer the devtools MCP tools.
+
+**Tests:** `tests/browser.test.js` + `tests/devtools.test.js` = 71 pass. Plan: `plans/42_browser-ownership-metadata.md`.

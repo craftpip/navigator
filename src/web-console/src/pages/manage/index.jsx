@@ -329,7 +329,20 @@ function PostProcessorModelsEditor({ value, onChange, ok, message }) {
 }
 
 const BROWSER_ROLES = ["default", "search", "fetch", "screenshot", "devtools"];
-const BROWSER_EMPTY_ENTRY = { name: "", role: [], index: 0, cdpUrl: "", connect: "" };
+const BROWSER_TYPES = [
+  { value: "inbuilt", label: "Inbuilt" },
+  { value: "cdp", label: "CDP" },
+  { value: "navigator-cdp", label: "Navigator CDP" },
+];
+const BROWSER_PLUGINS = ["auto", "chrome", "firefox"];
+const BROWSER_TYPE_LABEL = Object.fromEntries(BROWSER_TYPES.map((t) => [t.value, t.label]));
+const BROWSER_EMPTY_ENTRY = { name: "", role: ["default"], index: 0, type: "cdp", cdpUrl: "", plugin: "auto" };
+
+function normalizeBrowserType(e) {
+  const t = typeof e.type === "string" ? e.type.trim().toLowerCase() : "";
+  if (t) return BROWSER_TYPES.some((x) => x.value === t) ? t : "cdp";
+  return e.name === "chromium" ? "inbuilt" : "cdp";
+}
 
 function parseBrowsersEntries(rawValue) {
   try {
@@ -338,18 +351,18 @@ function parseBrowsersEntries(rawValue) {
       name: e.name || "",
       role: Array.isArray(e.role) ? e.role : [],
       index: typeof e.index === "number" ? e.index : 0,
+      type: normalizeBrowserType(e),
       cdpUrl: e.cdpUrl || "",
-      connect: e.connect || "",
-      addOn: Boolean(e.addOn),
+      plugin: typeof e.plugin === "string" && e.plugin ? e.plugin : "auto",
     })) : [];
   } catch { return []; }
 }
 
 function serializeBrowsersEntries(entries) {
   return JSON.stringify(entries.map((e, i) => {
-    const out = { name: e.name, role: e.role, index: i };
-    if (e.cdpUrl) out.cdpUrl = e.cdpUrl;
-    if (e.connect) out.connect = e.connect;
+    const out = { name: e.name, role: e.role, index: i, type: e.type || normalizeBrowserType(e) };
+    if (out.type === "cdp" && e.cdpUrl) out.cdpUrl = e.cdpUrl;
+    if (out.type === "navigator-cdp" && e.plugin && e.plugin !== "auto") out.plugin = e.plugin;
     return out;
   }), null, 2);
 }
@@ -421,17 +434,19 @@ function BrowserArrayEditor({ value, onChange, ok, message }) {
       ) : (
         <div className="pp-cards">
           {entries.length === 0 && <div className="pp-empty">No browsers configured. Chromium is always present. Click "+ Add browser" to add one.</div>}
-          {entries.map((entry, index) => (
+          {entries.map((entry, index) => {
+            const isBuiltIn = entry.type === "inbuilt";
+            return (
             <div key={index} className="pp-card">
               <div className="pp-card-header">
                 <div className="pp-card-title">
-                  <span>{entry.name || `Browser ${index + 1}`}</span>
-                  {entry.cdpUrl && <small className="pp-card-url">addon</small>}
+                  <span>{isBuiltIn ? "Chromium" : entry.name || `Browser ${index + 1}`}</span>
+                  <small className="pp-card-url">{BROWSER_TYPE_LABEL[entry.type] || "CDP"}</small>
                 </div>
                 <div className="pp-card-actions">
-                  <button className="button small" onClick={() => moveEntry(index, -1)} disabled={index === 0} title="Move up">↑</button>
-                  <button className="button small" onClick={() => moveEntry(index, 1)} disabled={index === entries.length - 1} title="Move down">↓</button>
-                  {entry.name !== "chromium" && (
+                  <button className="button small" onClick={() => moveEntry(index, -1)} disabled={isBuiltIn || index === 0} title="Move up">↑</button>
+                  <button className="button small" onClick={() => moveEntry(index, 1)} disabled={isBuiltIn || index === entries.length - 1} title="Move down">↓</button>
+                  {!isBuiltIn && (
                     <>
                       <button className="button small" onClick={() => duplicateEntry(index)} title="Duplicate">⧉</button>
                       <button className="button small danger" onClick={() => removeEntry(index)} title="Remove">&times;</button>
@@ -441,36 +456,68 @@ function BrowserArrayEditor({ value, onChange, ok, message }) {
               </div>
               <div className="pp-card-fields">
                 <div className="pp-field-row">
-                  <label>Name *<input className="config-input" value={entry.name} onChange={(e) => updateEntry(index, "name", e.target.value)} placeholder="chromium" /></label>
+                  <label>Type
+                    <select
+                      className="config-input"
+                      value={entry.type}
+                      disabled={isBuiltIn}
+                      onChange={(e) => {
+                        const nextType = e.target.value;
+                        const next = { ...entry, type: nextType };
+                        if (nextType === "inbuilt") { next.name = "chromium"; next.cdpUrl = ""; }
+                        if (nextType !== "navigator-cdp") next.plugin = "auto";
+                        if (nextType !== "cdp") next.cdpUrl = "";
+                        patch(entries.map((x, i) => (i === index ? next : x)));
+                      }}
+                    >
+                      {BROWSER_TYPES.map((t) => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
-                <div className="pp-field-row">
-                  <span className="pp-field-label">ROLES:</span>
-                  <div className="pp-checkbox-group">
-                    {BROWSER_ROLES.map((role) => (
-                      <span key={role} className="pp-checkbox" onClick={() => toggleRole(index, role)}>
-                        <input type="checkbox" checked={(entry.role || []).includes(role)} readOnly tabIndex={-1} />
-                        {role}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                {entry.name !== "chromium" && (
+                {isBuiltIn ? (
                   <div className="pp-field-row">
-                    <label>CDP URL (add-on)<input className="config-input" value={entry.cdpUrl || ""} onChange={(e) => updateEntry(index, "cdpUrl", e.target.value)} placeholder="http://host:9222" /></label>
+                    <span className="pp-field-note">Built-in browser. Fixed name, no options.</span>
                   </div>
-                )}
-                {entry.cdpUrl && (
-                  <div className="pp-field-row">
-                    <label>Connect driver<select className="config-input" value={entry.connect || ""} onChange={(e) => updateEntry(index, "connect", e.target.value)}>
-                      <option value="">auto-detect</option>
-                      <option value="chromium">chromium</option>
-                      <option value="cloakbrowser">cloakbrowser</option>
-                    </select></label>
-                  </div>
+                ) : (
+                  <>
+                    <div className="pp-field-row">
+                      <label>Name *<input className="config-input" value={entry.name} onChange={(e) => updateEntry(index, "name", e.target.value)} placeholder="e.g. cloakbrowser" /></label>
+                    </div>
+                    <div className="pp-field-row">
+                      <span className="pp-field-label">ROLES:</span>
+                      <div className="pp-checkbox-group">
+                        {BROWSER_ROLES.map((role) => (
+                          <span key={role} className="pp-checkbox" onClick={() => toggleRole(index, role)}>
+                            <input type="checkbox" checked={(entry.role || []).includes(role)} readOnly tabIndex={-1} />
+                            {role}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    {entry.type === "cdp" && (
+                      <div className="pp-field-row">
+                        <label>CDP URL *<input className="config-input" value={entry.cdpUrl || ""} onChange={(e) => updateEntry(index, "cdpUrl", e.target.value)} placeholder="http://host:9222" /></label>
+                      </div>
+                    )}
+                    {entry.type === "navigator-cdp" && (
+                      <div className="pp-field-row">
+                        <label>Plugin
+                          <select className="config-input" value={entry.plugin || "auto"} onChange={(e) => updateEntry(index, "plugin", e.target.value)}>
+                            {BROWSER_PLUGINS.map((p) => (
+                              <option key={p} value={p}>{p}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

@@ -230,12 +230,13 @@ describe("handleDevtoolsToolCall", () => {
   it("routes Target.getTargets to the correct handler", async () => {
     getBrowserManager.mockResolvedValue({
       config: { enableDevtoolsMcp: true },
+      getInstanceStats: vi.fn().mockResolvedValue([]),
     });
 
     const { handleDevtoolsToolCall } = await import("../src/devtools.js");
     const result = await handleDevtoolsToolCall("Target.getTargets", {});
     expect(result).toHaveProperty("count");
-    expect(result).toHaveProperty("targets");
+    expect(result).toHaveProperty("browsers");
   });
 
   it("Target.createTarget accepts ref_id and navigates to the resolved URL", async () => {
@@ -324,6 +325,78 @@ describe("handleDevtoolsToolCall", () => {
     expect(setViewport).toHaveBeenCalledWith({ width: 390, height: 844 });
     expect(setViewport.mock.invocationCallOrder[0]).toBeLessThan(goto.mock.invocationCallOrder[0]);
     expect(result.viewport).toEqual({ width: 390, height: 844 });
+  });
+
+  it("Target.createTarget adopts an existing browser tab when targetId matches and url is blank", async () => {
+    const adoptedPage = {
+      goto: vi.fn(),
+      url: vi.fn().mockReturnValue("https://music.youtube.com/search?q=test"),
+      title: vi.fn().mockResolvedValue("Vegas | YouTube Music"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+    };
+    const newPage = vi.fn().mockResolvedValue(adoptedPage);
+    const attachToExistingTarget = vi.fn().mockResolvedValue({
+      page: adoptedPage,
+      backend: "mac laptop2",
+    });
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      newPage,
+      attachToExistingTarget,
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const result = await handleDevtoolsToolCall("Target.createTarget", {
+      targetId: "D3C6B5CA23347A254126A71269AFB156",
+    });
+
+    expect(attachToExistingTarget).toHaveBeenCalledWith("D3C6B5CA23347A254126A71269AFB156");
+    // Adopting a pre-existing tab must NOT open a new page or navigate it.
+    expect(newPage).not.toHaveBeenCalled();
+    expect(adoptedPage.goto).not.toHaveBeenCalled();
+    expect(result.adopted).toBe(true);
+    expect(result.origin).toBe("browser");
+    expect(result.backend).toBe("mac laptop2");
+    expect(result.url).toBe("https://music.youtube.com/search?q=test");
+    expect(result.navigating).toBe(false);
+  });
+
+  it("Target.createTarget falls back to a new tab when adoption matches nothing", async () => {
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+    };
+    const newPage = vi.fn().mockResolvedValue(page);
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      newPage,
+      attachToExistingTarget: vi.fn().mockResolvedValue(null),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const result = await handleDevtoolsToolCall("Target.createTarget", {
+      targetId: "no-such-target",
+    });
+
+    expect(newPage).toHaveBeenCalled();
+    expect(result.adopted).toBe(false);
+    expect(result.origin).toBe("devtools");
   });
 
   it("Target.createTarget rejects unknown ref_id", async () => {

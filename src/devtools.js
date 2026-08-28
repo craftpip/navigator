@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { getBrowserManager, resolveBrowserParam } from "./browser.js";
 import { resolveRefIdToUrl } from "./ref-memory.js";
 import { clearTab, touchTab } from "./tab-timers.js";
+import { relayServer } from "./relay-server.js";
 
 const MAX_TARGETS = 20;
 const MAX_CONSOLE_MESSAGES = 200;
@@ -71,18 +72,114 @@ function assertEnabled(manager) {
   }
 }
 
-export function getTargetState(targetId) {
+export async function getTargetState(targetId) {
   const tid = String(targetId || "").trim();
+  if (!tid) throw new Error(`targetId is required`);
   if (closedTargets.has(tid)) {
     throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
   }
-  const state = targetsById.get(tid);
-  if (!state || !state.page || state.page.isClosed()) {
-    throw new Error(`Unknown targetId: ${targetId}`);
+  const existing = targetsById.get(tid);
+  if (existing && existing.page && !existing.page.isClosed()) {
+    existing.lastActiveAt = new Date().toISOString();
+    touchTab(existing.backend, existing.targetId);
+    return existing;
   }
-  state.lastActiveAt = new Date().toISOString();
-  touchTab(state.backend, state.targetId);
+
+  // Not yet adopted — try to adopt the existing browser-origin tab by its
+  // exact targetId so the user can drive any of their open tabs directly.
+  const manager = await getBrowserManager();
+  try {
+    const adopted = await manager.attachToExistingTarget(tid);
+    if (adopted && adopted.page && !adopted.page.isClosed()) {
+      const state = registerAdoptedTarget(manager, adopted.page, adopted.backend, tid);
+      state.lastActiveAt = new Date().toISOString();
+      touchTab(state.backend, state.targetId);
+      return state;
+    }
+  } catch {
+    // fall through to "unknown targetId"
+  }
+  throw new Error(`Unknown targetId: ${targetId}. Pass a targetId from Target.getTargets (origin:"browser") to drive your open tab directly, or create one with Target.createTarget.`);
+}
+
+/**
+ * Build + register the devtools state for an ADOPTED browser-origin tab and
+ * return it. Shared by `createTarget` (the explicit adopt path) and the
+ * on-demand `getTargetState` resolution so both register identically.
+ */
+function registerAdoptedTarget(manager, page, backend, targetId) {
+  const isRelay = (() => {
+    if (backend === "chromium") return false;
+    try {
+      if (typeof manager._effectiveAddOns === "function") {
+        const eff = manager._effectiveAddOns().find((b) => b.name === backend);
+        if (eff) return eff.type === "navigator-cdp";
+      }
+      return relayServer.isPaired(backend) || !!relayServer.getEntry(backend);
+    } catch {
+      return false;
+    }
+  })();
+  const viewport = isRelay ? { width: "auto", height: "auto" } : null;
+  const state = {
+    targetId,
+    backend,
+    page,
+    consoleMessages: [],
+    networkRequests: [],
+    createdAt: new Date().toISOString(),
+    lastActiveAt: new Date().toISOString(),
+    lastTitle: "",
+    viewport,
+    sourceUrl: page.url && typeof page.url === "function" ? (() => { try { return page.url(); } catch { return ""; } })() : "",
+    adopted: true
+  };
+  installPageObservers(state);
+  targetsById.set(state.targetId, state);
+  devtoolsCounters.targetsCreated += 1;
+  touchTab(backend, state.targetId);
+  void refreshTitle(state);
   return state;
+}
+
+const STALE_ERROR_RE = /Tab not attached|Cannot find context|Execution context was destroyed|Target closed|Session closed/i;
+
+function isStaleError(err) {
+  return STALE_ERROR_RE.test(String(err?.message || err || ""));
+}
+
+/**
+ * Run `action(state)` with a live devtools handle, auto-recovering from a
+ * stale detached handle. The user can close the "started debugging this
+ * browser" banner at any time — that fires `chrome.debugger.onDetach`
+ * (canceled_by_user) and every subsequent CDP command fails with
+ * "Tab not attached: <tabId>" until the handle is purged and re-adopted.
+ * The extension now notifies the server via `tab_detached` and the server
+ * clears its stale `sessionForTarget` maps, so a single retry after a short
+ * settle restores control and the banner reappears.
+ */
+async function withStaleRetry(targetId, action) {
+  const tid = String(targetId || "").trim();
+  if (!tid) throw new Error("targetId is required");
+  let state;
+  try {
+    state = await getTargetState(tid);
+    return await action(state);
+  } catch (err) {
+    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
+    const stale = targetsById.get(tid);
+    if (stale) {
+      targetsById.delete(tid);
+      clearTab(stale.backend, tid);
+    }
+    await new Promise((r) => setTimeout(r, 450));
+    try {
+      state = await getTargetState(tid);
+    } catch (e) {
+      throw err;
+    }
+    return await action(state);
+  }
 }
 
 function recordConsoleMessage(state, entry) {
@@ -340,11 +437,46 @@ async function listTargets() {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const results = [];
+  const seen = new Set();
+
+  // Adopted devtools targets — these have live handles and are directly drivable.
   for (const state of targetsById.values()) {
     if (!state.page || state.page.isClosed()) continue;
     await refreshTitle(state);
-    results.push(buildTargetSummary(state));
+    seen.add(state.targetId);
+    results.push({ ...buildTargetSummary(state), origin: state.adopted ? "browser" : "agent" });
   }
+
+  // Fresh open tabs from connected relay (user) browsers so Target.getTargets
+  // never reports empty after a restart before anything is adopted.
+  const relayEntries = manager
+    ._effectiveAddOns()
+    .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)));
+  for (const entry of relayEntries) {
+    let tabs;
+    try {
+      tabs = await relayServer.refreshTabList(entry.name);
+    } catch {
+      tabs = [];
+    }
+    for (const t of tabs) {
+      if (!t || !t.targetId || seen.has(t.targetId)) continue;
+      if (t.type && t.type !== "page") continue;
+      seen.add(t.targetId);
+      results.push({
+        targetId: t.targetId,
+        backend: entry.name,
+        url: t.url || "",
+        title: t.title || "",
+        viewport: { width: "auto", height: "auto" },
+        origin: "browser",
+        lastActiveAt: null,
+        closesInMs: null,
+        autoClose: false
+      });
+    }
+  }
+
   return {
     count: results.length,
     targets: results
@@ -357,9 +489,16 @@ async function closeTarget(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
-  await state.page.close();
+  const state = await getTargetState(args.targetId);
+  try {
+    await state.page.close();
+  } catch (error) {
+    // For relay (user-owned) tabs the extension may already be gone; still
+    // release our handle so the target never leaks in targetsById.
+    console.error(`⚠️  closeTarget page.close failed (${state.backend} ${state.targetId}): ${String(error?.message || error)}`);
+  }
   targetsById.delete(state.targetId);
+  closedTargets.set(state.targetId, { closedAt: new Date().toISOString() });
   clearTab(state.backend, state.targetId);
   devtoolsCounters.targetsClosed += 1;
   return {
@@ -372,8 +511,7 @@ export async function captureTargetScreenshot(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
-
+  return withStaleRetry(args.targetId, async (state) => {
   const normalizedFormat = "jpeg";
   const normalizedQuality =
     normalizedFormat === "jpeg"
@@ -472,6 +610,7 @@ export async function captureTargetScreenshot(args = {}) {
     captureTimestamp: new Date().toISOString(),
     screenshotBase64: screenshot
   };
+  });
 }
 
 async function navigatePage(args = {}) {
@@ -481,27 +620,45 @@ async function navigatePage(args = {}) {
   assertEnabled(manager);
   let state;
   try {
-    state = getTargetState(args.targetId);
+    state = await getTargetState(args.targetId);
   } catch (error) {
     if (String(error?.message || "").includes("Unknown targetId")) {
       state = await createTarget({ targetId: args.targetId.trim(), url: args.url.trim() });
       return { ...state, created: true };
     }
-    throw error;
+    if (isStaleError(error)) {
+      const tid = String(args.targetId).trim();
+      const stale = targetsById.get(tid);
+      if (stale) { targetsById.delete(tid); clearTab(stale.backend, tid); }
+      await new Promise((r) => setTimeout(r, 450));
+      try {
+        state = await getTargetState(args.targetId);
+      } catch (e2) {
+        if (String(e2?.message || "").includes("Unknown targetId")) {
+          state = await createTarget({ targetId: args.targetId.trim(), url: args.url.trim() });
+          return { ...state, created: true };
+        }
+        throw error;
+      }
+    } else {
+      throw error;
+    }
   }
-  await state.page.goto(args.url.trim(), {
-    waitUntil: manager.config.navWaitUntil,
-    timeout: manager.config.browserOpTimeoutMs
+  return withStaleRetry(args.targetId, async (liveState) => {
+    await liveState.page.goto(args.url.trim(), {
+      waitUntil: manager.config.navWaitUntil,
+      timeout: manager.config.browserOpTimeoutMs
+    });
+    await refreshTitle(liveState);
+    return { ...buildTargetSummary(liveState), created: false };
   });
-  await refreshTitle(state);
-  return { ...buildTargetSummary(state), created: false };
 }
 
 async function reloadPage(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const ignoreCache = Boolean(args.ignoreCache);
   let cacheToggled = false;
 
@@ -531,13 +688,14 @@ async function reloadPage(args = {}) {
 
   await refreshTitle(state);
   return { ...buildTargetSummary(state), reloaded: true, ignoreCache: cacheToggled };
-}
+
+  });}
 
 async function goHistory(args = {}, direction) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const options = {
     waitUntil: manager.config.navWaitUntil,
     timeout: manager.config.browserOpTimeoutMs
@@ -549,14 +707,15 @@ async function goHistory(args = {}, direction) {
   await refreshTitle(state);
   const navigated = Boolean(response) || state.page.url() !== before;
   return { ...buildTargetSummary(state), direction, navigated };
-}
+
+  });}
 
 async function dispatchKeyEvent(args = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.key, "key");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const modifiers = Array.isArray(args.modifiers) ? args.modifiers.map(String) : [];
 
   for (const modifier of modifiers) await state.page.keyboard.down(modifier);
@@ -568,13 +727,14 @@ async function dispatchKeyEvent(args = {}) {
 
   await new Promise((resolve) => setTimeout(resolve, manager.config.humanTypingDelay || 0));
   return { ...buildTargetSummary(state), pressed: args.key, modifiers };
-}
+
+  });}
 
 async function getNetworkRequests(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.min(Math.max(1, Math.floor(Number(args.limit)) || 25), MAX_NETWORK_REQUESTS);
   const filter = typeof args.filter === "string" && args.filter.trim()
     ? args.filter.trim().toLowerCase()
@@ -595,14 +755,15 @@ async function getNetworkRequests(args = {}) {
     failed: entries.filter((entry) => entry.failed).length,
     requests: entries.slice(-limit).reverse()
   };
-}
+
+  });}
 
 async function evaluateRuntime(args = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.expression, "expression");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const result = await Promise.race([
     state.page.evaluate(async (expression) => {
@@ -740,26 +901,28 @@ async function evaluateRuntime(args = {}) {
     targetId: state.targetId,
     result
   };
-}
+
+  });}
 
 async function getConsoleMessages(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.max(1, Math.min(100, Number(args.limit) || 30));
   return {
     targetId: state.targetId,
     count: state.consoleMessages.length,
     messages: state.consoleMessages.slice(-limit)
   };
-}
+
+  });}
 
 async function getDocument(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.max(1, Math.min(MAX_QUERY_RESULTS, Number(args.limit) || 15));
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const result = await Promise.race([
@@ -891,7 +1054,8 @@ async function getDocument(args = {}) {
     targetId: state.targetId,
     ...result
   };
-}
+
+  });}
 
 async function querySelector(args = {}, multiple = false) {
   assertString(args.targetId, "targetId");
@@ -901,7 +1065,7 @@ async function querySelector(args = {}, multiple = false) {
 
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.max(1, Math.min(MAX_QUERY_RESULTS, Number(args.limit) || 10));
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const rawSelector = typeof args.selector === "string" ? args.selector : "";
@@ -1026,13 +1190,14 @@ async function querySelector(args = {}, multiple = false) {
     targetId: state.targetId,
     ...(multiple ? { count: result.length, elements: result } : { element: result })
   };
-}
+
+  });}
 
 async function getOuterHtml(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const maxChars = parseMaxChars(args.maxChars, DEFAULT_HTML_LIMIT);
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const result = await Promise.race([
@@ -1130,13 +1295,14 @@ async function getOuterHtml(args = {}) {
     targetId: state.targetId,
     ...result
   };
-}
+
+  });}
 
 async function getCompactHtml(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const maxChars = parseMaxChars(args.maxChars, DEFAULT_HTML_LIMIT);
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const result = await Promise.race([
@@ -1307,7 +1473,8 @@ async function getCompactHtml(args = {}) {
     targetId: state.targetId,
     ...result
   };
-}
+
+  });}
 
 async function scrollIntoViewIfNeeded(args = {}) {
   assertString(args.targetId, "targetId");
@@ -1317,7 +1484,7 @@ async function scrollIntoViewIfNeeded(args = {}) {
 
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const result = await Promise.race([
     state.page.evaluate(({ selector, xpath }) => {
@@ -1382,6 +1549,7 @@ async function scrollIntoViewIfNeeded(args = {}) {
     targetId: state.targetId,
     ...result
   };
+  });
 }
 
 function isNavigationError(error) {
@@ -1396,7 +1564,7 @@ async function dispatchMouseEvent(args = {}) {
 
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const button = ["left", "right", "middle"].includes(String(args.button || "").toLowerCase())
     ? String(args.button).toLowerCase()
     : "left";
@@ -1534,7 +1702,8 @@ async function dispatchMouseEvent(args = {}) {
     url: state.page.url(),
     title: state.lastTitle
   };
-}
+
+  });}
 
 async function insertText(args = {}) {
   assertString(args.targetId, "targetId");
@@ -1545,7 +1714,7 @@ async function insertText(args = {}) {
 
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(args.targetId);
+  return withStaleRetry(args.targetId, async (state) => {
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   const point = await Promise.race([
     state.page.evaluate(({ selector, xpath }) => {
@@ -1665,7 +1834,8 @@ async function insertText(args = {}) {
     finalValue: finalValue?.value ?? null,
     valueReadback: finalValue?.value !== undefined
   };
-}
+
+  });}
 
 export const devtoolsToolDefinitions = [
   {

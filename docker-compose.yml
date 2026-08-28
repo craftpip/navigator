@@ -23,7 +23,8 @@ services:
       # All configuration is defined in the .env file (see .env.example).
       # These entries read from it and fall back to sane defaults when unset.
       HEADLESS: ${HEADLESS:-true}
-      BROWSERS: '${BROWSERS:-[{"name":"chromium","role":[]},{"name":"cloakbrowser","role":["default","search","fetch","screenshot","devtools"],"cdpUrl":"http://cloak-browser:9222"}]}'
+      DEBUG: ${DEBUG:-0}
+      BROWSERS: '${BROWSERS:-[{"name":"chromium","role":["default"]}]}'
       BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36}
       ENABLE_VNC: ${ENABLE_VNC:-1}
       ENABLE_WEB_CONSOLE: ${ENABLE_WEB_CONSOLE:-1}
@@ -94,9 +95,6 @@ services:
       # an "(AI Model)" option in the console's Extractor/Post-processor dropdowns.
       POST_PROCESSOR_MODELS: ${POST_PROCESSOR_MODELS:-}
 
-      # CloakBrowser CDP license key — passed to the cloak-browser sidecar below.
-      CLOAKBROWSER_LICENSE_KEY: ${CLOAKBROWSER_LICENSE_KEY:-}
-
     volumes:
       - .:/app
       - /tmp/screenshots:/app/screenshots
@@ -106,29 +104,6 @@ services:
       - "${NOVNC_PORT:-1996}:${NOVNC_PORT:-1996}"
     stdin_open: true
     tty: true
-
-  # CloakBrowser CDP sidecar (add-on browser, see plans/39 §12).
-  # cloakserve is a CDP multiplexer exposing an HTTP CDP server on :9222;
-  # navigator connects to it as a BROWSERS add-on via browserURL.
-  cloak-browser:
-    container_name: "cloak-browser"
-    image: cloakhq/cloakbrowser
-    restart: unless-stopped
-    command: ["cloakserve"]   # image default CMD is `python`; run the CDP multiplexer
-    ports:
-      - "127.0.0.1:${CLOAK_CDP_PORT:-9222}:9222"
-    environment:
-      CLOAKBROWSER_LICENSE_KEY: ${CLOAKBROWSER_LICENSE_KEY:-}
-    shm_size: "2gb"
-    init: true
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2g
-        reservations:
-          cpus: "2.0"
-          memory: 2g
 
 volumes:
   chrome_profile_data:

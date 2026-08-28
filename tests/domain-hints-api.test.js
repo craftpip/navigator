@@ -82,6 +82,7 @@ function makeMockManager(overrides = {}) {
     },
     getHealth: vi.fn().mockResolvedValue({ ok: true, browserConnected: true, openPageSlots: { used: 0, max: 10 }, pageLimiter: { inUse: 0 } }),
     getInstanceStats: vi.fn().mockResolvedValue([]),
+    _effectiveAddOns: vi.fn().mockReturnValue([]),
     shutdown: vi.fn().mockResolvedValue(undefined),
     prelaunchIfConfigured: vi.fn().mockResolvedValue(undefined),
     relaunchDefaultBackend: vi.fn().mockResolvedValue({ ok: true }),
