@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { formatBytes, formatMs, formatCountdown, formatTime, formatRelativeTime, formatBackend, formatTrendLabel } from "../../lib/format.js";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { formatBytes, formatMs, formatCountdown, formatTime, formatRelativeTime, formatBackend, formatBrowser, formatTrendLabel } from "../../lib/format.js";
 import { WEB_TOOLS, request, classifyError } from "../../lib/request.js";
 import { Panel, Empty, Dot, Pill, Trend, Metric, Item, Countdown } from "../../components/ui.jsx";
 
@@ -295,7 +295,7 @@ function StatusView({ snapshot, history, toggleVnc, vncBusy, feed, trend, trendR
           <Engines config={config} health={health} stats={stats} reload={reload} />
           <LiveFeed feed={feed} enabledEngines={engines.map((engine) => engine.id)} feedMaxHeight={feedMaxHeight} />
         </div>
-        <Drivers health={health} instances={instances} />
+        <Drivers health={health} instances={instances} reload={reload} />
         <Runtime health={health} stats={stats} history={history} />
         <Logs logs={logs} />
       </section>
@@ -334,9 +334,71 @@ function Runtime({ health, stats, history }) {
     </Panel>
   );
 }
-function Drivers({ health, instances }) {
+function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text);
+    return true;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+function RelayAuth({ browser }) {
+  const [left, setLeft] = useState(Math.max(0, (browser.pinExpiresAt || 0) - Date.now()));
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const update = () => setLeft(Math.max(0, (browser.pinExpiresAt || 0) - Date.now()));
+    update();
+    setCopied(false);
+    const tick = setInterval(update, 1000);
+    return () => clearInterval(tick);
+  }, [browser.pinExpiresAt]);
+  // When PIN is expired, don't show the "expired — reconnect" UI — just
+  // hide and let the driver fall back to its previous paired/disconnected state.
+  if (left <= 0) return null;
+  return (
+    <div className="relay-auth">
+      <div className="relay-auth-head">
+        <strong>Incoming browser authorization required</strong>
+        <span className="relay-auth-exp">
+          {`${Math.ceil(left / 1000)}s left`}
+        </span>
+      </div>
+      <div className="relay-auth-msg">
+        A connection request from <b>{browser.name}</b> is waiting. Enter this PIN in the Chrome extension popup within 60 seconds:
+      </div>
+      <div className="relay-auth-code">
+        <span className="relay-pin">{browser.pin || "······"}</span>
+        <button
+          type="button"
+          className="relay-copy"
+          onClick={() => {
+            if (browser.pin && copyText(browser.pin)) {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            }
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Drivers({ health, instances, reload }) {
   const byBackend = new Map(instances.map((item) => [item.backend, item]));
   const browsers = health.browsers || [];
+  const [forgetting, setForgetting] = useState(null);
+  const prevTabsRef = useRef({});
   return (
     <Panel title="Browser drivers" sub="engines, tabs and close timers">
       <div className="list">
@@ -345,39 +407,93 @@ function Drivers({ health, instances }) {
           const instance = byBackend.get(backend);
           const online = Boolean(instance?.connected);
           const defaultDriver = backend === health.backend;
-          const detail = online
-            ? `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
-            : defaultDriver
-              ? "Default driver is not connected"
-              : browser.addOn ? "Add-on — not connected" : "Not started";
+          const isRelay = browser.type === "navigator-cdp";
+          const relayState = isRelay ? browser.status : null;
+          const pending = relayState === "auth_pending";
+          const detail = pending
+            ? "Waiting for PIN authorization — unpaired incoming request"
+            : online
+              ? isRelay
+                ? "Extension bridge — drives page, screenshot and devtools work in this Chrome"
+                : `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
+              : defaultDriver
+                ? "Default driver is not connected"
+                : isRelay
+                  ? browser.paired
+                    ? "Paired — disconnected — click Connect in the extension to rejoin (no new PIN)"
+                    : "Extension not paired — connect from the popup to request access"
+                  : browser.addOn ? "Add-on — not connected" : "Not started";
+          const statusPill = pending
+            ? <Pill tone="warn">PIN required</Pill>
+            : isRelay
+              ? online
+                ? <Pill tone="ok">connected</Pill>
+                : browser.paired
+                  ? <Pill tone="off">paired</Pill>
+                  : <Pill tone="off">not paired</Pill>
+              : <Pill tone={online ? "ok" : defaultDriver ? "err" : "off"}>
+                  {online ? "online" : defaultDriver ? "offline" : "idle"}
+                </Pill>;
           return (
             <div className="item driver-item" key={backend}>
-              <Dot tone={online ? "" : defaultDriver ? "err" : "off"} />
+              <Dot tone={pending ? "warn" : online ? "" : defaultDriver ? "err" : "off"} />
               <div className="item-main">
                 <div className="item-title">
-                  {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}
+                  {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}{" "}
+                  {!browser.configured && backend !== "chromium" && <Pill tone="info">auto-registered</Pill>}
                 </div>
                 <div className="item-detail">{detail}</div>
-                {online && (instance.openTabs || []).length > 0 && (
-                  <div className="driver-tabs">
-                    {(instance.openTabs || []).map((tab, index) => (
-                      <div className="driver-tab" key={`${tab.targetId || index}`}>
-                        <span className="driver-tab-title" title={tab.url}>
-                          {tab.title || tab.url || "Untitled page"}
-                        </span>
-                        {tab.autoClose ? (
-                          <Countdown closesInMs={tab.closesInMs} />
-                        ) : (
-                          <span className="countdown sticky">sticky</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                {pending && <RelayAuth browser={browser} />}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                {statusPill}
+                {isRelay && !pending && (
+                  <button
+                    className="button small"
+                    disabled={forgetting === backend}
+                    onClick={async () => {
+                      if (!confirm(`Forget browser "${backend}"? This clears the pairing — a new PIN will be required to reconnect.`)) return;
+                      setForgetting(backend);
+                      try {
+                        await request("/console/relay/forget", {
+                          method: "POST",
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify({ name: backend })
+                        });
+                        if (reload) await reload();
+                      } catch {}
+                      setForgetting(null);
+                    }}
+                    title={browser.paired ? "Clear pairing for this browser" : "Remove this entry"}
+                  >
+                    {forgetting === backend ? "…" : "Forget"}
+                  </button>
                 )}
               </div>
-              <Pill tone={online ? "ok" : defaultDriver ? "err" : "off"}>
-                {online ? "online" : defaultDriver ? "offline" : "idle"}
-              </Pill>
+              {(() => {
+                const rawTabs = instance?.openTabs || [];
+                if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
+                const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
+                return tabsToShow.length > 0 && online ? (
+                <div className="driver-tabs">
+                  <div className="driver-tabs-header">
+                    <span>Tab</span>
+                    <span>Lifetime</span>
+                  </div>
+                  {tabsToShow.map((tab, index) => (
+                    <div className="driver-tab" key={`${tab.targetId || index}`}>
+                      <span className="driver-tab-title" title={tab.url}>
+                        {tab.title || tab.url || "Untitled page"}
+                      </span>
+                      {tab.autoClose ? (
+                        <Countdown closesInMs={tab.closesInMs} />
+                      ) : (
+                        <span className="countdown sticky">sticky</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : null; })()}
             </div>
           );
         })}
@@ -495,7 +611,7 @@ function Engines({ config, health, stats, reload }) {
                    <Pill tone={tone}>{route}</Pill>
                   <button className="button small engine-reset" onClick={() => resetEngine(engine.id)} disabled={resetStatus?.engine === engine.id && resetStatus.text === "resetting..."}>{resetStatus?.engine === engine.id ? resetStatus.text : "reset"}</button>
                 </div>
-                <div className="engine-inline-meta"><span className="feed-backend">{engine.pool || "api"}</span> · {role}</div>
+                <div className="engine-inline-meta"><span className="feed-backend">{(engine.pool === "shared" ? "engine" : engine.pool) || "api"}</span> · {role}</div>
                 <div className="ordering-factors">
                   <span title="Scheduler eligibility state — ready means the route can be dispatched right now"><b>{schedulerState.replace("_", " ")}</b> eligibility</span>
                   <span title="Composite score: success rate, result yield, recent stability, failure recency, recovery, and response latency"><b>{Number(profile.score || 0).toFixed(3)}</b> score</span>
@@ -565,43 +681,77 @@ function buildFeed(entries, pageOps) {
   };
   const rows = [];
   for (const search of entries || []) {
-    const attempts = (search.attempts || []).filter((attempt) => attempt.status !== "skip").map((attempt) => ({
-      key: attempt.id,
-      engine: attempt.engine,
-      backend: formatBackend(attempt.backend),
-      status: attempt.status || "running",
-      response:
-        attempt.status === "skip" ? `skipped · ${attempt.error || "scheduler"}`
-          : attempt.status === "fail" || attempt.status === "error" ? `failed · ${attempt.error || "request failed"}`
-            : attempt.status === "ok" ? `${attempt.result_count || 0} results` : attempt.status || "running",
-      duration: attempt.duration_ms != null ? formatMs(attempt.duration_ms) : "",
-      error: attempt.error || "",
-    }));
-    const backends = [...new Set(attempts
+    const attempts = (search.attempts || []).filter((attempt) => attempt.status !== "skip").map((attempt) => {
+      const isRunning = attempt.status === "running";
+      const browser = (() => {
+        const b = formatBrowser(attempt.backend);
+        return b && b !== "-" ? b : "api";
+      })();
+      return {
+        key: attempt.id,
+        engine: attempt.engine,
+        backend: browser,
+        status: attempt.status || "running",
+        response: isRunning
+          ? "searching…"
+          : attempt.status === "fail" || attempt.status === "error"
+            ? `failed · ${attempt.error || "request failed"}`
+            : attempt.status === "ok"
+              ? `${attempt.result_count || 0} results`
+              : "searching…",
+        duration: isRunning ? "…" : attempt.duration_ms != null ? formatMs(attempt.duration_ms) : "",
+        error: attempt.error || "",
+      };
+    });
+    const okBackends = [...new Set(attempts
       .filter((attempt) => attempt.status === "ok")
       .map((attempt) => attempt.backend)
       .filter((backend) => backend !== "-"))];
+    const runningBackends = [...new Set(attempts
+      .filter((attempt) => attempt.status === "running")
+      .map((attempt) => attempt.backend)
+      .filter((backend) => backend !== "-"))];
+    const backendLabel = okBackends.length ? okBackends.join("/") : runningBackends.length ? runningBackends.join("/") : "-";
+    const isSearchRunning = search.status === "running";
     rows.push({
       key: `s-${search.id}`,
       ts: search.ts,
       kind: "search",
-      status: search.status || "",
+      status: search.status || (isSearchRunning ? "running" : ""),
       category: "Web",
       tool: "web_search",
-      backend: backends.join("/") || "-",
+      backend: "", // hidden — per-engine trail shows browser/api
       requestLabel: "query",
       request: preview(search.query),
-      response:
-        search.error ? "error" : search.result_count != null ? `${search.result_count} results` : search.status || "running",
-      duration: search.duration_ms != null ? formatMs(search.duration_ms) : "",
+      response: search.error
+        ? "error"
+        : isSearchRunning
+          ? "searching…"
+          : search.result_count != null
+            ? `${search.result_count} results`
+            : "searching…",
+      duration: isSearchRunning ? "…" : search.duration_ms != null ? formatMs(search.duration_ms) : "",
       error: search.error || "",
       attempts,
     });
   }
   for (const op of pageOps || []) {
     const isDevtools = op.source === "devtools";
-    const pageAction = op.tool === "web_page_screenshot" ? "capture" : "fetch";
     const isRunning = op.status === "running";
+    const verbForTool = (tool) => {
+      if (tool === "web_fetch") return "fetching…";
+      if (tool === "web_page_screenshot") return "capturing…";
+      if (tool === "web_search") return "searching…";
+      if (tool === "Target.createTarget") return "opening…";
+      if (tool === "Target.closeTarget") return "closing…";
+      if (tool === "Target.getTargets") return "listing…";
+      if (tool === "Page.navigate") return "navigating…";
+      if (tool && tool.startsWith("DOM.")) return "inspecting…";
+      if (tool && tool.startsWith("Runtime.")) return "running…";
+      if (tool && tool.startsWith("Input.")) return "interacting…";
+      return "running…";
+    };
+    const pageAction = op.tool === "web_page_screenshot" ? "capture" : "fetch";
     rows.push({
       key: `p-${op.id}`,
       ts: op.ts,
@@ -609,11 +759,11 @@ function buildFeed(entries, pageOps) {
       status: op.status || (op.ok ? "ok" : "fail"),
       category: isDevtools ? "Dev" : "Web",
       tool: op.tool || "page",
-      backend: formatBackend(op.backend),
+      backend: formatBrowser(op.backend) || "-",
       requestLabel: isDevtools ? "tab" : "page",
       request: isDevtools ? devtoolsRequest(op.tool || "", op.url) : `${pageAction}: ${requestTarget(op.url)}`,
       response: isRunning
-        ? "in progress…"
+        ? verbForTool(op.tool)
         : op.error
           ? "error"
           : op.response_chars
@@ -629,7 +779,8 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
   const [showWeb, setShowWeb] = useState(true);
   const [showDevtools, setShowDevtools] = useState(true);
   const [newKeys, setNewKeys] = useState(() => new Set());
-  const knownKeys = useRef(null);
+  const knownAllKeys = useRef(null);
+  const immediateAddedRef = useRef(new Set());
   const enabledEngineIds = new Set(enabledEngines);
   const rows = (feed || [])
     .map((entry) =>
@@ -643,17 +794,49 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
         : entry,
     )
     .filter((entry) => (entry.kind === "devtools" ? showDevtools : showWeb));
-  useEffect(() => {
-    const currentKeys = new Set(rows.map((entry) => entry.key));
-    if (!knownKeys.current) {
-      if (feed?.length) knownKeys.current = currentKeys;
+  // Synchronous immediate detection — makes the new entry render with `is-new`
+  // on the VERY FIRST paint after `feed` grows, so there is no flash of
+  // full-height (1fr) -> 0fr -> 1fr. The layout effect below then persists
+  // the keys into state for the 380ms animation window and advances knownAllKeys.
+  const fullKeysForRender = new Set((feed || []).map((entry) => entry.key));
+  const visibleKeysForRender = new Set(rows.map((entry) => entry.key));
+  if (knownAllKeys.current) {
+    const addedForRender = new Set([...fullKeysForRender].filter((key) => !knownAllKeys.current.has(key)));
+    immediateAddedRef.current = new Set([...addedForRender].filter((key) => visibleKeysForRender.has(key)));
+  } else {
+    immediateAddedRef.current = new Set();
+  }
+  const displayNewKeys = (() => {
+    const s = new Set(newKeys);
+    for (const k of immediateAddedRef.current) s.add(k);
+    return s;
+  })();
+  useLayoutEffect(() => {
+    const fullKeys = new Set((feed || []).map((entry) => entry.key));
+    if (!knownAllKeys.current) {
+      if ((feed || []).length) knownAllKeys.current = fullKeys;
       return;
     }
-    const added = new Set([...currentKeys].filter((key) => !knownKeys.current.has(key)));
-    if (added.size) {
-      setNewKeys(added);
+    // Use the synchronously-computed set so the first paint and the effect agree.
+    const addedVisible = immediateAddedRef.current;
+    if (addedVisible.size) {
+      setNewKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of addedVisible) next.add(k);
+        return next;
+      });
+      const ANIMATION_MS = 380;
+      for (const k of addedVisible) {
+        setTimeout(() => {
+          setNewKeys((prev) => {
+            const next = new Set(prev);
+            next.delete(k);
+            return next;
+          });
+        }, ANIMATION_MS + 50);
+      }
     }
-    knownKeys.current = currentKeys;
+    knownAllKeys.current = fullKeys;
   }, [feed]);
   return (
     <Panel
@@ -681,38 +864,33 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
     >
       {rows.length ? (
         <div className="feed" style={feedMaxHeight ? { maxHeight: feedMaxHeight } : undefined}>
-          <table className="activity-table">
-            <colgroup>
-              <col className="activity-time" />
-              <col className="activity-tool" />
-              <col className="activity-response" />
-              <col className="activity-duration" />
-            </colgroup>
-            <tbody>
-              {rows.map((entry) => {
-                const tone = entry.status === "ok" ? "ok" : entry.status === "fail" || entry.status === "error" ? "fail" : entry.status === "running" ? "running" : "";
-                return (
-                  <tr
-                    className={`activity-row ${tone} ${newKeys.has(entry.key) ? "activity-new" : ""}`}
-                    key={entry.key || `${entry.kind}-${entry.ts}`}
-                  >
-                    <td className="feed-time">
+          <div className="activity-list">
+            {rows.map((entry) => {
+              const tone = entry.status === "ok" ? "ok" : entry.status === "fail" || entry.status === "error" ? "fail" : entry.status === "running" ? "running" : "";
+              const isNew = displayNewKeys.has(entry.key);
+              return (
+                <div className={`activity-row-wrapper ${isNew ? "is-new" : ""}`} key={entry.key || `${entry.kind}-${entry.ts}`}>
+                  <div className={`activity-row ${tone}`}>
+                    <div className="feed-time">
                       <span className="feed-time-top">
                         <b>{formatRelativeTime(entry.ts)}</b>
                         <span className="feed-kind">{entry.category}</span>
                       </span>
                       <small>{formatTime(entry.ts)}</small>
-                    </td>
-                    <td className="activity-tool-cell">
+                    </div>
+                    <div className="activity-tool-cell">
                       <span className="feed-tool">
-                        {entry.tool} <span className="feed-backend">{entry.backend || "-"}</span>
+                        {entry.tool}
+                        {entry.tool !== "web_search" && entry.backend && entry.backend !== "-" ? (
+                          <span className="feed-backend">{entry.backend}</span>
+                        ) : null}
                       </span>
                       <span className="feed-request" title={entry.request}>{entry.requestLabel || "request"}: {entry.request || "-"}</span>
                       {entry.attempts?.length ? (
                         <span className="feed-attempts">
                           {entry.attempts.map((attempt) => (
                             <span
-                              className={`feed-attempt ${attempt.status === "ok" ? "ok" : attempt.status === "skip" ? "skip" : attempt.status === "fail" || attempt.status === "error" ? "fail" : ""}`}
+                              className={`feed-attempt ${attempt.status === "ok" ? "ok" : attempt.status === "running" ? "running" : attempt.status === "skip" ? "skip" : attempt.status === "fail" || attempt.status === "error" ? "fail" : ""}`}
                               key={attempt.key}
                               title={attempt.error || undefined}
                             >
@@ -722,16 +900,25 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
                           ))}
                         </span>
                       ) : null}
-                    </td>
-                    <td className={`feed-response ${entry.error ? "feed-error" : ""}`} title={entry.error || entry.response}>
-                      {entry.error ? "error" : entry.response}
-                    </td>
-                    <td className="feed-duration">{entry.duration}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    </div>
+                    <div className={`feed-response ${entry.error ? "feed-error" : ""}`} title={entry.error || entry.response}>
+                      {entry.status === "running" ? (
+                        <>
+                          <span className="activity-spinner" aria-hidden="true" />
+                          <span>{entry.response}</span>
+                        </>
+                      ) : entry.error ? (
+                        "error"
+                      ) : (
+                        entry.response
+                      )}
+                    </div>
+                    <div className="feed-duration">{entry.duration}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       ) : (
         <Empty>

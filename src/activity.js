@@ -79,6 +79,41 @@ export function recordDbEngineAttempt({ engine, backend, status, resultCount = 0
   });
 }
 
+export function recordEngineAttemptStart({ engine, backend }) {
+  return runExclusive(() => {
+    const info = getDb()
+      .prepare(
+        "INSERT INTO engine_attempts (search_id, ts, engine, backend, status, result_count, duration_ms, error) VALUES (?, ?, ?, ?, 'running', 0, NULL, '')"
+      )
+      .run(
+        searchIdFromContext(),
+        Date.now(),
+        String(engine),
+        backend || null,
+        // status, result_count, duration_ms, error are set above
+      );
+    return Number(info.lastInsertRowid);
+  });
+}
+
+export function recordEngineAttemptEnd(id, { status, resultCount = 0, error = "", durationMs = 0 } = {}) {
+  if (!id) return;
+  runExclusive(() => {
+    getDb()
+      .prepare(
+        "UPDATE engine_attempts SET status = ?, result_count = ?, duration_ms = ?, error = ?, ts = ? WHERE id = ?"
+      )
+      .run(
+        String(status),
+        Math.max(0, Number(resultCount) || 0),
+        Math.max(0, Math.round(durationMs) || 0),
+        String(error || "").slice(0, 300),
+        Date.now(),
+        Number(id)
+      );
+  });
+}
+
 export function recordPageOpStart({ tool, url, backend, source = "mcp" }) {
   return runExclusive(() => {
     const info = getDb()

@@ -712,6 +712,20 @@ html[data-theme="dark"] .mode-switch button.active {
   align-items: flex-start;
   gap: 10px;
 }
+.driver-item {
+  flex-wrap: wrap;
+}
+.driver-item .item-main {
+  flex: 1;
+  min-width: 0;
+}
+.driver-item .driver-tabs {
+  flex-basis: 100%;
+  width: 100%;
+  margin-left: 18px;
+  margin-top: 6px;
+  box-sizing: border-box;
+}
 .status-dot {
   flex: none;
   margin-top: 5px;
@@ -1002,24 +1016,47 @@ html[data-theme="dark"] .mode-switch button.active {
 
 /* Driver inline tabs + countdown */
 .driver-tabs {
-  margin-top: 6px;
+  margin-top: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  width: 100%;
+  min-height: 18px;
+}
+.driver-tabs-header,
+.driver-tab {
+  display: grid;
+  grid-template-columns: 1fr 84px;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+}
+.driver-tabs-header {
+  font: 700 10px var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  opacity: 0.8;
+  padding-bottom: 2px;
+  border-bottom: 1px dotted var(--line2);
+  margin-bottom: 2px;
 }
 .driver-tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   font: 11px var(--sans);
 }
 .driver-tab-title {
-  flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--muted);
+}
+.driver-tabs-header span:last-child,
+.driver-tab .countdown {
+  width: 84px;
+  text-align: right;
+  justify-self: end;
 }
 .countdown {
   color: var(--gold);
@@ -1032,6 +1069,59 @@ html[data-theme="dark"] .mode-switch button.active {
 .countdown.sticky {
   color: var(--muted);
   font-weight: 500;
+}
+
+/* Relay PIN authorization — pending navigator-cdp browser */
+.relay-auth {
+  margin-top: 8px;
+  border: 1px solid var(--amber);
+  background: var(--amber-bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.relay-auth-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font: 600 12px var(--sans);
+  color: var(--amber);
+}
+.relay-auth-exp {
+  font: 700 11px var(--mono);
+  white-space: nowrap;
+}
+.relay-auth-exp.off {
+  color: var(--red);
+}
+.relay-auth-msg {
+  margin-top: 4px;
+  font: 12px var(--sans);
+  color: var(--text);
+  line-height: 1.4;
+}
+.relay-auth-code {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.relay-pin {
+  font: 700 22px var(--mono);
+  letter-spacing: 6px;
+  color: var(--amber);
+}
+.relay-copy {
+  background: var(--amber);
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: 700 11px var(--sans);
+  color: #111;
+  cursor: pointer;
+}
+.relay-copy:hover {
+  filter: brightness(1.1);
 }
 
 /* Live activity feed */
@@ -1068,47 +1158,51 @@ html[data-theme="dark"] .mode-switch button.active {
 .feed::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
 }
-.activity-table {
-  width: 100%;
+.activity-list {
+  display: flex;
+  flex-direction: column;
   min-width: 460px;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font: 12px var(--sans);
 }
-.activity-table .activity-time {
-  width: 72px;
+.activity-row-wrapper {
+  display: grid;
+  grid-template-rows: 1fr;
 }
-.activity-table .activity-response {
-  width: 110px;
+.activity-row-wrapper.is-new {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  animation: activity-row-enter 380ms ease-out forwards;
 }
-.activity-table .activity-duration {
-  width: 60px;
+.activity-row-wrapper.is-new > .activity-row {
+  overflow: hidden;
+  min-height: 0;
 }
-.activity-table td {
-  padding: 7px 8px 7px 0;
-  vertical-align: top;
-}
-.activity-table td:last-child {
-  padding-right: 0;
-}
-.activity-row {
-  border-bottom: 1px dashed var(--line2);
-}
-.activity-row.activity-new td {
-  animation: activity-highlight-fade 10s ease-out forwards;
-}
-@keyframes activity-highlight-fade {
+@keyframes activity-row-enter {
   from {
-    background: var(--blue-bg);
+    grid-template-rows: 0fr;
+    opacity: 0;
   }
   to {
-    background: transparent;
+    grid-template-rows: 1fr;
+    opacity: 1;
   }
+}
+.activity-row {
+  display: grid;
+  grid-template-columns: 72px 1fr 110px 60px;
+  gap: 0 8px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line2);
+  font: 12px var(--sans);
+  min-height: 0;
+  overflow: hidden;
 }
 .feed-time {
   color: var(--muted);
   font: 11px var(--mono);
   white-space: nowrap;
+  margin-top: 3px;
 }
 .feed-time b {
   color: var(--text);
@@ -1156,6 +1250,7 @@ html[data-theme="dark"] .mode-switch button.active {
 }
 .feed-response {
   color: var(--muted);
+  margin-top: 6px;
 }
 .feed-duration {
   color: var(--muted);
@@ -1194,6 +1289,37 @@ html[data-theme="dark"] .mode-switch button.active {
 .feed-attempt.skip {
   color: var(--muted);
 }
+.feed-attempt.running {
+  color: var(--blue);
+}
+.activity-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--line);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: activity-spin 0.7s linear infinite;
+  vertical-align: -1px;
+  margin-right: 4px;
+  flex: none;
+}
+@keyframes activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.feed-response .activity-spinner {
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+.feed-attempt .activity-spinner {
+  width: 9px;
+  height: 9px;
+  border-width: 1.3px;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
 .feed-error {
   color: var(--red);
 }
@@ -1213,7 +1339,7 @@ html[data-theme="dark"] .mode-switch button.active {
   color: var(--red);
 }
 .activity-row.running .feed-response {
-  color: var(--gold);
+  color: var(--blue);
 }
 .manage {
   overflow-x: auto;
@@ -1463,7 +1589,7 @@ select.config-input option {
   text-align: center;
   color: var(--muted);
   font-size: 12px;
-  border: 1px dashed var(--border);
+  border: 1px dashed var(--line2);
   border-radius: 6px;
 }
 .pp-card {
@@ -1494,6 +1620,11 @@ select.config-input option {
   font-size: 10px;
   opacity: 0.6;
   word-break: break-all;
+}
+.pp-field-note {
+  font-size: 11px;
+  opacity: 0.6;
+  padding: 4px 0;
 }
 .pp-card-actions {
   display: flex;
@@ -1792,7 +1923,7 @@ select.config-input option {
   z-index: 2;
   padding: 4px 10px;
   font-size: 11px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line2);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.92);
   color: inherit;
@@ -1805,7 +1936,7 @@ select.config-input option {
   max-width: 100%;
   max-height: 70vh;
   overflow: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line2);
   border-radius: 8px;
   background: #ffffff;
   padding: 8px;

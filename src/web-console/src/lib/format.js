@@ -71,6 +71,16 @@ export function formatBackend(backend) {
   }[String(backend || "").toLowerCase()] || "-";
 }
 
+// Phase 1 — browser pill: show browser name not short code
+export function formatBrowser(browser) {
+  const raw = String(browser || "").trim().toLowerCase();
+  if (!raw || raw === "-") return "-";
+  if (["chromium", "cloakbrowser", "lightpanda", "api"].includes(raw)) return raw;
+  const short = { cb: "cloakbrowser", ch: "chromium", api: "api" }[raw];
+  if (short) return short;
+  return raw;
+}
+
 export function formatTrendLabel(ts, range) {
   const date = new Date(ts);
   return range === "week" || range === "day"

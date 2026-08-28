@@ -7,6 +7,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   recordDbEngineAttempt,
+  recordEngineAttemptEnd,
+  recordEngineAttemptStart,
   recordPageOp,
   recordPageOpStart,
   recordSearchEnd,
@@ -21,6 +23,7 @@ import { EngineScheduler } from "./engine-scheduler.js";
 import { incrementUsageTotal } from "./db.js";
 import { runPostProcessor } from "./post-processor.js";
 import { extractTextFromHtml } from "./extractors/index.js";
+import { parseHtmlToDom } from "./extractors/helpers.js";
 import { extract as trafilaturaExtract } from "./extractors/trafilatura.js";
 import { WebFetchOperation } from "./web-fetch-operation.js";
 import {
@@ -270,6 +273,14 @@ export function recordEngineAttempt(engine, status, errorMsg, resultCount = 0, d
     error: status === "ok" ? "" : readableErrorMessage(errorMsg),
     durationMs
   });
+}
+
+function logEngineAttemptForRunning(engine, status, errorMsg, resultCount = 0) {
+  engineAttemptLog.push({ t: Date.now(), engine, status, results: status === "ok" ? Math.max(0, Number(resultCount) || 0) : 0, err: status === "ok" ? "" : readableErrorMessage(errorMsg || status).slice(0, 300) });
+  if (engineAttemptLog.length > ENGINE_ATTEMPT_LOG_MAX) {
+    engineAttemptLog.splice(0, engineAttemptLog.length - ENGINE_ATTEMPT_LOG_MAX);
+  }
+  persistEngineAttemptLog();
 }
 
 export function getEngineAttemptStats() {
@@ -1067,6 +1078,13 @@ async function runSearchRoute({ manager, query, engine, config, explicit, limit 
     throw error;
   }
 
+  let backend = null;
+  try {
+    backend = getEngineDriver(engine, config)?.backend || null;
+  } catch {
+    backend = getEngineMetadata(engine)?.backend || null;
+  }
+  const attemptId = recordEngineAttemptStart({ engine, backend });
   try {
     const execute = () => manager.withPageSlot(() =>
       runSearchEngine({ manager, query, engine, config, limit })
@@ -1083,16 +1101,19 @@ async function runSearchRoute({ manager, query, engine, config, explicit, limit 
     recordRouteSuccess(engine);
     const durationMs = performance.now() - routeStart;
     if (value.results?.length) {
-      recordEngineAttempt(engine, "ok", "", value.results.length, durationMs);
+      logEngineAttemptForRunning(engine, "ok", "", value.results.length);
+      recordEngineAttemptEnd(attemptId, { status: "ok", resultCount: value.results.length, durationMs });
     } else {
-      recordEngineAttempt(engine, "fail", "Search engine returned no results", 0, durationMs);
+      logEngineAttemptForRunning(engine, "fail", "Search engine returned no results", 0);
+      recordEngineAttemptEnd(attemptId, { status: "fail", resultCount: 0, error: "Search engine returned no results", durationMs });
       if (!explicit) engineScheduler.recordFailure(engine, "Search engine returned no results");
     }
     return { ...value, durationMs };
   } catch (error) {
     if (error?.schedulerSkip) {
       if (circuit?.probe) routeCircuitState.get(circuit.key).probeInFlight = false;
-      recordEngineAttempt(engine, "skip", error, 0, performance.now() - routeStart);
+      logEngineAttemptForRunning(engine, "skip", error, 0);
+      recordEngineAttemptEnd(attemptId, { status: "skip", error: readableErrorMessage(error), durationMs: performance.now() - routeStart });
       error.schedulerIgnore = true;
       if (explicit) throw error;
       throw error;
@@ -1100,7 +1121,8 @@ async function runSearchRoute({ manager, query, engine, config, explicit, limit 
     const localBrowserFailure = isLocalBrowserFailure(error);
     if (!localBrowserFailure) recordRouteFailure(engine, error, config.searchRouteCircuitOpenMs);
     else if (circuit.probe) routeCircuitState.get(circuit.key).probeInFlight = false;
-    recordEngineAttempt(engine, localBrowserFailure ? "skip" : "fail", error, 0, performance.now() - routeStart);
+    logEngineAttemptForRunning(engine, localBrowserFailure ? "skip" : "fail", error, 0);
+    recordEngineAttemptEnd(attemptId, { status: localBrowserFailure ? "skip" : "fail", error: readableErrorMessage(error), durationMs: performance.now() - routeStart });
     error.schedulerIgnore = localBrowserFailure;
     if (explicit) throw error;
     throw error;
@@ -1464,37 +1486,32 @@ function enrichNumericLinkText(a, text, href) {
   return text;
 }
 
-function extractLinksFromHtml({ html, url }) {
+function extractLinksFromHtml({ html, url, dom: providedDom }) {
   const cleanHtml = (html || "").replace(/<style[\s\S]*?<\/style>/gi, "");
-  const dom = new JSDOM(cleanHtml || "<body></body>", { url });
+  const dom = providedDom || new JSDOM(cleanHtml || "<body></body>", { url });
+  const ownedDom = !providedDom;
   try {
     const doc = dom.window.document;
     const container = doc.body;
 
-    // Build a map of which heading is closest above each element
+    // Precompute the heading closest above every element with a single
+    // document-order walk (O(DOM)), instead of the previous per-anchor
+    // ancestor/sibling subtree scans (O(anchors x depth x siblings), which
+    // cost seconds on table-heavy pages like the NSE option chain).
     const headings = Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"));
-    const headingPositions = new Map();
+    const headingTexts = new Map();
     for (const h of headings) {
-      headingPositions.set(h, (h.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120));
+      headingTexts.set(h, (h.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120));
     }
-
-    const findNearestHeading = (el) => {
-      let node = el;
-      while (node && node !== container) {
-        // Check previous siblings and their descendants
-        let prev = node.previousElementSibling;
-        while (prev) {
-          // If this sibling is a heading, return it
-          if (headingPositions.has(prev)) return headingPositions.get(prev);
-          // Check if it contains a heading
-          const innerH = prev.querySelector("h1, h2, h3, h4, h5, h6");
-          if (innerH && headingPositions.has(innerH)) return headingPositions.get(innerH);
-          prev = prev.previousElementSibling;
-        }
-        node = node.parentElement;
-      }
-      return "";
-    };
+    const nearestHeadingByElement = new Map();
+    let lastHeading = "";
+    const stack = [...container.children];
+    while (stack.length) {
+      const el = stack.pop();
+      if (headingTexts.has(el)) lastHeading = headingTexts.get(el);
+      nearestHeadingByElement.set(el, lastHeading === "" ? "" : lastHeading);
+      for (let i = el.children.length - 1; i >= 0; i -= 1) stack.push(el.children[i]);
+    }
 
     const links = [];
     const seen = new Set();
@@ -1510,7 +1527,7 @@ function extractLinksFromHtml({ html, url }) {
       } catch {
         return;
       }
-      const context = findNearestHeading(a);
+      const context = nearestHeadingByElement.get(a) || "";
 
       if (seen.has(absoluteHref)) {
         // Update context to the latest (most specific) occurrence
@@ -1534,7 +1551,7 @@ function extractLinksFromHtml({ html, url }) {
 
     return links;
   } finally {
-    dom.window.close();
+    if (ownedDom) dom.window.close();
   }
 }
 
@@ -1653,7 +1670,7 @@ async function capturePageState(page) {
   return { html, url, title, browserText };
 }
 
-async function extractHintStage(pageState, hint, step, maxChars, debug, defaultExtractSkipSelectors, config, signal) {
+async function extractHintStage(pageState, hint, step, maxChars, debug, defaultExtractSkipSelectors, config, signal, dom) {
   return extractTextFromHtml({
     html: pageState.html,
     url: pageState.url,
@@ -1666,7 +1683,8 @@ async function extractHintStage(pageState, hint, step, maxChars, debug, defaultE
     strict: true,
     defaultExtractSkipSelectors,
     config,
-    signal
+    signal,
+    dom
   });
 }
 
@@ -1736,11 +1754,18 @@ async function replayFlowFromSnapshot({ url, html, hint, maxChars, debug, hintNo
 
   for (const [index, step] of flow.entries()) {
     if (step.action !== "extract") continue;
-    const stageLinks = extractLinksFromHtml({ html: state.html, url: state.url });
-    for (const link of stageLinks) {
-      if (!linksByHref.has(link.href)) linksByHref.set(link.href, link);
+    const stageDom = parseHtmlToDom(state.html, state.url);
+    let stageLinks;
+    let extracted;
+    try {
+      stageLinks = extractLinksFromHtml({ dom: stageDom, url: state.url });
+      for (const link of stageLinks) {
+        if (!linksByHref.has(link.href)) linksByHref.set(link.href, link);
+      }
+      extracted = await extractHintStage(state, hint, step, FLOW_STAGE_CAPTURE_LIMIT, debug, defaultExtractSkipSelectors, config, signal, stageDom);
+    } finally {
+      stageDom.window.close();
     }
-    const extracted = await extractHintStage(state, hint, step, FLOW_STAGE_CAPTURE_LIMIT, debug, defaultExtractSkipSelectors, config, signal);
     if (extracted.tables?.length && !(extracted.text || "").trim()) {
       extracted.text = extracted.tables.map(renderTableAsMarkdown).join("\n\n");
       extracted.tables = [];
@@ -1836,13 +1861,20 @@ async function executeFlow({ page, hint, config, maxChars: _maxChars, debug, deb
             state.screenshot = null;
           }
         }
-        const stageLinks = extractLinksFromHtml({ html: state.html, url: state.url });
-        for (const link of stageLinks) {
-          if (!linksByHref.has(link.href)) linksByHref.set(link.href, link);
+        const stageDom = parseHtmlToDom(state.html, state.url);
+        let stageLinks;
+        let extracted;
+        try {
+          stageLinks = extractLinksFromHtml({ dom: stageDom, url: state.url });
+          for (const link of stageLinks) {
+            if (!linksByHref.has(link.href)) linksByHref.set(link.href, link);
+          }
+          extracted = await withOperationDeadline("flow_extract", () =>
+            extractHintStage(state, hint, step, FLOW_STAGE_CAPTURE_LIMIT, debug, defaultExtractSkipSelectors, config, signal, stageDom)
+          );
+        } finally {
+          stageDom.window.close();
         }
-        const extracted = await withOperationDeadline("flow_extract", () =>
-          extractHintStage(state, hint, step, FLOW_STAGE_CAPTURE_LIMIT, debug, defaultExtractSkipSelectors, config, signal)
-        );
         if (extracted.tables?.length && !(extracted.text || "").trim()) {
           extracted.text = extracted.tables.map(renderTableAsMarkdown).join("\n\n");
           extracted.tables = [];
@@ -1965,11 +1997,10 @@ async function executeFlow({ page, hint, config, maxChars: _maxChars, debug, deb
 }
 
 async function runFlowExtraction({ page, hint, config, maxChars, debug, debugLog, withPageTimeout, withOperationDeadline, operationTimeoutMs, includeSeoAnalysis, hintNote, startTime, defaultExtractSkipSelectors, signal }) {
-  const botChallenge = await withPageTimeout("check_bot", () => detectBotChallenge(page));
-  if (botChallenge) {
-    const pageTitle = await withPageTimeout("flow_bot_title", () => page.title()).catch(() => "");
-    return { title: pageTitle || "", url: page.url(), text: "", error: botChallenge };
-  }
+  // No bot check here: browserOpenAndExtract already ran `check_bot_early`
+  // immediately before invoking us, with no navigation in between. The
+  // flow's own per-step `checkBot` guards gated transitions (click/type/
+  // navigate) where a fresh challenge could actually appear.
 
   const flowResult = await executeFlow({
     page,
@@ -2097,7 +2128,10 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
           if (wildcard.default?.skipSelectors?.length) {
             defaultExtractSkipSelectors.push(...wildcard.default.skipSelectors);
           }
-          if (debug) console.log(`[web_fetch] [${url}] hint=wildcard_default (no domain hint matched)`);
+          if (debug) {
+            const matched = hintCandidates.length > 0;
+            console.log(`[web_fetch] [${url}] hint=wildcard_default (${matched ? "candidates pending DOM resolution" : "no domain hint matched"})`);
+          }
         }
       }
 
@@ -2202,8 +2236,16 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             debugLog("wait_for_selector", t);
           }
 
+          // Flow hints own their stabilization: every gated step (wait,
+          // click, type-with-submit, navigate) stabilizes per the step's
+          // stabilizeStrategy, so a leading wait step makes the generic
+          // pre-flow stabilize redundant. Skip it — saves a full
+          // network-idle wait (~1.5-2s) on SPA-heavy flow hints.
+          const flowLeadsWithWait = hint?.flow?.[0]?.action === "wait" && hint.flow[0].stabilizeStrategy !== "none";
           t = performance.now();
-          await withPageTimeout("stabilize_page", () => stabilizePage(page, hint, manager.config));
+          if (!flowLeadsWithWait) {
+            await withPageTimeout("stabilize_page", () => stabilizePage(page, hint, manager.config));
+          }
           debugLog("stabilize_page", t);
 
           t = performance.now();
