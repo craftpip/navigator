@@ -434,6 +434,8 @@ function Drivers({ health, instances, reload, height }) {
   const byBackend = new Map(instances.map((item) => [item.backend, item]));
   const browsers = health.browsers || [];
   const [forgetting, setForgetting] = useState(null);
+  const [expanded, setExpanded] = useState(() => ({}));
+  const toggle = (backend) => setExpanded((prev) => ({ ...prev, [backend]: !prev[backend] }));
   const prevTabsRef = useRef({});
   return (
     <Panel title="Browser drivers" sub="engines, tabs and close timers" style={height ? { height } : undefined}>
@@ -450,7 +452,7 @@ function Drivers({ health, instances, reload, height }) {
             ? "Waiting for PIN authorization — unpaired incoming request"
             : online
               ? isRelay
-                ? "navigator-cdp"
+                ? `${instance.tabs || 0} tabs · navigator-cdp`
                 : `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
               : defaultDriver
                 ? "Default driver is not connected"
@@ -462,27 +464,36 @@ function Drivers({ health, instances, reload, height }) {
           const statusPill = pending
             ? <Pill tone="warn">PIN required</Pill>
             : isRelay
-              ? online
-                ? <Pill tone="ok">connected</Pill>
-                : browser.paired
-                  ? <Pill tone="off">paired</Pill>
-                  : <Pill tone="off">not paired</Pill>
+              ? null
               : <Pill tone={online ? "ok" : defaultDriver ? "err" : "off"}>
                   {online ? "online" : defaultDriver ? "offline" : "idle"}
                 </Pill>;
+          const rawTabs = instance?.openTabs || [];
+          if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
+          const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
+          const hasTabs = tabsToShow.length > 0 && online;
+          const isExpanded = Boolean(expanded[backend]);
           return (
-            <div className="item driver-item" key={backend}>
-              <Dot tone={pending ? "warn" : online ? "" : defaultDriver ? "err" : "off"} />
-              <div className="item-main">
-                <div className="item-title">
-                  {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}{" "}
-                  {!browser.configured && backend !== "chromium" && <Pill tone="info">auto-registered</Pill>}
+            <div className={`item driver-item${hasTabs ? " expandable" : ""}${isExpanded && hasTabs ? " expanded" : ""}`} key={backend}>
+              <button
+                className="driver-toggle"
+                aria-expanded={hasTabs ? isExpanded : undefined}
+                aria-controls={hasTabs ? `driver-tabs-${backend}` : undefined}
+                disabled={!hasTabs}
+                onClick={() => hasTabs && toggle(backend)}
+                title={hasTabs ? (isExpanded ? "Hide tabs" : `Show ${tabsToShow.length} tabs`) : undefined}
+              >
+                <span className="driver-toggle-chevron" aria-hidden="true">{hasTabs ? (isExpanded ? "▾" : "▸") : ""}</span>
+                <Dot tone={pending ? "warn" : online ? "" : defaultDriver ? "err" : "off"} />
+                <div className="item-main">
+                  <div className="item-title">
+                    {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}
+                  </div>
+                  <div className="item-detail">{detail}</div>
+                  {pending && <RelayAuth browser={browser} />}
                 </div>
-                <div className="item-detail">{detail}</div>
-                {pending && <RelayAuth browser={browser} />}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                {statusPill}
+              </button>
+              <div className="driver-actions">
                 {isRelay && !pending && (
                   <button
                     className="button small"
@@ -505,31 +516,30 @@ function Drivers({ health, instances, reload, height }) {
                     {forgetting === backend ? "…" : "Forget"}
                   </button>
                 )}
+                {statusPill}
               </div>
-              {(() => {
-                const rawTabs = instance?.openTabs || [];
-                if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
-                const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
-                return tabsToShow.length > 0 && online ? (
-                <div className="driver-tabs">
-                  <div className="driver-tabs-header">
-                    <span>Tab</span>
-                    <span>Lifetime</span>
-                  </div>
-                  {tabsToShow.map((tab, index) => (
-                    <div className="driver-tab" key={`${tab.targetId || index}`}>
-                      <span className="driver-tab-title" title={tab.url}>
-                        {tab.title || tab.url || "Untitled page"}
-                      </span>
-                      {tab.autoClose ? (
-                        <Countdown closesInMs={tab.closesInMs} />
-                      ) : (
-                        <span className="countdown sticky">sticky</span>
-                      )}
+              {hasTabs ? (
+                <div id={`driver-tabs-${backend}`} className={`driver-tabs ${isExpanded ? "open" : "collapsed"}`} aria-hidden={!isExpanded}>
+                  <div className="driver-tabs-inner">
+                    <div className="driver-tabs-header">
+                      <span>Tab</span>
+                      <span>Lifetime</span>
                     </div>
-                  ))}
+                    {tabsToShow.map((tab, index) => (
+                      <div className="driver-tab" key={`${tab.targetId || index}`}>
+                        <span className="driver-tab-title" title={tab.url}>
+                          {tab.title || tab.url || "Untitled page"}
+                        </span>
+                        {tab.autoClose ? (
+                          <Countdown closesInMs={tab.closesInMs} />
+                        ) : (
+                          <span className="countdown sticky">sticky</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              ) : null; })()}
+              ) : null}
             </div>
           );
         })}
