@@ -437,6 +437,7 @@ function Drivers({ health, instances, reload, height }) {
   const [expanded, setExpanded] = useState(() => ({}));
   const toggle = (backend) => setExpanded((prev) => ({ ...prev, [backend]: !prev[backend] }));
   const prevTabsRef = useRef({});
+
   return (
     <Panel title="Browser drivers" sub="engines, tabs and close timers" style={height ? { height } : undefined}>
       <div className="list">
@@ -448,26 +449,23 @@ function Drivers({ health, instances, reload, height }) {
           const isRelay = browser.type === "navigator-cdp";
           const relayState = isRelay ? browser.status : null;
           const pending = relayState === "auth_pending";
+          const tabs = instance?.tabs || 0;
+          // Consistent detail — same for inbuilt / CDP / relay, no role/endpoint clutter
           const detail = pending
             ? "Waiting for PIN authorization — unpaired incoming request"
             : online
-              ? isRelay
-                ? `${instance.tabs || 0} tabs · navigator-cdp`
-                : `${instance.tabs || 0} tabs · pid ${instance.pid ?? "-"} · ${instance.spawns || 0} spawns`
-              : defaultDriver
-                ? "Default driver is not connected"
-                : isRelay
-                  ? browser.paired
-                    ? "Paired — disconnected"
-                    : "Extension not paired — connect from the popup to request access"
-                  : browser.addOn ? "Add-on — not connected" : "Not started";
+              ? `${tabs} tab${tabs === 1 ? "" : "s"}`
+              : isRelay
+                ? browser.paired
+                  ? "Offline — paired, awaiting connection"
+                  : "Offline — not paired — pair from the extension to connect"
+                : defaultDriver
+                  ? "Offline — default driver not connected"
+                  : "Offline — not connected";
+          const dotTone = pending ? "warn" : online ? "" : "off";
           const statusPill = pending
             ? <Pill tone="warn">PIN required</Pill>
-            : isRelay
-              ? null
-              : <Pill tone={online ? "ok" : defaultDriver ? "err" : "off"}>
-                  {online ? "online" : defaultDriver ? "offline" : "idle"}
-                </Pill>;
+            : <Pill tone={online ? "ok" : "off"}>{online ? "online" : "offline"}</Pill>;
           const rawTabs = instance?.openTabs || [];
           if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
           const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
@@ -484,10 +482,10 @@ function Drivers({ health, instances, reload, height }) {
                 title={hasTabs ? (isExpanded ? "Hide tabs" : `Show ${tabsToShow.length} tabs`) : undefined}
               >
                 <span className="driver-toggle-chevron" aria-hidden="true">{hasTabs ? (isExpanded ? "▾" : "▸") : ""}</span>
-                <Dot tone={pending ? "warn" : online ? "" : defaultDriver ? "err" : "off"} />
+                <Dot tone={dotTone} />
                 <div className="item-main">
                   <div className="item-title">
-                    {backend} {defaultDriver && <Pill tone="info">default</Pill>} {browser.addOn && <Pill tone="warn">add-on</Pill>}
+                    {backend} {statusPill}
                   </div>
                   <div className="item-detail">{detail}</div>
                   {pending && <RelayAuth browser={browser} />}
@@ -516,7 +514,6 @@ function Drivers({ health, instances, reload, height }) {
                     {forgetting === backend ? "…" : "Forget"}
                   </button>
                 )}
-                {statusPill}
               </div>
               {hasTabs ? (
                 <div id={`driver-tabs-${backend}`} className={`driver-tabs ${isExpanded ? "open" : "collapsed"}`} aria-hidden={!isExpanded}>

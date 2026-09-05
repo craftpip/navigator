@@ -105,9 +105,9 @@ function nextClose(ws, timeoutMs = 4000) {
   });
 }
 
-async function pairExtension(relay, wsBase, browserName, { platform = "chrome", sessionToken } = {}) {
+async function pairExtension(relay, wsBase, browserName, { platform = "chrome", sessionToken, bidiOrigin } = {}) {
   const ws = await open(`${wsBase}/relay`);
-  ws.send(JSON.stringify({ type: "navigator-hello", browserName, platform, extensionVersion: "0.1.0", ...(sessionToken ? { sessionToken } : {}) }));
+  ws.send(JSON.stringify({ type: "navigator-hello", browserName, platform, extensionVersion: "0.1.0", ...(bidiOrigin ? { bidiOrigin } : {}), ...(sessionToken ? { sessionToken } : {}) }));
   const pinRequired = await nextMessage(ws, (m) => m.type === "pin_required");
   expect(pinRequired).toEqual({ type: "pin_required" });
   const entry = relay._entries.get(browserName);
@@ -127,6 +127,7 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(entry.sessionToken).toBe(token);
     expect(entry.platform).toBe("chrome");
     expect(entry.extensionVersion).toBe("0.1.0");
+    expect(entry.bidiOrigin).toBeNull(); // not sent → stays null
     expect(typeof entry.connectedAt).toBe("number");
     flushAll(ws);
     ws.close();
@@ -192,6 +193,7 @@ describe("relay registry + PIN pairing (/relay)", () => {
     // connected via registry (same name) keeps configured roles
     relay._entries.set("pre-declared", {
       name: "pre-declared", plugin: "chrome", platform: "chrome", extensionVersion: "1.2.3",
+      bidiOrigin: "moz-extension://11111111-2222-3333-4444-555555555555",
       status: "connected", ws: {}, connectedAt: 1, sessionToken: "t", pendingPin: null,
       tabs: [], tabWaiters: [], sessionForTarget: new Map(), extSessionToTarget: new Map(),
       tabIdToTarget: new Map(), clients: new Map(), lastActivity: Date.now()
@@ -202,6 +204,7 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(preConnected.role).toEqual(["default", "devtools"]);
     expect(preConnected.connectedAt).toBe(1);
     expect(preConnected.extensionVersion).toBe("1.2.3");
+    expect(preConnected.bidiOrigin).toBe("moz-extension://11111111-2222-3333-4444-555555555555");
 
     // dynamic registration (name not in config) appended with role ["default"]
     relay._entries.set("dynamic-ff", {

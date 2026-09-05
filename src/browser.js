@@ -156,9 +156,8 @@ export class BrowserManager {
     this.engineWorkingWindows = new Map();
     this.pageSlotsInUse = 0;
     this.pageSlotWaiters = [];
-
-    // Cumulative spawn counters (in-memory, reset on restart)
-    this.instanceSpawns = { chromium: 0 };
+    this._instanceStatCache = null;
+    this._instanceStatFlight = null;
   }
 
   async ensureKeepAlivePage(browser) {
@@ -468,7 +467,6 @@ export class BrowserManager {
 
     try {
       this.browser = await this.launching;
-      this.instanceSpawns.chromium += 1;
       return this.browser;
     } finally {
       this.launching = null;
@@ -550,7 +548,50 @@ export class BrowserManager {
 
   async _connectAddOnPage(addOnEntry) {
     const browser = await this._ensureAddOnConnection(addOnEntry);
-    return browser.newPage();
+    try {
+      return await browser.newPage();
+    } catch (err) {
+      const msg = String(err?.message || "");
+      if (!msg.includes("TargetAlreadyLoaded")) throw err;
+      // Lightpanda (and similar single-tab CDP browsers) can only hold one
+      // usable page (+ the pinned about:blank). The second Target.createTarget
+      // fails with TargetAlreadyLoaded until a previous page is closed. Evict
+      // the oldest non-blank page to free a slot, then retry once.
+      console.error(`⚠️  ${addOnEntry.name} TargetAlreadyLoaded — evicting oldest page to free a slot`);
+      let evicted = false;
+      try {
+        const pages = await browser.pages();
+        for (const p of pages) {
+          if (p.isClosed()) continue;
+          let url = "";
+          try { url = p.url(); } catch {}
+          if (url === "about:blank") continue;
+          try {
+            await p.close();
+            evicted = true;
+            console.error(`🔄  ${addOnEntry.name} evicted page ${url || "<no url>"} to make room`);
+            break;
+          } catch {}
+        }
+        if (!evicted) {
+          // Fallback: try any page (lightpanda's blank cannot be closed, so
+          // this will still fail and we surface the original error)
+          for (const p of pages) {
+            if (p.isClosed()) continue;
+            try {
+              await p.close();
+              evicted = true;
+              break;
+            } catch {}
+          }
+        }
+        if (!evicted) throw new Error("no evictable page found");
+      } catch (evictErr) {
+        console.error(`⚠️  ${addOnEntry.name} eviction failed: ${String(evictErr?.message || evictErr)}`);
+        throw err;
+      }
+      return await browser.newPage();
+    }
   }
 
   /**
@@ -601,7 +642,6 @@ export class BrowserManager {
       }
     });
 
-    this.instanceSpawns[addOnEntry.name] = (this.instanceSpawns[addOnEntry.name] || 0) + 1;
     logBrowserEvent("addon.connected", { name: addOnEntry.name, cdpUrl: addOnEntry.cdpUrl });
 
     return browser;
@@ -918,25 +958,63 @@ export class BrowserManager {
         inUse: this.pageSlotsInUse,
         queued: this.pageSlotWaiters.length
       },
-      browsers: this._effectiveAddOns().map((b) => ({
-        name: b.name,
-        role: b.role,
-        type: b.type,
-        plugin: b.plugin,
-        configured: b.configured,
-        status: b.status,
-        paired: b.paired ?? (b.type === "navigator-cdp" ? relayServer.isPaired(b.name) : undefined),
-        connected: b.type === "navigator-cdp"
-          ? b.status === "connected"
-          : this._isAddOnConnected(b.name),
-        cdpUrl: b.cdpUrl,
-        relayWsUrl: b.type === "navigator-cdp" && b.status === "connected"
-          ? relayServer.gatewayWsUrl(b.name)
-          : undefined,
-        pin: b.pin ?? undefined,
-        pinExpiresAt: b.pinExpiresAt ?? undefined,
-        extensionVersion: b.extensionVersion ?? undefined
-      })),
+      browsers: (() => {
+        const effective = this._effectiveAddOns();
+        const effectiveByName = new Map(effective.map((b) => [b.name, b]));
+        const ordered = [];
+        for (const cfg of this.config.browsers) {
+          if (!cfg.addOn) {
+            // Inbuilt (chromium) — same row format as CDP/relay, only Forget is absent
+            ordered.push({
+              name: cfg.name,
+              role: cfg.role,
+              type: cfg.type || "inbuilt",
+              plugin: cfg.plugin || "auto",
+              configured: true,
+              status: this.browser?.connected ? "connected" : "disconnected",
+              paired: undefined,
+              connected: Boolean(this.browser?.connected),
+              cdpUrl: null,
+              relayWsUrl: undefined,
+              pin: undefined,
+              pinExpiresAt: undefined,
+              extensionVersion: undefined,
+              bidiOrigin: undefined
+            });
+          } else {
+            const eff = effectiveByName.get(cfg.name);
+            if (eff) ordered.push(eff);
+            // configured relay that is unpaired+disconnected is intentionally hidden by getStatusEntries — skip
+          }
+        }
+        // Dynamic relay registrations (not in BROWSERS) are appended after configured order
+        for (const eff of effective) {
+          if (!this.config.browsers.some((c) => c.name === eff.name)) ordered.push(eff);
+        }
+        // Normalize to the health shape (connected/pin/etc. already on eff; inbuilt synthesized above)
+        return ordered.map((b) => ({
+          name: b.name,
+          role: b.role,
+          type: b.type || (b.addOn ? "cdp" : "inbuilt"),
+          plugin: b.plugin || "auto",
+          configured: b.configured,
+          status: b.status,
+          paired: b.paired ?? (b.type === "navigator-cdp" ? relayServer.isPaired(b.name) : undefined),
+          connected: b.type === "navigator-cdp"
+            ? b.status === "connected"
+            : b.type === "inbuilt"
+              ? Boolean(this.browser?.connected)
+              : this._isAddOnConnected(b.name),
+          cdpUrl: b.cdpUrl,
+          relayWsUrl: b.type === "navigator-cdp" && b.status === "connected"
+            ? relayServer.gatewayWsUrl(b.name)
+            : undefined,
+          pin: b.pin ?? undefined,
+          pinExpiresAt: b.pinExpiresAt ?? undefined,
+          extensionVersion: b.extensionVersion ?? undefined,
+          bidiOrigin: b.bidiOrigin ?? undefined
+        }));
+      })(),
       addOns: this._buildAddOnHealth(),
       relay: this.getRelaySummary()
     };
@@ -975,6 +1053,7 @@ export class BrowserManager {
       pinExpiresAt: entry.pinExpiresAt ?? undefined,
       connectedAt: entry.connectedAt ?? undefined,
       extensionVersion: entry.extensionVersion ?? undefined,
+      bidiOrigin: entry.bidiOrigin ?? undefined,
       wsUrl: relayServer.gatewayWsUrl(entry.name)
     };
   }
@@ -984,23 +1063,45 @@ export class BrowserManager {
     // entries report directly from the relay registry (no puppet connection
     // needed until a page tool actually drives them); plain cdp add-ons are
     // lazily connected and report via their puppet Browser.
-    const statResults = [
-      this._instanceStatWithTimeout("chromium", this.browser, { addOn: false })
-    ];
-
-    for (const entry of this._effectiveAddOns()) {
-      if (entry.type === "navigator-cdp") {
-        statResults.push(this._navigatorCdpStat(entry));
-        continue;
-      }
-      statResults.push(this._instanceStatWithTimeout(
-        entry.name,
-        this._addOnConnection(entry.name),
-        { addOn: true, cdpUrl: entry.cdpUrl }
-      ));
+    //
+    // A single round costs one CDP fan-out per backend (refreshTabList alone
+    // is bounded by GATEWAY_WAIT_MS) and routinely exceeds the console/CLI
+    // poll intervals — so concurrent callers share one in-flight round and
+    // rapid sequential callers share a short-TTL snapshot instead of each
+    // triggering their own round.
+    const now = Date.now();
+    if (this._instanceStatCache && now - this._instanceStatCache.at < 2000) {
+      return this._instanceStatCache.stats;
     }
+    if (this._instanceStatFlight) {
+      return this._instanceStatFlight;
+    }
+    this._instanceStatFlight = (async () => {
+      const statResults = [
+        this._instanceStatWithTimeout("chromium", this.browser, { addOn: false, type: "inbuilt" })
+      ];
 
-    return Promise.all(statResults);
+      for (const entry of this._effectiveAddOns()) {
+        if (entry.type === "navigator-cdp") {
+          statResults.push(this._navigatorCdpStat(entry));
+          continue;
+        }
+        statResults.push(this._instanceStatWithTimeout(
+          entry.name,
+          this._addOnConnection(entry.name),
+          { addOn: true, cdpUrl: entry.cdpUrl, type: entry.type }
+        ));
+      }
+
+      const stats = await Promise.all(statResults);
+      this._instanceStatCache = { at: Date.now(), stats };
+      return stats;
+    })();
+    try {
+      return await this._instanceStatFlight;
+    } finally {
+      this._instanceStatFlight = null;
+    }
   }
 
   async _navigatorCdpStat(entry) {
@@ -1012,7 +1113,6 @@ export class BrowserManager {
         tabs: 0,
         openTabs: [],
         pid: null,
-        spawns: 0,
         type: "navigator-cdp",
         plugin: entry.plugin || "auto",
         status: "disconnected",
@@ -1040,7 +1140,6 @@ export class BrowserManager {
         targetId: t.targetId || null
       })),
       pid: null,
-      spawns: 0,
       type: "navigator-cdp",
       plugin: entry.plugin,
       status: isConn ? "connected" : live.status === "auth_pending" ? "auth_pending" : "disconnected",
@@ -1064,7 +1163,6 @@ export class BrowserManager {
             tabs: 0,
             openTabs: [],
             pid: null,
-            spawns: this.instanceSpawns[backend] || 0,
             timedOut: true,
             ...extra
           }), 750);
@@ -1125,7 +1223,6 @@ export class BrowserManager {
       tabs,
       openTabs,
       pid,
-      spawns: this.instanceSpawns[backend] || 0,
       ...extra,
       status
     };

@@ -802,6 +802,18 @@ html[data-theme="dark"] .mode-switch button.active {
 .driver-item.expandable .driver-toggle-chevron {
   color: var(--text);
 }
+.driver-roles {
+  margin-left: 6px;
+  color: var(--muted);
+  font: 400 11px var(--sans);
+  white-space: nowrap;
+}
+.item-title .pill + .pill {
+  margin-left: 6px;
+}
+.item-title .pill + .driver-roles {
+  margin-left: 6px;
+}
 .driver-actions {
   display: flex;
   flex-direction: column;

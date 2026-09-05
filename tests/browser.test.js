@@ -20,7 +20,7 @@ function makeConfig(overrides = {}) {
     chromeProfileDir: "Default",
     defaultBackend: "chromium",
     browsers: [
-      { name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false }
+      { name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }
     ],
     browserOpTimeoutMs: 60000,
     headless: true,
@@ -381,8 +381,10 @@ describe("BrowserManager", () => {
       expect(health).toHaveProperty("ok", true);
       expect(health).toHaveProperty("backend", "chromium");
       expect(health).toHaveProperty("browserConnected", false);
-      expect(health.browsers).toHaveLength(1); // add-ons only; chromium is built-in
-      expect(health.browsers[0]).toMatchObject({ name: "lightpanda", configured: true, connected: false, cdpUrl: "http://127.0.0.1:9222" });
+      // Consistent row: inbuilt + CDP/relay all in same browsers array (same format, only Forget differs)
+      expect(health.browsers).toHaveLength(2);
+      expect(health.browsers[0]).toMatchObject({ name: "chromium", type: "inbuilt", configured: true, connected: false });
+      expect(health.browsers[1]).toMatchObject({ name: "lightpanda", configured: true, connected: false, cdpUrl: "http://127.0.0.1:9222" });
       expect(health).toHaveProperty("searchWindows");
     });
   });

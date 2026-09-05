@@ -203,9 +203,6 @@ export class RelayServer {
       if (!cfg || !cfg.addOn) continue;
       if (cfg.type === "navigator-cdp") {
         const st = this._statusFor({ ...cfg, configured: true });
-        // Hide configured relay browsers that are not paired, not connected and not pending
-        // — Forget should make them disappear, not linger as "unpaired".
-        if (!st.paired && st.status === "disconnected") continue;
         out.push(st);
       } else {
         out.push({
@@ -272,6 +269,7 @@ export class RelayServer {
           cdpUrl: null,
           connectedAt: null,
           extensionVersion: null,
+          bidiOrigin: null,
           pin: null,
           pinExpiresAt: null
         };
@@ -289,6 +287,7 @@ export class RelayServer {
       cdpUrl: connected ? this.gatewayWsUrl(name) : null,
       connectedAt: entry?.connectedAt || null,
       extensionVersion: entry?.extensionVersion || null,
+      bidiOrigin: entry?.bidiOrigin || null,
       pin: pending && pendingPin ? pendingPin.pin : null,
       pinExpiresAt: pending && pendingPin ? pendingPin.expiresAt : null
     };
@@ -366,6 +365,10 @@ export class RelayServer {
         entry.ws = ws;
         if (msg.platform === "firefox" || msg.platform === "chrome") entry.platform = msg.platform;
         if (typeof msg.extensionVersion === "string") entry.extensionVersion = msg.extensionVersion;
+        // The extension reports the exact "moz-extension://<uuid>" origin its
+        // BiDi WebSocket connects from — surfaced via status()/stats so the
+        // Remote Agent allow-list (--remote-allow-origins) can be set correctly.
+        if (typeof msg.bidiOrigin === "string" && msg.bidiOrigin.startsWith("moz-extension://")) entry.bidiOrigin = msg.bidiOrigin;
         entry.lastActivity = Date.now();
 
         const token = typeof msg.sessionToken === "string" && msg.sessionToken ? msg.sessionToken : "";
@@ -513,6 +516,7 @@ export class RelayServer {
         plugin: "auto",
         platform: null,
         extensionVersion: null,
+        bidiOrigin: null,
         status: "auth_pending",
         ws: null,
         connectedAt: null,
@@ -1066,6 +1070,15 @@ export class RelayServer {
       }
     }
 
+    // In-process callers (relayServer.sendCdpCommand) resolve here — the
+    // pending entry carries its own resolve callback and has no websocket
+    // client to route the reply to. Target.createTarget registration +
+    // stale-session recovery above already ran, matching the client path.
+    if (pending.marker === "sendCommand") {
+      if (pending.resolve) pending.resolve(msg);
+      return;
+    }
+
     if (pending.clientId == null) return;
     const client = entry.clients.get(pending.clientId);
     if (!client || client.ws.readyState !== client.ws.OPEN) return;
@@ -1123,6 +1136,80 @@ export class RelayServer {
       }
       sendJson(entry.ws, { type: "ping" });
     }
+  }
+
+  /**
+   * Send a CDP command to a relay extension IN-PROCESS and resolve with the
+   * extension's `{ result }` / `{ error }` — no second socket, no gateway
+   * client. This is how the MCP devtools window tools (Target.activateTarget,
+   * Browser.*, Target.sendCommand) reach the user's browser: the extension's
+   * LOCAL/SPECIAL handlers are in-process exactly as when an attached puppeteer
+   * client sends the same method — the gateway's pending machinery is reused
+   * (marker "sendCommand" resolves in `_onCdpResponse`).
+   *
+   * When `targetId` is given, the target is resolved to its extension session
+   * (reusing an existing attach), so session-scoped methods like
+   * Page.getNavigationHistory reach chrome.debugger on the right tab.
+   *
+   * @param {string} entryName
+   * @param {{method: string, params?: object, targetId?: string|null,
+   *          sessionId?: string|null, timeoutMs?: number}} cmd
+   * @returns {Promise<{result: object, error?: {code?: number, message: string}}>}
+   */
+  async sendCdpCommand(entryName, { method, params = {}, targetId = null, sessionId = null, timeoutMs = null } = {}) {
+    const entry = this._entries.get(entryName);
+    if (!entry || !this._canSend(entry)) {
+      throw new Error(`browser "${entryName}" is not connected`);
+    }
+    if (!method || typeof method !== "string") {
+      throw new Error("sendCdpCommand requires a method");
+    }
+
+    if (targetId && !sessionId) {
+      const existing = entry.sessionForTarget.get(targetId);
+      if (existing) {
+        sessionId = existing;
+      } else {
+        const target = entry.tabs.find((t) => t.targetId === targetId);
+        if (!target) {
+          throw new Error(`Target ${targetId} not found in browser "${entryName}" — run Target.getTargets first`);
+        }
+        const sid = await this._ensureTargetSession(entry, target);
+        if (!sid) {
+          const reason = this._attachFailure || "unknown extension error";
+          this._attachFailure = null;
+          throw new Error(`Failed to attach target ${targetId}: ${reason}`);
+        }
+        sessionId = sid;
+      }
+    }
+
+    const globalId = this._nextCommandId++;
+    const deadline = timeoutMs || GATEWAY_WAIT_MS;
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this._pendingCommands.has(globalId)) {
+          this._pendingCommands.delete(globalId);
+          reject(new Error(`CDP command ${method} timed out after ${deadline}ms`));
+        }
+      }, deadline);
+      this._pendingCommands.set(globalId, {
+        clientId: null,
+        id: globalId,
+        marker: "sendCommand",
+        sessionId,
+        method,
+        params: params || {},
+        resolve: (msg) => {
+          clearTimeout(timer);
+          if (msg && msg.error) resolve({ error: msg.error });
+          else resolve({ result: (msg && msg.result) || {} });
+        }
+      });
+      const msg = { id: globalId, method, params: params || {} };
+      if (sessionId) msg.sessionId = sessionId;
+      sendJson(entry.ws, msg);
+    });
   }
 
   detachAllDebuggers() {
