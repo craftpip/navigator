@@ -28,31 +28,6 @@ var LocalHandler = (function() {
     });
   }
 
-  function getWindowForTarget() {
-    return {
-      windowId: 1,
-      bounds: { left: 0, top: 0, width: 1920, height: 1080, windowState: 'normal' }
-    };
-  }
-
-  function getWindowBounds() {
-    return {
-      bounds: { left: 0, top: 0, width: 1920, height: 1080, windowState: 'normal' }
-    };
-  }
-
-  function setWindowBounds(context) {
-    var bounds = context.params ? context.params.bounds : null;
-    if (bounds && bounds.focused) {
-      chrome.windows.getCurrent(function(w) {
-        if (w && w.id) {
-          chrome.windows.update(w.id, { focused: true });
-        }
-      });
-    }
-    return {};
-  }
-
   function targetSetDiscoverTargets() {
     return {};
   }
@@ -147,9 +122,6 @@ var LocalHandler = (function() {
   return {
     browserGetVersion: browserGetVersion,
     browserClose: browserClose,
-    getWindowForTarget: getWindowForTarget,
-    getWindowBounds: getWindowBounds,
-    setWindowBounds: setWindowBounds,
     targetSetDiscoverTargets: targetSetDiscoverTargets,
     targetGetTargets: targetGetTargets,
     targetGetTargetInfo: targetGetTargetInfo,

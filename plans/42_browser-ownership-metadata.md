@@ -1,6 +1,6 @@
 # 42 — Browser Ownership Metadata (Agent vs User Browsers)
 
-**Status:** In progress
+**Status:** Implemented — 2026-08-28 (ownership helper, list_browsers, per-target ownership, tool descriptions, tests)
 **Created:** 2026-08-28
 
 ## Problem
@@ -90,9 +90,30 @@ add a one-line note to the `browser` param descriptions reminding that
 
 - `list_browsers` shows `ownership:"user"` for the `maclap2` relay entry and
   `ownership:"agent"` for `chromium` / `cloakbrowser` / `lightpanda`.
+  **Verified live** — chromium/cloakbrowser/lightpanda → `agent`; Firefox, Chrome,
+  Chromeasd (navigator-cdp) → `user`.
 - `Target.getTargets` browser entries carry `ownership`.
+  **Verified live** — relay tabs (Firefox tab-1) → `ownership:"user", origin:"browser"`;
+  `Target.createTarget` on cloakbrowser → `ownership:"agent"`.
 - Restart `navigator` so tool schema/descriptions are live; confirm via MCP
-  `tools/list` and actual calls.
+  `tools/list` and actual calls. **Done & verified.**
+- Tests: `tests/devtools.test.js` + `tests/browser.test.js` = 71 pass
+  (3 stale devtools tests rewritten to match the current createTarget/getTargetState
+  design and assert the new `ownership` field; the mock now provides
+  `browserOwnership`). Full suite: 601 pass, same 3 pre-existing HEAD failures in
+  relay-server.test.js (2) and svg.test.js (1) — unrelated to this plan.
+
+## Implementation notes (delta beyond the original plan)
+
+- Per-target ownership is derived in `src/devtools.js` via a `targetOwnership()`
+  helper (backend name → browser entry type → `browserOwnership(type)`, relay
+  fallback, `unknown → "agent"`), consistent with `list_browsers`.
+- `ownership` lives on each target state (both `createTarget` and
+  `registerAdoptedTarget`) and is emitted through `buildTargetSummary`, so every
+  devtools response (navigate/reload/history/input) carries it automatically.
+- Options A pile: `list_browsers` + page-tool `browser` params were already
+  committed with ownership in `0a71786`; this plan added the missing devtools
+  per-target surface + descriptions.
 
 ## Related
 

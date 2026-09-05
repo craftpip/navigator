@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/browser.js", () => ({
   getBrowserManager: vi.fn(),
+  browserOwnership: (type) => (type === "navigator-cdp" ? "user" : "agent"),
   resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
     const mgr = manager || (await getBrowserManager());
     const page = await mgr.newPage({ browser });
@@ -64,7 +65,12 @@ describe("devtoolsToolDefinitions", () => {
     expect(names).toContain("Input.dispatchMouseEvent");
     expect(names).toContain("Input.insertText");
     expect(names).toContain("Input.dispatchKeyEvent");
-    expect(names).toHaveLength(19);
+    expect(names).toContain("Target.activateTarget");
+    expect(names).toContain("Browser.getWindowForTarget");
+    expect(names).toContain("Browser.setWindowBounds");
+    expect(names).toContain("Browser.focusWindow");
+    expect(names).toContain("Target.sendCommand");
+    expect(names).toHaveLength(24);
   });
 
   it("each tool has name, description, and inputSchema", async () => {
@@ -230,13 +236,14 @@ describe("handleDevtoolsToolCall", () => {
   it("routes Target.getTargets to the correct handler", async () => {
     getBrowserManager.mockResolvedValue({
       config: { enableDevtoolsMcp: true },
-      getInstanceStats: vi.fn().mockResolvedValue([]),
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
     });
 
     const { handleDevtoolsToolCall } = await import("../src/devtools.js");
     const result = await handleDevtoolsToolCall("Target.getTargets", {});
     expect(result).toHaveProperty("count");
-    expect(result).toHaveProperty("browsers");
+    expect(Array.isArray(result.targets)).toBe(true);
+    expect(result.count).toBe(result.targets.length);
   });
 
   it("Target.createTarget accepts ref_id and navigates to the resolved URL", async () => {
@@ -327,7 +334,7 @@ describe("handleDevtoolsToolCall", () => {
     expect(result.viewport).toEqual({ width: 390, height: 844 });
   });
 
-  it("Target.createTarget adopts an existing browser tab when targetId matches and url is blank", async () => {
+  it("getTargetState adopts an existing user-browser tab with ownership 'user'", async () => {
     const adoptedPage = {
       goto: vi.fn(),
       url: vi.fn().mockReturnValue("https://music.youtube.com/search?q=test"),
@@ -335,40 +342,35 @@ describe("handleDevtoolsToolCall", () => {
       isClosed: vi.fn().mockReturnValue(false),
       on: vi.fn(),
     };
-    const newPage = vi.fn().mockResolvedValue(adoptedPage);
     const attachToExistingTarget = vi.fn().mockResolvedValue({
       page: adoptedPage,
       backend: "mac laptop2",
     });
     getBrowserManager.mockResolvedValue({
-      config: {
-        enableDevtoolsMcp: true,
-        devtoolsBackend: "chromium",
-        defaultBackend: "cloakbrowser",
-        navWaitUntil: "domcontentloaded",
-        browserOpTimeoutMs: 60000,
-      },
-      newPage,
+      config: { enableDevtoolsMcp: true },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "mac laptop2", type: "navigator-cdp", status: "connected" },
+      ]),
       attachToExistingTarget,
     });
 
-    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
-    const result = await handleDevtoolsToolCall("Target.createTarget", {
-      targetId: "D3C6B5CA23347A254126A71269AFB156",
-    });
+    const { getTargetState, listTargets } = await import("../src/devtools.js");
+    const state = await getTargetState("D3C6B5CA23347A254126A71269AFB156");
 
     expect(attachToExistingTarget).toHaveBeenCalledWith("D3C6B5CA23347A254126A71269AFB156");
-    // Adopting a pre-existing tab must NOT open a new page or navigate it.
-    expect(newPage).not.toHaveBeenCalled();
-    expect(adoptedPage.goto).not.toHaveBeenCalled();
-    expect(result.adopted).toBe(true);
-    expect(result.origin).toBe("browser");
-    expect(result.backend).toBe("mac laptop2");
-    expect(result.url).toBe("https://music.youtube.com/search?q=test");
-    expect(result.navigating).toBe(false);
+    expect(state.adopted).toBe(true);
+    expect(state.ownership).toBe("user");
+    expect(state.backend).toBe("mac laptop2");
+
+    const listing = await listTargets();
+    const row = listing.targets.find((t) => t.targetId === "D3C6B5CA23347A254126A71269AFB156");
+    expect(row).toBeTruthy();
+    expect(row.backend).toBe("mac laptop2");
+    expect(row.origin).toBe("browser");
+    expect(row.ownership).toBe("user");
   });
 
-  it("Target.createTarget falls back to a new tab when adoption matches nothing", async () => {
+  it("createTarget makes a fresh agent tab for an unknown id and getTargetState rejects it", async () => {
     const page = {
       goto: vi.fn().mockResolvedValue(undefined),
       url: vi.fn().mockReturnValue("about:blank"),
@@ -385,18 +387,22 @@ describe("handleDevtoolsToolCall", () => {
         navWaitUntil: "domcontentloaded",
         browserOpTimeoutMs: 60000,
       },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
       newPage,
       attachToExistingTarget: vi.fn().mockResolvedValue(null),
     });
 
-    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const { handleDevtoolsToolCall, getTargetState } = await import("../src/devtools.js");
     const result = await handleDevtoolsToolCall("Target.createTarget", {
       targetId: "no-such-target",
     });
 
     expect(newPage).toHaveBeenCalled();
-    expect(result.adopted).toBe(false);
-    expect(result.origin).toBe("devtools");
+    expect(result.targetId).toBe("no-such-target");
+    expect(result.ownership).toBe("agent");
+    expect(result.adopted).toBeUndefined();
+
+    await expect(getTargetState("totally-unknown-id")).rejects.toThrow(/Unknown targetId/);
   });
 
   it("Target.createTarget rejects unknown ref_id", async () => {
@@ -849,5 +855,193 @@ describe("devtools counters", () => {
     const after = mod.getDevtoolsCounters();
     expect(after.targetsCreated).toBe(mid.targetsCreated);
     expect(after.targetsClosed).toBe(mid.targetsClosed + 1);
+  });
+});
+
+describe("window & focus & raw passthrough tools", () => {
+  let getBrowserManager;
+
+  beforeEach(async () => {
+    getBrowserManager = (await import("../src/browser.js")).getBrowserManager;
+  });
+
+  function managerWith(page, { addOns = [], devtoolsBackend = "chromium" } = {}) {
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend,
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      _effectiveAddOns: () => addOns,
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+    return getBrowserManager();
+  }
+
+  async function importMod() {
+    return await import("../src/devtools.js");
+  }
+
+  it("drives Target.activateTarget / Browser.* via the browser-level CDP session on chromium", async () => {
+    const browserSession = {
+      send: vi.fn((method) => {
+        if (method === "Browser.getWindowForTarget") {
+          return Promise.resolve({ windowId: 7, bounds: { left: 10, top: 20, width: 1200, height: 800, windowState: "normal" } });
+        }
+        if (method === "Browser.setWindowBounds") return Promise.resolve({ windowId: 7, bounds: { left: 10, top: 20, width: 1280, height: 900, windowState: "normal" } });
+        return Promise.resolve({});
+      }),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    managerWith(page);
+    const mod = await importMod();
+
+    const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "win-focus" });
+    const activated = await mod.handleDevtoolsToolCall("Target.activateTarget", { targetId: created.targetId });
+    const window = await mod.handleDevtoolsToolCall("Browser.getWindowForTarget", { targetId: created.targetId });
+    const set = await mod.handleDevtoolsToolCall("Browser.setWindowBounds", {
+      targetId: created.targetId,
+      bounds: { width: 1280, height: 900 },
+    });
+
+    expect(activated).toMatchObject({ activated: true, backend: "chromium", ownership: "agent" });
+    expect(window).toMatchObject({ windowId: 7, bounds: { windowState: "normal" } });
+    expect(set).toMatchObject({ bounds: { width: 1280, height: 900, windowState: "normal" } });
+    const sent = browserSession.send.mock.calls.map((call) => call[0]);
+    expect(sent).toContain("Target.activateTarget");
+    expect(sent).toContain("Browser.getWindowForTarget");
+    expect(sent).toContain("Browser.setWindowBounds");
+  });
+
+  it("Browser.focusWindow runs activateTarget then setWindowBounds({focused:true})", async () => {
+    const browserSession = {
+      send: vi.fn().mockResolvedValue({}),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    managerWith(page);
+    const mod = await importMod();
+
+    const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "focus-window" });
+    const result = await mod.handleDevtoolsToolCall("Browser.focusWindow", { targetId: created.targetId });
+
+    expect(result).toMatchObject({ activated: true, windowFocused: true });
+    const calls = browserSession.send.mock.calls.map((call) => call[0]);
+    expect(calls[0]).toBe("Target.activateTarget");
+    expect(calls[1]).toBe("Browser.setWindowBounds");
+    expect(browserSession.send.mock.calls[1][1]).toMatchObject({ bounds: { focused: true } });
+  });
+
+  it("Target.sendCommand passes through page-level methods on the page CDP session", async () => {
+    const pageSession = {
+      send: vi.fn((method) => {
+        if (method === "Page.getLayoutMetrics") {
+          return Promise.resolve({ layoutViewport: { clientWidth: 1024, clientHeight: 768 } });
+        }
+        return Promise.resolve({});
+      }),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn().mockResolvedValue(pageSession),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn() }) }),
+    };
+    managerWith(page);
+    const mod = await importMod();
+
+    const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "raw-command" });
+    const result = await mod.handleDevtoolsToolCall("Target.sendCommand", {
+      targetId: created.targetId,
+      method: "Page.getLayoutMetrics",
+    });
+
+    expect(result).toMatchObject({ method: "Page.getLayoutMetrics", result: { layoutViewport: { clientWidth: 1024 } } });
+    expect(pageSession.send).toHaveBeenCalledWith("Page.getLayoutMetrics", {});
+  });
+
+  it("routes window commands to relayServer.sendCdpCommand on a navigator-cdp backend", async () => {
+    const { relayServer } = await import("../src/relay-server.js");
+    const originalSend = relayServer.sendCdpCommand;
+    const sendCdpCommand = vi.fn().mockResolvedValue({
+      result: { windowId: 42, bounds: { left: 0, top: 0, width: 1500, height: 1000, windowState: "normal" } },
+    });
+    relayServer.sendCdpCommand = sendCdpCommand;
+
+    try {
+      const page = {
+        goto: vi.fn().mockResolvedValue(undefined),
+        url: vi.fn().mockReturnValue("about:blank"),
+        title: vi.fn().mockResolvedValue("Example"),
+        isClosed: vi.fn().mockReturnValue(false),
+        on: vi.fn(),
+        createCDPSession: vi.fn(),
+        browser: vi.fn(),
+      };
+      managerWith(page, { addOns: [{ name: "firefox", type: "navigator-cdp" }], devtoolsBackend: "firefox" });
+      const mod = await importMod();
+
+      const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "relay-window" });
+      const window = await mod.handleDevtoolsToolCall("Browser.getWindowForTarget", { targetId: created.targetId });
+
+      expect(window).toMatchObject({ backend: "firefox", ownership: "user", windowId: 42, bounds: { width: 1500 } });
+      expect(sendCdpCommand).toHaveBeenCalledWith(
+        "firefox",
+        expect.objectContaining({ method: "Browser.getWindowForTarget", targetId: created.targetId })
+      );
+    } finally {
+      relayServer.sendCdpCommand = originalSend;
+    }
+  });
+
+  it("augments unknown-domain relay errors with the supported CDP surface", async () => {
+    const { relayServer } = await import("../src/relay-server.js");
+    const originalSend = relayServer.sendCdpCommand;
+    relayServer.sendCdpCommand = vi.fn().mockResolvedValue({
+      error: { code: -32000, message: "Method not found: Tab.frobnicate" },
+    });
+
+    try {
+      const page = {
+        goto: vi.fn().mockResolvedValue(undefined),
+        url: vi.fn().mockReturnValue("about:blank"),
+        title: vi.fn().mockResolvedValue("Example"),
+        isClosed: vi.fn().mockReturnValue(false),
+        on: vi.fn(),
+        createCDPSession: vi.fn(),
+        browser: vi.fn(),
+      };
+      managerWith(page, { addOns: [{ name: "macbook", type: "navigator-cdp" }], devtoolsBackend: "macbook" });
+      const mod = await importMod();
+
+      const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "relay-unknown" });
+      await expect(
+        mod.handleDevtoolsToolCall("Target.sendCommand", { targetId: created.targetId, method: "Tab.frobnicate" })
+      ).rejects.toThrow(/supported CDP domains: Browser, Target, Page/);
+    } finally {
+      relayServer.sendCdpCommand = originalSend;
+    }
   });
 });

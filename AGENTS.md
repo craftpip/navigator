@@ -328,7 +328,7 @@ docker compose exec navigator npx vitest run tests/mcp-server.test.js  # Single 
 
 `./navigator.js <command>` talks to the live server over HTTP. Host-only — never run inside the container. Built as a tiny subcommand dispatcher so commands can be added later (`status`, `sessions`, `cache`, `engines`, `logs`, `restart`, …).
 
-- `statistics` (aliases `stats`, `stat`) — one-shot snapshot: engines + circuit-breaker state, browser instances (tabs/pid/spawns), search windows, page limiter, MCP sessions, cache, activity counters, request + per-engine failure rates.
+- `statistics` (aliases `stats`, `stat`) — one-shot snapshot: engines + circuit-breaker state, browser instances (tabs/type), search windows, page limiter, MCP sessions, cache, activity counters, request + per-engine failure rates.
 - `monitoring` (alias `mon`) — live auto-refreshing view (like `docker stats`), redraws every `--interval` seconds (default 2) until Ctrl+C.
 
 Options: `--url <base>` (resolution: flag → `NAVIGATOR_URL` env → `.env` `MCP_API_HOST`/`MCP_API_PORT` → `http://localhost:3000`), `--interval <sec>`, `--json`, `--help`. Exit 0 on success, 1 if the server is unreachable (with a "is the container running?" hint).
@@ -343,7 +343,7 @@ Exposes state that `/health` deliberately hides. `/health` stays the fast livene
   memory: { rss, heapUsed, heapTotal },                 // process.memoryUsage()
   sessions,                                             // mcpTransports.size
   cache: { total, byTool: { web_search, web_fetch } },  // toolResultCache
-  instances: [{ backend, connected, pid, tabs, spawns }], // BrowserManager.getInstanceStats()
+  instances: [{ backend, connected, pid, tabs, type }], // BrowserManager.getInstanceStats()
   counters: { searches, fetches, screenshots, botBlocks,
               targetsCreated, targetsClosed, targetsInactivityClosed,
               cacheHits, cacheMisses },
@@ -356,7 +356,7 @@ Exposes state that `/health` deliberately hides. `/health` stays the fast livene
 ```
 
 - Cumulative counters are in-memory and reset on restart (by design).
-- `instances` come from `BrowserManager.getInstanceStats()` (`src/browser.js`) — `{connected, pid, tabCount, spawnCount}` per backend, null-safe.
+- `instances` come from `BrowserManager.getInstanceStats()` (`src/browser.js`) — `{connected, pid, tabCount, type}` per backend, null-safe.
 - `counters` come from `getActivityCounters()` (`src/search.js`) + `getDevtoolsCounters()` (`src/devtools.js`); `requests` from `getRequestStats()`; `engineAttempts` from `getEngineAttemptStats()`.
 - Request and engine-attempt telemetry feed `recordRequest()` (`src/mcp-server.js`) and `recordEngineAttempt()` (`src/search.js`) — also used to detect degrading engines before a circuit trips.
 
@@ -1109,6 +1109,10 @@ For each site:
 
 **Not yet done (Phase 2+):** real-Firefox end-to-end validation; object-handle bridging across BiDi realms; `-remote-allow-origins` origin pinning (extension ID unknown until first temp load). Details + tables: `plans/40_firefox-extension.md`.
 
+**Reachability probe (built 2026-08-28):** To diagnose "relaying/connecting isn't working", `firefox-extension/utils/probe.js` provides `Probe.probe(hostPort)` which fetches `http(s)://host:port/health` (navigator sends `access-control-allow-origin:*`, so no `host_permissions` needed) and resolves `{ok, scheme, status, body, error, mode}` where `mode ∈ dns|refused|timeout|http|cors|unknown`; tries https then http, 4s timeout. Wired to a popup **Test connection** button via a `'probe'` message handler in `background.js`. Verified live: `https://10.69.1.164:1994` fails, `http://10.69.1.164:1994/health` → 200 `{"ok":true,…}`. Probe tests 20a–20e in `test/unit-ff.mjs` (22 total pass).
+
+
+
 ### Relay Pairing Contract — Pair Once, Remember Forever
 
 **Created:** 2026-08-28
@@ -1156,6 +1160,18 @@ For each site:
 - Welcome warning: "advertising loopback for wildcard bind... clients on other hosts will need --advertise-host" is misleading — the IP-literal connect path works fine without it.
 
 **Debug technique:** don't fight module resolution inside the container; `puppeteer-core` (not `puppeteer`) is the installed prod dep — `cd /app && node -e "require('puppeteer-core')"` connects. Raw `ws` module handshake isolates Host/Origin vs app-level issues.
+
+### Firefox background must NOT use importScripts (2026-08-28)
+
+**The bug:** The Firefox extension background reported `Could not establish connection. Receiving end does not exist` from the popup. Root cause was NOT a network/message race - **the background script crashed on load**, so `chrome.runtime.onMessage` was never registered. **Firefox MV3 `background.scripts` runs code as an EVENT PAGE (a normal document/Window context with DOM access), NOT a WorkerGlobalScope** - so top-level `importScripts(...)` throws `ReferenceError: importScripts is not defined` at the very first line, killing the whole background. The vm-harness (`test/unit-ff.mjs`) hides this because it injects modules with its own loader, not `importScripts`. Real-Firefox end-to-end was never run, so the extension had simply never loaded in Firefox at all.
+
+**The fix:** switch the manifest to a background **page** and load every module as a classic `<script>` tag in dependency order on the page's global scope (same `var`-global semantics as `importScripts`): `manifest.json` -> `"background": { "page": "background.html" }`; `background.html` -> `<script src="utils/config.js">...<script src="background.js">`; `background.js` -> delete all `importScripts(...)` lines (they'd still throw in the page context); `pack-firefox.sh` -> add `background.html` to the `files = [...]` list.
+
+**Also kept:** `chrome.runtime.onMessage.addListener` now sits at **module top-level, outside `init()`** so it is registered on every event-page wake even if `init()` throws partway - hardening against the MV3 event-page suspension race where queued messages are dropped if listeners aren't re-registered on wake.
+
+**Verify with a page-context smoke test** (not just `node --check`): load the modules + background.js into a shared `vm` sandbox where `window === globalThis` (a document context) and confirm `init()` runs without throwing. Verified: all 19 files load and `init()` runs, onMessage registered.
+
+**Note (Local Network Access):** Chrome/Firefox LNA (private-network protection) gates requests from *public web pages* to LAN IPs behind a permission prompt, but does **not** gate **extension-origin** requests - so extension to `http://10.69.1.164:1994` fetch/WebSocket are not blocked by LNA. Firefox also can't reach localhost from extension pages at all (known Bugzilla); port 1994 is not in the banned-ports list. So the LAN-blocking angle does NOT explain the messaging error - the background load crash does.
 
 ### Browser Ownership — Agent vs User (Plan 42), Adopted Tabs, defaultViewport
 

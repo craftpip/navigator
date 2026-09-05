@@ -31,6 +31,9 @@ function App() {
   const [vncBusy, setVncBusy] = useState(false);
   const feedSince = useRef(0);
   const feedOpsSince = useRef(0);
+  const loadingRef = useRef(false);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   const navigate = (next) => {
     const path = pathForMode(next);
     if (location.pathname !== path) {
@@ -49,56 +52,81 @@ function App() {
     setTrendRange(nextRange);
     updateTrendQuery(nextRange);
   };
-  const load = async () => {
+  // Full snapshot (status dashboard + explicit reloads) vs light heartbeat.
+  // Only the status view reads stats/config/logs/activity, and /stats alone
+  // can take longer than POLL_MS (CDP round-trips per backend) — so other
+  // modes refresh just /health (LIVE badge + VNC state) and skip the rest.
+  // loadingRef serializes ticks: without it a slow /stats overlaps the next
+  // interval and poll cycles pile up faster than they resolve.
+  const load = async (full = true) => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     try {
-      const [health, stats, config, logPayload, activity] = await Promise.all([
-        request("/health"),
-        request("/stats"),
-        request("/console/config"),
-        request("/console/logs?n=20"),
-        request(`/stats/activity?since=${feedSince.current}&sinceOps=${feedOpsSince.current}&limit=100&pageOps=1`),
-      ]);
-      setFeed((current) => {
-        const merged = [...current];
-        for (const row of buildFeed(activity.entries, activity.pageOps)) {
-          const existing = merged.findIndex((entry) => entry.key === row.key);
-          if (existing === -1) merged.push(row);
-          else merged[existing] = row;
+      if (!full) {
+        try {
+          const health = await request("/health");
+          setSnapshot((current) => ({ ...current, health, ok: true }));
+        } catch {
+          setSnapshot((current) => ({ ...current, ok: false }));
         }
-        return merged.sort((a, b) => Number(b.ts) - Number(a.ts)).slice(0, 200);
-      });
-      for (const entry of activity.entries || []) {
-        feedSince.current = Math.max(feedSince.current, Number(entry.id) || 0);
+        return;
       }
-      for (const op of activity.pageOps || []) {
-        feedOpsSince.current = Math.max(feedOpsSince.current, Number(op.id) || 0);
+      try {
+        const [health, stats, config, logPayload, activity] = await Promise.all([
+          request("/health"),
+          request("/stats"),
+          request("/console/config"),
+          request("/console/logs?n=20"),
+          request(`/stats/activity?since=${feedSince.current}&sinceOps=${feedOpsSince.current}&limit=100&pageOps=1`),
+        ]);
+        setFeed((current) => {
+          const merged = [...current];
+          for (const row of buildFeed(activity.entries, activity.pageOps)) {
+            const existing = merged.findIndex((entry) => entry.key === row.key);
+            if (existing === -1) merged.push(row);
+            else merged[existing] = row;
+          }
+          return merged.sort((a, b) => Number(b.ts) - Number(a.ts)).slice(0, 200);
+        });
+        for (const entry of activity.entries || []) {
+          feedSince.current = Math.max(feedSince.current, Number(entry.id) || 0);
+        }
+        for (const op of activity.pageOps || []) {
+          feedOpsSince.current = Math.max(feedOpsSince.current, Number(op.id) || 0);
+        }
+        setSnapshot({
+          health,
+          stats,
+          config,
+          logs: mergeErrorLogs(logPayload.entries || [], stats.requests?.recentErrors || []),
+          ok: true,
+        });
+        setHistory((current) => ({
+          memory: [...current.memory, stats.memory?.rss || 0].slice(-60),
+          slots: [...current.slots, health.pageLimiter?.inUse || 0].slice(-60),
+          requests: [
+            ...current.requests,
+            stats.requests?.byPeriod?.["5m"]?.total || 0,
+          ].slice(-60),
+        }));
+      } catch {
+        setSnapshot((current) => ({ ...current, ok: false }));
       }
-      setSnapshot({
-        health,
-        stats,
-        config,
-        logs: mergeErrorLogs(logPayload.entries || [], stats.requests?.recentErrors || []),
-        ok: true,
-      });
-      setHistory((current) => ({
-        memory: [...current.memory, stats.memory?.rss || 0].slice(-60),
-        slots: [...current.slots, health.pageLimiter?.inUse || 0].slice(-60),
-        requests: [
-          ...current.requests,
-          stats.requests?.byPeriod?.["5m"]?.total || 0,
-        ].slice(-60),
-      }));
-    } catch {
-      setSnapshot((current) => ({ ...current, ok: false }));
+    } finally {
+      loadingRef.current = false;
     }
   };
+  // Initial snapshot, plus a fresh full snapshot whenever returning to the
+  // status dashboard (its data goes stale while other modes idle on the
+  // light heartbeat). Landing directly on tools/keys/hints/manage never
+  // fires the heavy requests at all.
   useEffect(() => {
-    load();
-  }, []);
+    load(mode === "status");
+  }, [mode]);
   useEffect(() => {
     if (paused) return undefined;
     const interval = setInterval(() => {
-      if (!document.hidden) load();
+      if (!document.hidden) load(modeRef.current === "status");
     }, POLL_MS);
     return () => clearInterval(interval);
   }, [paused]);

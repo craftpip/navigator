@@ -332,14 +332,13 @@ async function runStatistics() {
   console.log("");
 
   const instances = stats.instances || [];
-  const headers = ["backend", "connected", "tabs", "pid", "spawns"];
-  const aligns = ["left", "left", "right", "right", "right"];
+  const headers = ["backend", "connected", "tabs", "type"];
+  const aligns = ["left", "left", "right", "left"];
   const rows = instances.map((i) => [
     i.backend,
     i.connected ? green("yes") : red("no"),
     i.connected ? String(i.tabs) : dim("—"),
-    i.connected && i.pid ? String(i.pid) : dim("—"),
-    String(i.spawns)
+    dim(i.type || (i.backend === "chromium" ? "inbuilt" : "—"))
   ]);
   console.log(sectionHeader("BROWSER INSTANCES"));
   printTable(headers, rows, aligns);
@@ -439,13 +438,12 @@ function engineRateRows(stats) {
 
 function instanceRows(stats) {
   const instances = stats.instances || [];
-  const head = ["backend", "pid", "tabs", "status", "spawns"];
+  const head = ["backend", "tabs", "status", "type"];
   const cols = instances.map((i) => [
     i.backend,
-    i.connected && i.pid ? String(i.pid) : dim("—"),
     i.connected ? String(i.tabs) : dim("—"),
     i.connected ? green("● running") : red("○ stopped"),
-    String(i.spawns)
+    dim(i.type || (i.backend === "chromium" ? "inbuilt" : "—"))
   ]);
   return [head, ...cols];
 }

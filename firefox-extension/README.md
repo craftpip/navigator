@@ -62,7 +62,8 @@ WebDriver BiDi is required for anything to work — launch Firefox with
 
 | Path | What it is |
 |------|-----------|
-| `manifest.json` | MV3, `background.scripts` event page, `tabs`/`storage`/`alarms`/`tabHide` |
+| `manifest.json` | MV3, `background.page` event page (`background.html` via `<script>` tags — NOT `importScripts`, which is undefined in a page/document context and crashes the background), `tabs`/`storage`/`alarms`/`tabHide` |
+| `background.html` | loads every module as a classic `<script>` in dependency order on the event page's global scope |
 | `background.js` | wiring: relay state → badge/popup, BiDi events → `Mapper`, keepalive alarm |
 | `utils/config.js` | storage-backed config: server URL, `browserName 'Firefox'`, BiDi URL, token |
 | `utils/helpers.js` | session-id/short-id gen, tab-target-id parsing |
@@ -116,12 +117,23 @@ Two reasons, both alive:
 - Object handles (`RemoteObject.objectId`) are not portable across BiDi realms
   — `cdpArgToBidi` returns `null` for object args and the caller drops them
   (documented in `remote-value.js`).
+- **Firefox Remote Agent: one active BiDi session at a time.** A session that
+  is opened but not closed with `session.end` (e.g. a test/probe that exits
+  abruptly, or a second client) orphans the single slot and the extension's
+  BidiClient then fails with `BiDi not connected` — every CDP command that maps
+  to BiDi (`Target.createTarget` etc.) errors. There is **no supported way to
+  force-reap an orphaned session without restarting Firefox**; the extension
+  cannot reclaim it. Recovery = quit Firefox and relaunch with
+  `--remote-debugging-port=9222`. Any code that opens a BiDi session must
+  guarantee `session.end` + socket close on **every** exit path.
 
 ## Tests
 
 ```bash
 node firefox-extension/test/unit-ff.mjs        # 17 tests, mock-only, fast
 node firefox-extension/test/mock-bidi-server.mjs  # interactive Fake Remote Agent
+node firefox-extension/test/bidi-direct.mjs    # drives the REAL Mac Firefox via BiDi -> opens a tab -> YouTube (always session.end)
+node scripts/ff-gateway-test.mjs               # real relay+extension+BiDi path, CDP->YouTube via nav gateway (no own session)
 ```
 
 ## How it starts

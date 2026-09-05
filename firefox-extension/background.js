@@ -1,22 +1,3 @@
-importScripts('utils/config.js');
-importScripts('utils/logger.js');
-importScripts('utils/helpers.js');
-importScripts('utils/probe.js');
-importScripts('core/state.js');
-importScripts('cdp/bidi/remote-value.js');
-importScripts('cdp/bidi/mapper.js');
-importScripts('cdp/bidi/bidi-client.js');
-importScripts('core/session-manager.js');
-importScripts('core/connection-manager.js');
-importScripts('cdp/response.js');
-importScripts('cdp/handler/local.js');
-importScripts('cdp/handler/special.js');
-importScripts('cdp/handler/forward.js');
-importScripts('cdp/index.js');
-importScripts('features/tab-list.js');
-importScripts('features/tab-isolation.js');
-importScripts('features/badge.js');
-
 (function() {
   'use strict';
 
@@ -31,37 +12,14 @@ importScripts('features/badge.js');
     } catch (e) {}
   }
 
-  function init() {
-    if (_initialized) {
-      Logger.info('[Init] Already initialized');
-      return;
-    }
-    _initialized = true;
-    Logger.info('[Init] Navigator Browser Relay — Firefox starting...');
-
-    // State broadcasts → badge + popup
-    ConnectionManager.addListener(function(message) {
-      Badge.update();
-      broadcast(message);
-    });
-
-    // BiDi events (Firefox Remote Agent) → CDP events forwarded to navigator
-    BidiClient.setListener(function(bidiEvent) {
-      Mapper.handleBiDiEvent(bidiEvent);
-    });
-
-    // BiDi connection state → badge + popup
-    BidiClient.addStatusListener(function() {
-      Badge.update();
-      broadcast({ type: 'bidi-status-changed' });
-    });
-
-    // Pair BiDi contexts created via browsingContext.create with real tabs
-    chrome.tabs.onCreated.addListener(function(tab) {
-      CDPSessionManager.handleTabCreated(tab);
-    });
-
-    chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
+  // The message listener is registered at module top-level (NOT gated on
+  // init()) so it is always present on every event-page wake. Firefox MV3
+  // suspends the background event page when idle; if the real listener is not
+  // re-registered on wake, queued messages are dropped and the popup gets
+  // "Could not establish connection. Receiving end does not exist." Keeping
+  // this registration synchronous and unconditional avoids that race, even if
+  // init() throws partway through (the listener would still exist).
+  chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
       if (message && message.type === 'popup-query') {
         var state = State.getState();
         // The durable connection intent lives in storage (survives event-page
@@ -182,7 +140,14 @@ importScripts('features/badge.js');
       }
 
       if (message && message.type === 'send-pin') {
-        ConnectionManager.send({ type: 'pin', pin: String(message.pin || '') });
+        var pin = String(message.pin || '');
+        var sent = ConnectionManager.send({ type: 'pin', pin: pin });
+        if (!sent) {
+          // Socket is mid-reconnect (e.g. a previous PIN was rejected) —
+          // stash the PIN and submit it once the fresh pin_required arrives.
+          State.setPendingPin(pin);
+          ConnectionManager.connect();
+        }
         sendResponse({ success: true });
         return;
       }
@@ -227,6 +192,9 @@ importScripts('features/badge.js');
       }
     });
 
+  // Connection + runtime listeners and durable-flag recovery (runs on every
+  // wake once the message listener above is registered).
+  function init() {
     // Only ever auto-connect when a pairing was actually completed before:
     // a saved URL AND a saved session token. Fresh installs / cleared server
     // URLs stay Off and wait for the user. Explicit disconnect disables

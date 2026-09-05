@@ -6,6 +6,7 @@ var State = (function() {
     pairing: false,
     pinRequired: false,
     sessionToken: null,
+    pendingPin: null,
     browserName: 'Firefox',
     serverUrl: '',
     reconnectTimer: null,
@@ -36,7 +37,7 @@ var State = (function() {
   }
 
   function isConnected() {
-    return _state.ws && _state.ws.readyState === WebSocket.OPEN;
+    return _state.connected;
   }
 
   function isConnecting() {
@@ -69,6 +70,16 @@ var State = (function() {
 
   function getSessionToken() {
     return _state.sessionToken;
+  }
+
+  function setPendingPin(pin) {
+    _state.pendingPin = pin;
+  }
+
+  function takePendingPin() {
+    var pin = _state.pendingPin;
+    _state.pendingPin = null;
+    return pin;
   }
 
   function setLastError(err) {
@@ -238,6 +249,8 @@ var State = (function() {
     isPinRequired: isPinRequired,
     setSessionToken: setSessionToken,
     getSessionToken: getSessionToken,
+    setPendingPin: setPendingPin,
+    takePendingPin: takePendingPin,
     setLastError: setLastError,
     getLastError: getLastError,
     setPinError: setPinError,

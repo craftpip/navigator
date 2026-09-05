@@ -83,8 +83,12 @@ function makeChromeMock() {
     },
     windows: {
       getCurrent: cb => cb({ id: 1 }),
-      remove: (id, cb) => cb && cb(),
-      update: (id, opts, cb) => cb && cb()
+      get: (id, cb) => cb({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }),
+      update: (id, opts, cb) => {
+        const merged = Object.assign({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }, opts || {});
+        cb && cb(merged);
+      },
+      remove: (id, cb) => cb && cb()
     },
     tabGroups: {
       query: (opts, cb) => cb([]),
@@ -479,6 +483,35 @@ let env0;
   const okActivate = activated && activated.tabId === 42 && activated.opts.active === true;
   const okClose = removed === 42;
   test('15. activate/closeTarget resolve hex CDP id -> tabId', () => okActivate && okClose);
+}
+
+// 15b. Browser window commands resolve REAL window geometry
+//      (Browser.getWindowForTarget / setWindowBounds) via chrome.tabs.get +
+//      chrome.windows.get/update — not the old hardcoded 1920x1080 stub.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'W1N-D0W', tabId: 7, type: 'page', title: 'T', url: 'https://x.test', attached: false }
+  ]);
+  env.chrome.tabs.get = (id, cb) => cb({ id, title: 'T', url: 'https://x.test', windowId: 3 });
+  let updated = null;
+  env.chrome.windows.update = (id, opts, cb) => {
+    updated = { id, opts };
+    cb({ id, left: 10, top: 20, width: opts.width || 1920, height: opts.height || 1080, state: opts.state || 'normal', focused: !!opts.focused });
+  };
+  const out = [];
+  const run = (id, method, params) => env.routeCDPCommand({ id, method, params, sessionId: null }).then(r => out.push(r));
+  await run(153, 'Browser.getWindowForTarget', { targetId: 'W1N-D0W' });
+  await run(154, 'Browser.setWindowBounds', { targetId: 'W1N-D0W', bounds: { width: 1280, height: 900, windowState: 'maximized' } });
+  await sleep(80);
+
+  const got = (out[0] && (out[0].result || out[0].error)) || {};
+  const setRes = (out[1] && (out[1].result || {})) || {};
+  const okGet = got.windowId === 3 && got.bounds && got.bounds.width === 1920 && got.bounds.windowState === 'normal';
+  const okSet = updated && updated.id === 3 && updated.opts.width === 1280 && updated.opts.state === 'maximized';
+  const okBounds = setRes.bounds && setRes.bounds.windowState === 'maximized';
+  test('15b. Browser window commands resolve real window geometry', () => okGet && okSet && okBounds);
 }
 
 // 16. Target.attachToTarget success path must resolve a sessionId (regression:

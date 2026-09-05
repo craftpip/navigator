@@ -93,8 +93,12 @@ function makeChromeMock() {
     },
     windows: {
       getCurrent: cb => cb({ id: 1 }),
-      remove: (id, cb) => cb && cb(),
-      update: (id, opts, cb) => cb && cb()
+      get: (id, cb) => cb({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }),
+      update: (id, opts, cb) => {
+        const merged = Object.assign({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }, opts || {});
+        cb && cb(merged);
+      },
+      remove: (id, cb) => cb && cb()
     },
     alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
     storage: {
@@ -384,6 +388,54 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   await sleep(30);
   test('5. PIN round-trip: sends pin, stores session token', () =>
     !!pinMsg && pinMsg.pin === '123456' && env.State.getSessionToken() === 'tok-secret');
+}
+
+// 5a. Auth contract: isConnected() is the AUTH flag, not socket-open
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.State.setConnected(false);
+  env.State.setConnecting(false);
+  env.State.setPinRequired(true);
+  // A bare socket-open must NOT report connected before auth round-trip
+  const socketOpenButNotAuthed = env.State.isConnected();
+  env.State.setConnected(true);
+  const authed = env.State.isConnected();
+  test('5a. isConnected() = auth flag, not socket-open', () =>
+    socketOpenButNotAuthed === false && authed === true);
+  env.State.setConnected(false);
+}
+
+// 5b. Auth contract: pending PIN stash / take
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.State.setPendingPin('654321');
+  const took = env.State.takePendingPin();
+  const afterTake = env.State.takePendingPin();
+  test('5b. setPendingPin/takePendingPin stash and clear once', () =>
+    took === '654321' && afterTake === null);
+}
+
+// 5c. Auth contract: pin_required auto-submits a pending PIN
+{
+  const [server, client, env] = await startRelay();
+  env.State.setPendingPin('111222');
+  server.send(JSON.stringify({ type: 'pin_required' }));
+  await sleep(30);
+  const autoPin = client._sent.find(m => m.type === 'pin');
+  test('5c. pin_required auto-submits stashed PIN and clears it', () =>
+    autoPin && autoPin.pin === '111222' && env.State.takePendingPin() === null);
+}
+
+// 5d. Auth contract: ConnectionManager.send returns false with no live socket
+//     (this is the guard the background `send-pin` handler keys on to stash the PIN)
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const sent = env.ConnectionManager.send({ type: 'pin', pin: '222333' });
+  test('5d. ConnectionManager.send returns false with no live socket', () =>
+    sent === false);
 }
 
 // 6. Browser.getVersion is Firefox-branded LOCAL
@@ -681,6 +733,33 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
     const r = await sandbox.Probe.probe('fail.dns.test:1994');
     return r.ok === false && r.mode === 'dns';
   });
+}
+
+// 21. Browser window commands resolve REAL window geometry via
+//     CDPSessionManager.resolveContext + chrome.tabs.get + chrome.windows
+//     (not the old hardcoded 1920x1080 stub).
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.CDPSessionManager.addContextMapping('ctx-window', 5);
+  let updated = null;
+  env.chrome.tabs.get = (id, cb) => cb({ id, title: 'T', url: 'https://x.test', windowId: 3 });
+  env.chrome.windows.update = (id, opts, cb) => {
+    updated = { id, opts };
+    cb({ id, left: 0, top: 0, width: opts.width || 1920, height: opts.height || 1080, state: opts.state || 'normal', focused: !!opts.focused });
+  };
+  const out = [];
+  const run = (id, method, params) => env.routeCDPCommand({ id, method, params, sessionId: null }).then(r => out.push(r));
+  await run(21, 'Browser.getWindowForTarget', { targetId: 'ctx-window' });
+  await run(22, 'Browser.setWindowBounds', { targetId: 'ctx-window', bounds: { height: 760, windowState: 'minimized' } });
+  await sleep(80);
+
+  const got = (out[0] && (out[0].result || out[0].error)) || {};
+  const setRes = (out[1] && (out[1].result || {})) || {};
+  const okGet = got.windowId === 3 && got.bounds && got.bounds.width === 1920 && got.bounds.windowState === 'normal';
+  const okSet = updated && updated.id === 3 && updated.opts.height === 760 && updated.opts.state === 'minimized';
+  const okBounds = setRes.bounds && setRes.bounds.windowState === 'minimized';
+  test('21. Firefox window commands resolve real window geometry', () => okGet && okSet && okBounds);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

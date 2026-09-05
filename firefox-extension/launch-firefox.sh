@@ -21,6 +21,18 @@ EXT_DIR="$SCRIPT_DIR"
 PROFILE_DIR="${FIREFOX_PROFILE:-$SCRIPT_DIR/firefox-profile}"
 NAVIGATOR_URL="${NAVIGATOR_URL:-http://10.69.1.164:1994}"
 BIDI_PORT="${BIDI_PORT:-9222}"
+# CRITICAL: Firefox's Remote Agent rejects any WebSocket whose `Origin` header
+# is not allow-listed (default: only accepts requests with NO Origin header).
+# The extension's BidiClient opens `new WebSocket("ws://127.0.0.1:<port>/session")`
+# from a moz-extension context, which Firefox sends an
+# `Origin: moz-extension://<uuid>` header for — so it is 400'd at handshake and
+# every CDP command that maps to BiDi fails with "BiDi not connected".
+# Firefox does a STRICT scheme/host/port match (no `*` wildcard, unlike Chrome),
+# so the allow-list MUST be the extension's exact origin. Set it:
+#   ALLOWED_ORIGINS="moz-extension://<your-extension-uuid>"
+# Find the UUID: about:debugging#/runtime/this-firefox -> the extension's ID, or
+# from the extension itself: browser.runtime.getURL('') gives moz-extension://<uuid>/.
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-}"
 
 if [ ! -f "$EXT_DIR/manifest.json" ]; then
   echo "Extension not found at $EXT_DIR" >&2
@@ -48,14 +60,32 @@ echo "  profile         : $PROFILE_DIR"
 # has input fields for both URLs; this just makes the defaults correct.
 export NAVIGATOR_URL
 
+if [ -z "$ALLOWED_ORIGINS" ]; then
+  echo "ERROR: ALLOWED_ORIGINS is required." >&2
+  echo "  Firefox's Remote Agent rejects the extension's WebSocket (it sends" >&2
+  echo "  'Origin: moz-extension://<uuid>') unless that exact origin is allowed." >&2
+  echo "  Firefox does a strict scheme/host/port match — NO '*' wildcard." >&2
+  echo "  Set it to your extension's origin, e.g.:" >&2
+  echo "    ALLOWED_ORIGINS='moz-extension://<your-uuid>' ./launch-firefox.sh" >&2
+  echo "  Get the UUID: about:debugging#/runtime/this-firefox (the extension's" >&2
+  echo "  internal ID) — or the popup's bidiUrl default: ws://127.0.0.1:9222/session." >&2
+  exit 2
+fi
+
 if command -v web-ext >/dev/null 2>&1 || npx --no-install web-ext --version >/dev/null 2>&1; then
   echo "  loader          : web-ext (temporary add-on, auto-reload)"
+  # web-ext can't forward --remote-allow-origins, but it prefers prefs over
+  # the CLI flag. Set remote.origins.allowed (the pref the Remote Agent reads
+  # when the CLI flag is absent) to the same value.
   npx --no-install web-ext run \
     --source-dir "$EXT_DIR" \
     --firefox "$FIREFOX_BIN" \
     --firefox-profile "$PROFILE_DIR" \
     --remote-debugging-port "$BIDI_PORT" \
-    --keep-profile-changes
+    --no-input \
+    --keep-profile-changes \
+    --start-url "about:blank" \
+    --pref "remote.origins.allowed=$ALLOWED_ORIGINS"
   # ^ Ctrl+C to stop; web-ext reloads the extension on file edits.
 else
   echo "  loader          : native --remote-debugging-port (add-on via about:debugging)"
@@ -65,11 +95,13 @@ else
     # flatpak: forward the CLI args to the app
     flatpak run --command=firefox org.mozilla.firefox \
       --remote-debugging-port "$BIDI_PORT" \
+      --remote-allow-origins "$ALLOWED_ORIGINS" \
       -profile "$PROFILE_DIR" \
       --new-window "about:blank"
   else
     "$FIREFOX_BIN" \
       --remote-debugging-port "$BIDI_PORT" \
+      --remote-allow-origins "$ALLOWED_ORIGINS" \
       -profile "$PROFILE_DIR" \
       --new-window "about:blank"
   fi

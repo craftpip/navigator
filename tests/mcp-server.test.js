@@ -100,8 +100,8 @@ function makeMockManager(overrides = {}) {
       pageLimiter: { inUse: 0 },
     }),
     getInstanceStats: vi.fn().mockResolvedValue([
-      { backend: "chromium", connected: false, tabs: 0, pid: null, spawns: 0 },
-      { backend: "cloakbrowser", connected: true, tabs: 2, pid: 42, spawns: 1 },
+      { backend: "chromium", connected: false, tabs: 0, pid: null, type: "inbuilt" },
+      { backend: "cloakbrowser", connected: true, tabs: 2, pid: 42, type: "cdp" },
     ]),
     getRelaySummary: vi.fn().mockReturnValue([]),
     shutdown: vi.fn().mockResolvedValue(undefined),
@@ -207,7 +207,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body).toHaveProperty("cache");
       expect(body.instances).toHaveLength(2);
       const cloak = body.instances.find((i) => i.backend === "cloakbrowser");
-      expect(cloak).toMatchObject({ connected: true, tabs: 2, pid: 42, spawns: 1 });
+      expect(cloak).toMatchObject({ connected: true, tabs: 2, pid: 42, type: "cdp" });
     });
 
     it("includes activity and devtools counters", async () => {

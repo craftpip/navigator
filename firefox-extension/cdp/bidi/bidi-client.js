@@ -135,6 +135,32 @@ var BidiClient = (function() {
     });
   }
 
+  /**
+   * Lazily ensure a live BiDi session before dispatching a command. If the
+   * session dropped (e.g. the background event page suspended the WS, or the
+   * Remote Agent wasn't up at extension load), this (re)connects so navigator
+   * driving Firefox "just works" on the next CDP command instead of failing
+   * forever with "BiDi not connected".
+   */
+  function _ensureSession(timeoutMs) {
+    return new Promise(function(resolve, reject) {
+      if (isConnected()) { resolve(); return; }
+      Config.getBidiUrl(function(url) {
+        connect(url || Config.defaultBidiUrl);
+        var waited = 0;
+        var step = 80;
+        var iv = setInterval(function() {
+          if (isConnected()) { clearInterval(iv); resolve(); return; }
+          waited += step;
+          if (waited >= (timeoutMs || 4000)) {
+            clearInterval(iv);
+            reject(new Error('BiDi not connected'));
+          }
+        }, step);
+      });
+    });
+  }
+
   // ------------------------------------------------------------ transport
 
   function _sendRaw(msg, handlers) {
@@ -154,18 +180,20 @@ var BidiClient = (function() {
   }
 
   function send(method, params, timeoutMs) {
-    return new Promise(function(resolve, reject) {
-      if (!_ws || _ws.readyState !== WebSocket.OPEN || !_sessionId) {
-        reject(new Error('BiDi not connected'));
-        return;
-      }
-      var timer = setTimeout(function() {
-        if (_pending.has(_nextId)) { _pending.delete(_nextId); reject(new Error('BiDi timeout: ' + method)); }
-      }, timeoutMs || SEND_TIMEOUT_MS);
+    return _ensureSession().then(function() {
+      return new Promise(function(resolve, reject) {
+        if (!_ws || _ws.readyState !== WebSocket.OPEN || !_sessionId) {
+          reject(new Error('BiDi not connected'));
+          return;
+        }
+        var timer = setTimeout(function() {
+          if (_pending.has(_nextId)) { _pending.delete(_nextId); reject(new Error('BiDi timeout: ' + method)); }
+        }, timeoutMs || SEND_TIMEOUT_MS);
 
-      _sendRaw({ method: method, params: params || {} }, {
-        resolve: function(r) { clearTimeout(timer); resolve(r); },
-        reject: function(e) { clearTimeout(timer); reject(e); }
+        _sendRaw({ method: method, params: params || {} }, {
+          resolve: function(r) { clearTimeout(timer); resolve(r); },
+          reject: function(e) { clearTimeout(timer); reject(e); }
+        });
       });
     });
   }

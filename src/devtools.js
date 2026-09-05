@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getBrowserManager, resolveBrowserParam } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam, browserOwnership } from "./browser.js";
 import { resolveRefIdToUrl } from "./ref-memory.js";
 import { clearTab, touchTab } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
@@ -20,6 +20,177 @@ const devtoolsCounters = { targetsCreated: 0, targetsClosed: 0, targetsInactivit
 
 export function getDevtoolsCounters() {
   return { ...devtoolsCounters };
+}
+
+/**
+ * How a browser backend is reached for raw CDP commands:
+ *   "relay"    — navigator-cdp add-on (Chrome extension / Firefox extension via
+ *                /relay). In-process `relayServer.sendCdpCommand` reaches the
+ *                extension's LOCAL/SPECIAL handlers.
+ *   "chromium" — the built-in headless browser (puppeteer CDP sessions).
+ *   "cdp"      — any other CDP add-on (cloakbrowser, lightpanda): puppeteer
+ *                CDP sessions on the connected browser.
+ * Single source of truth for window/focus/raw-command dispatch AND ownership.
+ */
+function backendKind(manager, backend) {
+  if (backend === "chromium") return "chromium";
+  try {
+    if (typeof manager?._effectiveAddOns === "function") {
+      const eff = manager._effectiveAddOns().find((b) => b.name === backend);
+      if (eff) return eff.type === "navigator-cdp" ? "relay" : "cdp";
+    }
+  } catch {}
+  try {
+    if (relayServer.isPaired(backend) || relayServer.getEntry(backend)) return "relay";
+  } catch {}
+  return "cdp";
+}
+
+/**
+ * Ownership of a target, derived from the browser window that backs it.
+ * Single source: `browserOwnership(type)` (src/browser.js). Unknown browsers
+ * default to "agent" so nothing is ever mislabeled as user-visible.
+ */
+function targetOwnership(manager, backend) {
+  const kind = backendKind(manager, backend);
+  if (kind === "chromium") return "agent";
+  if (kind === "relay") return "user";
+  try {
+    if (typeof manager?._effectiveAddOns === "function") {
+      const eff = manager._effectiveAddOns().find((b) => b.name === backend);
+      if (eff) return browserOwnership(eff.type);
+    }
+  } catch {}
+  return "agent";
+}
+
+/** The REAL extension/browser target id behind a devtools state handle. */
+function realTargetId(state) {
+  try {
+    return String(state?.page?.target?.()._targetId ?? state?.page?._targetInfo?.targetId ?? "") || null;
+  } catch {
+    return String(state?.targetId ?? "") || null;
+  }
+}
+
+// CDP commands that must run on the BROWSER-level session (not a page session):
+// Browser.* and the browser-level Target.* commands like activateTarget.
+const BROWSER_LEVEL_DOMAINS = new Set(["Browser", "Target", "SystemInfo", "Schema", "Tethering", "Tab"]);
+
+// Every CDP surface navigator's tools can reach. Used to name the supported
+// surface in readable errors when a passthrough method is unknown to the backend.
+const KNOWN_CDP_DOMAINS = ["Browser", "Target", "Page", "Runtime", "Network", "DOM", "Input", "SystemInfo", "Schema", "Tethering", "IO", "Tab"];
+
+const WINDOW_STATES = ["normal", "minimized", "maximized", "fullscreen"];
+
+function clampTimeout(value, fallback = 15000) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return fallback;
+  return Math.min(30000, Math.floor(v));
+}
+
+function domainOf(method) {
+  const m = String(method || "").split(".");
+  return m.length > 1 ? m[0] : m[0] || "";
+}
+
+/**
+ * The CDP session a non-relay command should run on. Browser-level domains use
+ * a BROWSER session (fresh per command — the Browser and Target domains fail
+ * with "Method not found" on a page session with modern Chromium); everything
+ * else uses a cached PAGE session on the state's puppet Page.
+ */
+async function getCdpSession(state, method) {
+  if (BROWSER_LEVEL_DOMAINS.has(domainOf(method))) {
+    const browser = state.page.browser();
+    if (!browser) throw new Error(`Backend ${state.backend} has no browser-level CDP session`);
+    if (!state._browserSession) {
+      state._browserSession = await browser.target().createCDPSession();
+    }
+    return state._browserSession;
+  }
+  if (!state._pageSession) {
+    state._pageSession = await state.page.createCDPSession();
+  }
+  return state._pageSession;
+}
+
+/**
+ * Send a CDP command for a target, dispatching by backend:
+ * relay → `relayServer.sendCdpCommand` (in-process, exercises the extension's
+ *         LOCAL/SPECIAL handlers exactly like an attached puppeteer client),
+ * chromium/cdp → a puppeteer CDP session (browser-level session for the
+ *         Browser and Target domains, page session otherwise).
+ * Rejects with the backend's error message, augmented with the supported
+ * surface name when the method/domain is unknown.
+ */
+async function sendWindowCommand(state, method, params, { realTargetId: rid = null, timeoutMs = null } = {}) {
+  const manager = await getBrowserManager();
+  const kind = backendKind(manager, state.backend);
+
+  let result;
+  if (kind === "relay") {
+    const resp = await relayServer.sendCdpCommand(state.backend, {
+      method,
+      params: params || {},
+      targetId: rid || state.targetId,
+      timeoutMs
+    });
+    if (resp.error) {
+      const message = String(resp.error.message || `CDP error ${resp.error.code || ""}`).trim();
+      throw new Error(augmentCdpError(method, message));
+    }
+    result = resp.result || {};
+  } else {
+    const browserLevel = BROWSER_LEVEL_DOMAINS.has(domainOf(method));
+    const session = await getCdpSession(state, method);
+    try {
+      result = await session.send(method, params || {});
+    } finally {
+      if (browserLevel && state._browserSession) {
+        await state._browserSession.detach().catch(() => {});
+        state._browserSession = null;
+      }
+    }
+  }
+  return result;
+}
+
+function augmentCdpError(method, message) {
+  const unknownSignal = /method not found|unknown domain|unsupported|not supported|no such method|not implemented|unrecognized/i.test(String(message || ""));
+  if (!unknownSignal) return message;
+  return `${message} (method/domain not part of navigator's devtools surface — supported CDP domains: ${KNOWN_CDP_DOMAINS.join(", ")})`;
+}
+
+function parseBounds(bounds) {
+  if (!bounds || typeof bounds !== "object" || Array.isArray(bounds)) {
+    throw new Error("Invalid input: bounds must be an object with at least one of left, top, width, height, windowState, or focused");
+  }
+  const out = {};
+  for (const key of ["left", "top", "width", "height"]) {
+    if (bounds[key] === undefined) continue;
+    const v = Math.floor(Number(bounds[key]));
+    if (!Number.isFinite(v)) throw new Error(`Invalid input: bounds.${key} must be a number`);
+    if (key === "width" || key === "height") {
+      if (v <= 0) throw new Error(`Invalid input: bounds.${key} must be a positive number`);
+    }
+    out[key] = v;
+  }
+  if (bounds.windowState !== undefined) {
+    const s = String(bounds.windowState).toLowerCase();
+    if (!WINDOW_STATES.includes(s)) {
+      throw new Error(`Invalid input: bounds.windowState must be one of ${WINDOW_STATES.join(", ")}`);
+    }
+    out.windowState = s;
+  }
+  if (bounds.focused !== undefined) {
+    if (typeof bounds.focused !== "boolean") throw new Error("Invalid input: bounds.focused must be a boolean");
+    out.focused = bounds.focused;
+  }
+  if (Object.keys(out).length === 0) {
+    throw new Error("Invalid input: bounds must specify at least one of left, top, width, height, windowState, or focused");
+  }
+  return out;
 }
 
 function cleanWhitespace(value) {
@@ -108,18 +279,7 @@ export async function getTargetState(targetId) {
  * on-demand `getTargetState` resolution so both register identically.
  */
 function registerAdoptedTarget(manager, page, backend, targetId) {
-  const isRelay = (() => {
-    if (backend === "chromium") return false;
-    try {
-      if (typeof manager._effectiveAddOns === "function") {
-        const eff = manager._effectiveAddOns().find((b) => b.name === backend);
-        if (eff) return eff.type === "navigator-cdp";
-      }
-      return relayServer.isPaired(backend) || !!relayServer.getEntry(backend);
-    } catch {
-      return false;
-    }
-  })();
+  const isRelay = backendKind(manager, backend) === "relay";
   const viewport = isRelay ? { width: "auto", height: "auto" } : null;
   const state = {
     targetId,
@@ -131,6 +291,7 @@ function registerAdoptedTarget(manager, page, backend, targetId) {
     lastActiveAt: new Date().toISOString(),
     lastTitle: "",
     viewport,
+    ownership: targetOwnership(manager, backend),
     sourceUrl: page.url && typeof page.url === "function" ? (() => { try { return page.url(); } catch { return ""; } })() : "",
     adopted: true
   };
@@ -200,6 +361,7 @@ function buildTargetSummary(state) {
   return {
     targetId: state.targetId,
     backend: state.backend,
+    ownership: state.ownership || "agent",
     url: state.page.url(),
     title: state.lastTitle || "",
     viewport: state.viewport,
@@ -389,6 +551,28 @@ async function createTarget(args = {}) {
     url = resolveRefIdToUrl(ref);
   }
 
+  // Lightpanda is single-tab (+ pinned about:blank): only one usable page at a
+  // time. If the user explicitly asks for another lightpanda target, proactively
+  // close the oldest existing lightpanda target so the next browser.newPage()
+  // doesn't hit `TargetAlreadyLoaded`. This keeps the UX sequential without
+  // requiring manual close. The BrowserManager fallback (src/browser.js) also
+  // handles the error generically by evicting a page at the puppeteer layer.
+  const explicitBrowser = typeof args.browser === "string" && args.browser.trim()
+    ? String(args.browser).trim().toLowerCase()
+    : "";
+  if (explicitBrowser === "lightpanda") {
+    const existing = [...targetsById.values()]
+      .filter((s) => String(s.backend).toLowerCase() === "lightpanda" && s.page && !s.page.isClosed());
+    if (existing.length >= 1) {
+      const oldest = existing[0];
+      try { await oldest.page.close(); } catch {}
+      targetsById.delete(oldest.targetId);
+      clearTab(oldest.backend, oldest.targetId);
+      closedTargets.set(oldest.targetId, { closedAt: new Date().toISOString() });
+      console.error(`🔄  lightpanda single-tab eviction: closed previous target ${oldest.targetId} to make room`);
+    }
+  }
+
   const viewport = parseViewport(args.viewport);
   const { page, browser: backend, rollbackNotes } = await resolveBrowserParam(
     { browser: typeof args.browser === "string" && args.browser.trim() ? args.browser.trim() : "" },
@@ -409,6 +593,7 @@ async function createTarget(args = {}) {
     lastActiveAt: new Date().toISOString(),
     lastTitle: "",
     viewport,
+    ownership: targetOwnership(manager, backend),
     sourceUrl: url
   };
 
@@ -466,6 +651,7 @@ async function listTargets() {
       results.push({
         targetId: t.targetId,
         backend: entry.name,
+        ownership: targetOwnership(manager, entry.name),
         url: t.url || "",
         title: t.title || "",
         viewport: { width: "auto", height: "auto" },
@@ -879,21 +1065,48 @@ async function evaluateRuntime(args = {}) {
       return String(value);
     }
 
+    function withEvalContext(error, expression) {
+      const preview = expression.length > 160 ? `${expression.slice(0, 157)}...` : expression;
+      if (error instanceof Error) {
+        error.message = `${error.message}  [evaluated: ${preview}]`;
+        return error;
+      }
+      const wrapped = new Error(`${String(error)}  [evaluated: ${preview}]`);
+      wrapped.name = "EvalError";
+      return wrapped;
+    }
+
     let raw;
     try {
       raw = globalThis.eval(expression);
     } catch (evalError) {
       if (evalError instanceof SyntaxError) {
-        raw = await new Function('return (async () => (' + expression + '))()')();
+        try {
+          raw = await new Function('return (async () => (' + expression + '))()')();
+        } catch (asyncError) {
+          throw withEvalContext(asyncError, expression);
+        }
       } else {
-        throw evalError;
+        throw withEvalContext(evalError, expression);
       }
     }
-    const awaited = raw && typeof raw.then === "function" ? await raw : raw;
-    return serialize(awaited);
+    let awaited;
+    try {
+      awaited = raw && typeof raw.then === "function" ? await raw : raw;
+    } catch (promiseError) {
+      throw withEvalContext(promiseError, expression);
+    }
+    try {
+      return serialize(awaited);
+    } catch (serializeError) {
+      throw withEvalContext(serializeError, expression);
+    }
   }, args.expression),
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Runtime evaluation timed out after ${timeoutMs}ms`)), timeoutMs)
+      setTimeout(() => {
+        const preview = args.expression.length > 160 ? `${args.expression.slice(0, 157)}...` : args.expression;
+        reject(new Error(`Runtime evaluation timed out after ${timeoutMs}ms  [evaluated: ${preview}]`));
+      }, timeoutMs)
     )
   ]);
 
@@ -1837,17 +2050,137 @@ async function insertText(args = {}) {
 
   });}
 
+// --------------------------------------------------------- window & focus CDP
+
+/**
+ * Target.activateTarget — bring a tab forward in its window.
+ * Relay/dispatch per backend via sendWindowCommand (see above).
+ */
+async function activateTarget(args = {}) {
+  assertString(args.targetId, "targetId");
+  const manager = await getBrowserManager();
+  assertEnabled(manager);
+  return withStaleRetry(args.targetId, async (state) => {
+    const rid = realTargetId(state);
+    const result = await sendWindowCommand(state, "Target.activateTarget", { targetId: rid || state.targetId }, { realTargetId: rid || null });
+    return {
+      targetId: args.targetId,
+      realTargetId: rid,
+      backend: state.backend,
+      ownership: state.ownership || "agent",
+      activated: true,
+      result
+    };
+  });
+}
+
+async function getWindowForTarget(args = {}) {
+  assertString(args.targetId, "targetId");
+  const manager = await getBrowserManager();
+  assertEnabled(manager);
+  return withStaleRetry(args.targetId, async (state) => {
+    const rid = realTargetId(state);
+    const result = await sendWindowCommand(state, "Browser.getWindowForTarget", { targetId: rid || state.targetId }, { realTargetId: rid || null });
+    return {
+      targetId: args.targetId,
+      realTargetId: rid,
+      backend: state.backend,
+      ownership: state.ownership || "agent",
+      windowId: result.windowId ?? null,
+      bounds: result.bounds ?? null
+    };
+  });
+}
+
+async function setWindowBounds(args = {}) {
+  assertString(args.targetId, "targetId");
+  const bounds = parseBounds(args.bounds);
+  const manager = await getBrowserManager();
+  assertEnabled(manager);
+  return withStaleRetry(args.targetId, async (state) => {
+    const rid = realTargetId(state);
+    const result = await sendWindowCommand(state, "Browser.setWindowBounds", { targetId: rid || state.targetId, bounds }, { realTargetId: rid || null });
+    return {
+      targetId: args.targetId,
+      realTargetId: rid,
+      backend: state.backend,
+      ownership: state.ownership || "agent",
+      ...(result.windowId !== undefined ? { windowId: result.windowId } : {}),
+      bounds: result.bounds ?? bounds
+    };
+  });
+}
+
+async function focusWindow(args = {}) {
+  assertString(args.targetId, "targetId");
+  const manager = await getBrowserManager();
+  assertEnabled(manager);
+  return withStaleRetry(args.targetId, async (state) => {
+    const rid = realTargetId(state);
+    const routed = { realTargetId: rid || null };
+    await sendWindowCommand(state, "Target.activateTarget", { targetId: rid || state.targetId }, routed);
+    let windowFocused = false;
+    let boundsError = null;
+    try {
+      await sendWindowCommand(state, "Browser.setWindowBounds", { targetId: rid || state.targetId, bounds: { focused: true } }, routed);
+      windowFocused = true;
+    } catch (error) {
+      boundsError = String(error?.message || error);
+    }
+    return {
+      targetId: args.targetId,
+      realTargetId: rid,
+      backend: state.backend,
+      ownership: state.ownership || "agent",
+      activated: true,
+      windowFocused,
+      ...(boundsError ? { boundsError } : {})
+    };
+  });
+}
+
+/**
+ * Target.sendCommand — raw CDP passthrough to the target's session. Any
+ * method the backend understands is forwarded; unknown methods/domains get a
+ * readable error naming navigator's supported CDP surface.
+ */
+async function sendRawCommand(args = {}) {
+  assertString(args.targetId, "targetId");
+  assertString(args.method, "method");
+  let params = {};
+  if (args.params !== undefined && args.params !== null) {
+    if (typeof args.params !== "object" || Array.isArray(args.params)) {
+      throw new Error("Invalid input: params must be a JSON object of CDP command parameters");
+    }
+    params = args.params;
+  }
+  const timeoutMs = clampTimeout(args.timeoutMs);
+  const manager = await getBrowserManager();
+  assertEnabled(manager);
+  return withStaleRetry(args.targetId, async (state) => {
+    const rid = realTargetId(state);
+    const result = await sendWindowCommand(state, args.method, params, { realTargetId: rid || null, timeoutMs });
+    return {
+      targetId: args.targetId,
+      method: args.method,
+      backend: state.backend,
+      ownership: state.ownership || "agent",
+      result
+    };
+  });
+}
+
 export const devtoolsToolDefinitions = [
   {
     name: "Target.createTarget",
-    description: "Create a persistent browser tab for interactive testing. Provide a url, ref_id, and optional viewport to apply before navigation. Targets close automatically after 5 minutes of no interaction. The tab opens in the browser given by the `browser` param (chromium default, or an add-on name from list_browsers); when omitted, browsers with a devtools role are preferred, falling back to chromium.",
+    description: "Create a persistent browser tab for interactive testing. Provide a url, ref_id, and optional viewport to apply before navigation. Targets close automatically after 5 minutes of no interaction. The tab opens in the browser given by the `browser` param (chromium default, or an add-on name from list_browsers); when omitted, browsers with a devtools role are preferred, falling back to chromium. Each target carries ownership: \"user\" on a navigator-cdp browser (the USER's real, visible, non-headless window — every tab/click is on the user's screen) or \"agent\" on navigator's headless browsers. Driving an adopted origin:\"browser\" tab lives in the user's existing tab; closing an adopted tab never closes the user's real tab (our handle is released only).",
     inputSchema: {
       type: "object",
       properties: {
         targetId: { type: "string", description: "Optional custom target id. If omitted, a random id is generated." },
         url: { type: "string", description: "Optional starting URL. Defaults to about:blank." },
         ref_id: { type: "number", description: "Optional numeric reference from a prior web_search or web_fetch to open. Overridden by url when both are given." },
-        browser: { type: "string", description: "Browser to use (chromium default, or an add-on name from list_browsers)." },
+        browser: { type: "string", description: "Browser to use (chromium default, or an add-on name from list_browsers). NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window." },
         viewport: {
           type: "object",
           description: "Optional page viewport applied before navigation, e.g. { width: 390, height: 844 }.",
@@ -1864,7 +2197,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Target.getTargets",
-    description: "List open persistent testing tabs created through Target.createTarget.",
+    description: "List all drivable targets: agent tabs (ownership \"agent\" — navigator's own headless/invisible browsers) and the user's open tabs (ownership \"user\", origin \"browser\" — their real visible browser window). Pass any listed targetId directly to Runtime.evaluate / DOM.* / Input.* / Page.* to drive that exact tab with no createTarget step. \"user\" targets are visible to the user — drive with care.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -1873,7 +2206,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Target.closeTarget",
-    description: "Close a persistent testing tab.",
+    description: "Close a persistent testing tab. Closing an adopted origin:\"browser\" tab (ownership \"user\") never closes the user's real tab — the handle is released only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1935,7 +2268,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Runtime.evaluate",
-    description: "Evaluate a JavaScript expression in the page context and return the result serialized as JSON. Objects/arrays are capped at 25 entries (with a [+more] marker) and depth 4; [Circular] and [MaxDepth] markers indicate truncation.",
+    description: "Evaluate a JavaScript expression in the page context and return the result serialized as JSON. Objects/arrays are capped at 25 entries (with a [+more] marker) and depth 4; [Circular] and [MaxDepth] markers indicate truncation. Runtime errors or rejected promises are reported with the offending expression appended in brackets for context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2110,6 +2443,82 @@ export const devtoolsToolDefinitions = [
       required: ["targetId", "key"],
       additionalProperties: false
     }
+  },
+  {
+    name: "Target.activateTarget",
+    description: "Bring a tab forward in its window (makes it the active tab). On a navigator-cdp browser (ownership \"user\") this is a REAL window action — the tab visibly activates in the user's browser window on screen. On navigator's own headless browsers it activates within the invisible Chromium. Pass a targetId from Target.getTargets or Target.createTarget.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetId: { type: "string", description: "Target id from Target.getTargets or Target.createTarget." }
+      },
+      required: ["targetId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Browser.getWindowForTarget",
+    description: "Return the window (windowId) and its bounds { left, top, width, height, windowState } for the target's tab. On navigator-cdp browsers this reflects the user's real window geometry — not a stub. windowState is one of normal | minimized | maximized | fullscreen.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetId: { type: "string", description: "Target id from Target.getTargets or Target.createTarget." }
+      },
+      required: ["targetId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Browser.setWindowBounds",
+    description: "Move/resize/focus the window containing the target's tab. bounds accepts any subset of { left, top, width, height, windowState, focused }. windowState is one of normal | minimized | maximized | fullscreen; focused: true brings the window to the front of the OS window stack (user-visible on navigator-cdp browsers).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetId: { type: "string", description: "Target id from Target.getTargets or Target.createTarget." },
+        bounds: {
+          type: "object",
+          description: "Window bounds to apply — at least one of left, top, width, height, windowState, focused.",
+          properties: {
+            left: { type: "integer", description: "Left edge of the window in screen pixels." },
+            top: { type: "integer", description: "Top edge of the window in screen pixels." },
+            width: { type: "integer", description: "Window width in pixels (positive)." },
+            height: { type: "integer", description: "Window height in pixels (positive)." },
+            windowState: { type: "string", enum: ["normal", "minimized", "maximized", "fullscreen"] },
+            focused: { type: "boolean", description: "Bring the window to the front." }
+          },
+          additionalProperties: false
+        }
+      },
+      required: ["targetId", "bounds"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Browser.focusWindow",
+    description: "Bring a target's tab forward AND focus its window to the top of the OS window stack — the two-step your eyes actually notice: Target.activateTarget then Browser.setWindowBounds({focused:true}). On a navigator-cdp browser this is a real action on the user's visible window. If the focus step is unsupported by the backend, focused errors are reported in boundsError while the tab activation still succeeds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetId: { type: "string", description: "Target id from Target.getTargets or Target.createTarget." }
+      },
+      required: ["targetId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Target.sendCommand",
+    description: "Raw CDP command passthrough to the target's session — for methods navigator doesn't wrap as a dedicated tool (e.g. Page.getLayoutMetrics, Runtime.getProperties, Emulation.setDeviceMetricsOverride, DOM.resolveNode). Run it against ANY method the backend understands: relay (navigator-cdp browsers execute it via the extension's LOCAL/SPECIAL/CDP-handler routers) or chromium/cdp add-ons (puppeteer CDP sessions; Browser.*/Target.* run on the browser-level session, everything else on the page session). Unknown methods/domains return a readable error naming navigator's supported CDP surface.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetId: { type: "string", description: "Target id from Target.getTargets or Target.createTarget." },
+        method: { type: "string", description: "CDP method, e.g. \"Page.getLayoutMetrics\", \"Runtime.getProperties\", \"Emulation.setDeviceMetricsOverride\"." },
+        params: { type: "object", description: "CDP command params as a JSON object (default {})." },
+        timeoutMs: { type: "number", default: 15000, description: "Operation timeout; max 30000." }
+      },
+      required: ["targetId", "method"],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -2144,6 +2553,11 @@ export async function handleDevtoolsToolCall(name, args = {}) {
   if (name === "Input.dispatchMouseEvent") return dispatchMouseEvent(args);
   if (name === "Input.insertText") return insertText(args);
   if (name === "Input.dispatchKeyEvent") return dispatchKeyEvent(args);
+  if (name === "Target.activateTarget") return activateTarget(args);
+  if (name === "Browser.getWindowForTarget") return getWindowForTarget(args);
+  if (name === "Browser.setWindowBounds") return setWindowBounds(args);
+  if (name === "Browser.focusWindow") return focusWindow(args);
+  if (name === "Target.sendCommand") return sendRawCommand(args);
   throw new Error(`Unknown developer browser tool: ${name}`);
 }
 

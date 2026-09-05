@@ -1,8 +1,15 @@
 # Plan 40 — Firefox Extension: Real Firefox over WebDriver BiDi
 
-**Status:** Phase 1 BUILT — `firefox-extension/` stands alone with 17/17 vm-harness tests green (2026-08-28). Phase 2 (real-Firefox validation + fidelity pass) is next.
-**Created:** 2026-08-28
+**Status:** Phase 1 BUILT → 2026-08-29 Phase 1.1: origin allow-list + relay self-report wired; real-Firefox smoke hit `BiDi not connected` blocker (verified). Phase 2 fidelity next once blocker cleared.
+**Created:** 2026-08-28 — **Updated:** 2026-08-29 (real-Firefox smoke, origin blocker, `bidiOrigin` fix)
 **Depends on:** Plan 38 (Chrome extension) — the Firefox extension shares its relay core, protocol, and popup UX. Only the CDP bridge layer changes.
+
+> **Progress 2026-08-29 — real-Firefox smoke + origin fix**
+> - Smoke: `scripts/ff-gateway-test.mjs` (puppeteer-core via `ws://10.69.1.164:1994/browser/Firefox`) + `firefox-extension/test/bidi-direct.mjs` (direct `ws://10.69.1.178:9222/session` with `Host: 127.0.0.1:9222`). Direct path opens YouTube (`title: YouTube`) when `session.new` succeeds; gateway path consistently fails `Protocol error (Target.createTarget): BiDi not connected` — extension's BiDi WS never establishes.
+> - Root cause isolated: Remote Agent `isOriginValid` (`remote/server/WebSocketHandshake.sys.mjs:226`, strict `scheme/host/port` exact match, no `*` wildcard — `newURI('*')` throws `NS_ERROR_MALFORMED_URI` → rejected. Verified live: `origin_test.mjs` no `Origin` → `SESSION-CREATED`, any `Origin: moz-extension://…` or `http://localhost` → `400`). Extension connects from per-install `moz-extension://<uuid>` (`bug 1257989`), so `--remote-allow-origins=moz-extension://<uuid>` must be exact. `http://10.69.1.164:1994` does not allow the extension origin.
+> - Single-session limit: Agent allows one `session.new`; orphaned WS (careless `ws.close()` without `session.end`) → `Maximum number of active sessions` blocks all new sessions until Firefox restart. Hardened `bidi-direct.mjs` to always `session.end`.
+> - Fix wired: `firefox-extension/core/connection-manager.js:139` reports `bidiOrigin = chrome.runtime.getURL('').replace(/\/$/,'')` in `navigator-hello`; `src/relay-server.js:372,274,518` captures `bidiOrigin` (only `moz-extension://`) and surfaces via `getStatusEntries()` → `src/browser.js:978,938` → `/stats.relay.*.bidiOrigin` + `/health.browsers[].bidiOrigin`. `firefox-extension/launch-firefox.sh:63` now **requires** `ALLOWED_ORIGINS` (`moz-extension://<uuid>`), native/flatpak pass `--remote-allow-origins`, web-ext sets `remote.origins.allowed` pref. `pack-firefox.sh` + `manifest.json`’s `gecko.id` (`navigator-browser-relay@navigator.local`) does **not** set the runtime `moz-extension://` UUID (random per install).
+> - Next: Mac relaunches with `ALLOWED_ORIGINS="moz-extension://<uuid>" firefox-extension/launch-firefox.sh` (or manual `...firefox --remote-debugging-port 9222 --remote-allow-origins="moz-extension://<uuid>"`), reloads temp add-on, reconnects; `scripts/ff-gateway-test.mjs` should then pass. Copy `firefox-extension/` to Mac first (code lives on server `10.69.1.164`, not Mac).
 
 > **Phase 1 delivered**
 > - `firefox-extension/` mirrors the chrome-extension structure; relay core (`utils/`, `core/connection-manager.js`, `core/state.js`) reuses the same protocol (PIN, `navigator-hello`, sessions-as-tabs).
@@ -14,7 +21,10 @@
 >
 > **Bugs caught by the harness during build** (all fixed): `SessionManager` vs `CDPSessionManager` name mismatch dropped ALL BiDi→CDP events; `ResponseBuilder` hardcoded `-32000` swallowing `-32601`; `remote-value.toCdp` recursed into itself for `map`/`set` (stack overflow); the mock must reply with the full BiDi payload `{type:'success', result, realm}` not the bare RemoteValue; HashMap-less `tab-list` needed `Target.getTargets` to resolve a Promise (callback-style `getAllAsTargets` returned `undefined`).
 >
-> **Not yet done (Phase 2+):** real-Firefox end-to-end run (launch → load temp add-on → PIN → drive CDP → verify translated BiDi in the mock log); object-handle bridging across realms; multi-`session.new` reuse on a normal profile; `-remote-allow-origins` origin pinning.
+> **Blocker (active):** Extension BiDi WS rejected by Agent origin check until launched with exact `--remote-allow-origins=moz-extension://<uuid>`; cross-machine copy (code on server, Firefox on Mac `10.69.1.178`) needs syncing; one stale `session.new` blocks all.
+> **Not yet done (Phase 2+):** verify gateway end-to-end (YouTube via `scripts/ff-gateway-test.mjs`) after Mac relaunch with correct flag; object-handle bridging across realms; multi-`session.new` reuse on a normal profile. Origin pinning now solved via `ALLOWED_ORIGINS`/`bidiOrigin` self-report.
+>
+> **Reachability probe (built 2026-08-28):** When relaying is "connecting but not working", the WS `connect` errors alone can't tell DNS/firewall/server-down apart. `utils/probe.js` (`Probe.probe(hostPort)`) fetches `http(s)://host:port/health` (navigator sends `access-control-allow-origin:*`, so no `host_permissions` needed) and resolves `{ok, scheme, status, body, error, mode}` with `mode ∈ dns|refused|timeout|http|cors|unknown`, tries https then http, 4s timeout. Wired to a popup **Test connection** button (`probe'` message handler in `background.js`). Verified live: `https://10.69.1.164:1994` fails, `http://10.69.1.164:1994/health` → 200 `{"ok":true,…}` — confirms reachability. Probe tests = 20a–20e in `test/unit-ff.mjs` (22 total).
 
 ---
 
@@ -65,7 +75,8 @@ Same layout as `chrome-extension/`, shared patterns:
 ```
 firefox-extension/
 ├── manifest.json              — MV3, "Navigator Browser Relay — Firefox"
-├── background.js              — service worker/event page, importScripts, message handlers
+├── background.html            — loads all modules via <script> tags (event page; importScripts is undefined here)
+├── background.js              — event-page wiring + message handlers (no importScripts)
 ├── popup.html / popup.js      — identical UX to Chrome (name, server URL, PIN, status)
 ├── utils/                     — config.js, logger.js, helpers.js  (browser.* compatible)
 ├── core/                      — state.js, connection-manager.js  (unchanged relay)
@@ -185,8 +196,9 @@ Same as Plan 38 §9, plus:
 
 ## Open Questions
 
-- **Extension origin in `-remote-allow-origins`:** exact `moz-extension://<id>` handling — the ID isn't known until first load (XPI signing / temporary load). Need to read the generated ID from `about:debugging` output and pass it into the launcher, or test whether a wildcard origin is accepted.
-- **Session reuse:** does the Remote Agent allow the extension (in-browser process, same user) to open `session.new` on a normal user profile, or does it require an automation-specific launch (locked profile / `-remote-debugging-port` only)? Verify on real Firefox.
+- **Extension origin in `-remote-allow-origins` (resolved 2026-08-29):** exact `moz-extension://<uuid>` required — random per-install UUID (`bug 1257989`), `*` rejected (`NS_ERROR_MALFORMED_URI`). Solved via `ALLOWED_ORIGINS` + `bidiOrigin` self-report (`about:debugging → Internal ID` or `browser.runtime.getURL('')`). Wildcard does NOT work (verified via `WSH2.raw` + live 400 test).
+- **Session reuse (verified 2026-08-29):** Agent allows one `session.new` per process; direct smoke succeeded on normal profile (`y9wf3sa3.default-release`, FF 154.0.1) when no orphan. Orphan = `Maximum number of active sessions` until restart. Hardened harnesses to always `session.end`.
+- **Cross-machine setup:** code on server `10.69.1.164`, Firefox on Mac `10.69.1.178` — must `scp`/pull updated `firefox-extension/` to Mac before reload; Mac uses `socat` LAN forward `10.69.1.178:9222 → 127.0.0.1:9222` for direct probes.
 - **`tabGroups`:** confirm current Firefox tab-group API surface; fallback is `tabs.hide()`.
 - **WebSocket from the extension page:** MV3 background CSP must permit `connect-src ws://127.0.0.1:*` for the BiDi socket (double-check extension CSP).
 - **Container image for building/tests:** navigator container has Chromium only. Unit tests + mock BiDi run in Node/vm (no Firefox needed); real Firefox manual tests happen on the user's host.

@@ -24,7 +24,7 @@ if command -v python3 >/dev/null 2>&1; then
 import zipfile, pathlib
 p = pathlib.Path('.')
 out = pathlib.Path('$OUT')
-files = ['manifest.json','background.js','popup.html','popup.js','utils','core','cdp','features','icons']
+files = ['manifest.json','background.html','background.js','popup.html','popup.js','utils','core','cdp','features','icons']
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for name in files:
         pt = p / name
@@ -53,7 +53,7 @@ else
 import zipfile, pathlib
 p = pathlib.Path('/app/firefox-extension')
 out = pathlib.Path('/app/dist/navigator-firefox-${VERSION}.zip')
-files = ['manifest.json','background.js','popup.html','popup.js','utils','core','cdp','features','icons']
+files = ['manifest.json','background.html','background.js','popup.html','popup.js','utils','core','cdp','features','icons']
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for name in files:
         pt = p / name

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+</head>
+<body>
+  <!-- Firefox MV3 "background.page" runs as an EVENT PAGE (a document with DOM
+       access), NOT a WorkerGlobalScope — so importScripts() is undefined and
+       would crash the background at load (→ "receiving end does not exist"
+       because the message listener never registers). Load every module as a
+       classic <script> tag in dependency order so the shared `var` globals
+       land on the page's global scope, exactly as importScripts did. -->
+  <script src="utils/config.js"></script>
+  <script src="utils/logger.js"></script>
+  <script src="utils/helpers.js"></script>
+  <script src="utils/probe.js"></script>
+  <script src="core/state.js"></script>
+  <script src="cdp/bidi/remote-value.js"></script>
+  <script src="cdp/bidi/mapper.js"></script>
+  <script src="cdp/bidi/bidi-client.js"></script>
+  <script src="core/session-manager.js"></script>
+  <script src="core/connection-manager.js"></script>
+  <script src="cdp/response.js"></script>
+  <script src="cdp/handler/local.js"></script>
+  <script src="cdp/handler/special.js"></script>
+  <script src="cdp/handler/forward.js"></script>
+  <script src="cdp/index.js"></script>
+  <script src="features/tab-list.js"></script>
+  <script src="features/tab-isolation.js"></script>
+  <script src="features/badge.js"></script>
+  <script src="background.js"></script>
+</body>
+</html>

@@ -73,10 +73,10 @@ REQUESTS / FAILURE RATES ─ 8 served · 7 ok · 1 errors
 └────────┴────────┴────┴────────┴───────────┘
 
 BROWSER INSTANCES
-┌──────────────┬───────────┬──────┬─────┬────────┐
-│ backend      │ connected │ tabs │ pid │ spawns │
-│ cloakbrowser │ yes       │    1 │  29 │      1 │
-└──────────────┴───────────┴──────┴─────┴────────┘
+┌──────────────┬───────────┬──────┬──────┐
+│ backend      │ connected │ tabs │ type │
+│ cloakbrowser │ yes       │    1 │ cdp  │
+└──────────────┴───────────┴──────┴──────┘
 ```
 
 With `--json`: `{"health": {...}, "stats": {...}}`.
@@ -88,10 +88,10 @@ NAVIGATOR MONITORING ─ http://localhost:1994 ─ every 2s ─ Ctrl+C to quit
 uptime 00:50:20  rss 113.5 MB  heap 50 MB  sessions 3  calls 2.1/s
 
 BROWSER INSTANCES
-┌──────────────┬─────┬──────┬────────────┐
-│ backend      │ pid │ tabs │ status     │
-│ cloakbrowser │  29 │    1 │ ● running  │
-└──────────────┴─────┴──────┴────────────┘
+┌──────────────┬──────┬────────────┬──────┐
+│ backend      │ tabs │ status     │ type │
+│ cloakbrowser │    1 │ ● running  │ cdp  │
+└──────────────┴──────┴────────────┴──────┘
 ```
 
 **engines** — scheduler ranking:

@@ -32,16 +32,27 @@ var ConnectionManager = (function() {
       if (url.indexOf('/relay') === -1) {
         url = url.replace(/\/$/, '') + '/relay';
       }
-      var alt = null;
-      if (url.indexOf('wss://') === 0) alt = 'ws://' + url.substring(6);
-      else if (url.indexOf('ws://') === 0) alt = 'wss://' + url.substring(5);
-      else if (url.indexOf('https://') === 0) alt = 'http://' + url.substring(8);
-      else if (url.indexOf('http://') === 0) alt = 'https://' + url.substring(7);
-      return alt ? [url, alt] : [url];
+      // Normalize http(s) → ws(s) so new WebSocket() works, and try the plain
+      // (non-TLS) variant first — navigator's relay serves plain HTTP, so a
+      // wss:// probe only fails the TLS handshake and flashes a confusing error.
+      if (url.indexOf('https://') === 0) {
+        return ['ws://' + url.substring(8), 'wss://' + url.substring(8)];
+      }
+      if (url.indexOf('http://') === 0) {
+        return ['ws://' + url.substring(7), 'wss://' + url.substring(7)];
+      }
+      if (url.indexOf('wss://') === 0) {
+        // Explicitly TLS-requested: honor it, but still offer the plain fallback.
+        return ['ws://' + url.substring(5), url];
+      }
+      return [url];
     }
     var hostPort = input.split('/')[0].trim().replace(/:+$/, '');
     if (!hostPort) return [];
-    return ['wss://' + hostPort + '/relay', 'ws://' + hostPort + '/relay'];
+    // Navigator's relay serves plain HTTP (no TLS on the MCP/http port), so
+    // always try the plain `ws://` first — `wss://` fails the TLS handshake
+    // against a non-TLS relay and surfaces a confusing error.
+    return ['ws://' + hostPort + '/relay', 'wss://' + hostPort + '/relay'];
   }
 
   function connect(options, callback) {
@@ -130,6 +141,15 @@ var ConnectionManager = (function() {
                 browserName: browserName,
                 extensionVersion: chrome.runtime.getManifest().version
               };
+              // The Remote Agent allow-lists WebSocket origins exactly
+              // (scheme/host/port). The extension connects from a
+              // "moz-extension://<uuid>" origin — report it so navigator (and
+              // the launch script) can pass --remote-allow-origins correctly.
+              try {
+                var origin = String(chrome.runtime.getURL('') || '')
+                  .replace(/\/$/, '');
+                if (origin) msg.bidiOrigin = origin;
+              } catch (e) { /* ignore */ }
               if (sessionToken) {
                 msg.sessionToken = sessionToken;
                 Logger.info('[Connection] Including session token');
@@ -158,8 +178,14 @@ var ConnectionManager = (function() {
             ws.onerror = function(error) {
               if (State.getWs() !== ws) return;
               Logger.error('[Connection] Error for', wsUrl, ':', error);
-              State.setLastError('WebSocket error for ' + wsUrl);
-              notify({ type: 'connection-status-changed' });
+              // A failed candidate (e.g. a `wss://` TLS probe against a plain
+              // HTTP relay) sets off a fallback to the next candidate. Only
+              // surface a hard error when every candidate has failed — a
+              // pending fallback should not flash a scary error to the user.
+              if (tried >= candidates.length) {
+                State.setLastError('WebSocket error for ' + wsUrl);
+                notify({ type: 'connection-status-changed' });
+              }
             };
 
             ws.onmessage = function(event) {
@@ -284,8 +310,12 @@ var ConnectionManager = (function() {
         State.setConnecting(false);
         State.setPairing(true);
         State.setPinRequired(true);
-        State.setLastError('PIN required from navigator console');
         ClearPending();
+        // A PIN typed while the socket was reconnecting can now be sent.
+        var pendingPin = State.takePendingPin();
+        if (pendingPin) {
+          ConnectionManager.send({ type: 'pin', pin: pendingPin });
+        }
         notify({ type: 'pin-required' });
         break;
 
