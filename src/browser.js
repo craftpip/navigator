@@ -8,12 +8,16 @@ import { getTabTimings } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
 
 /**
- * User-facing display filter for cross-browser target listings (Target.getTargets,
- * /stats). Hides browser chrome and plugin surfaces — chrome://omnibox-popup,
- * chrome://tab-search, chrome://extensions, chrome-extension:// background
- * pages/service workers, about:blank strays — keeping only real web pages.
+ * User-facing display filter for relay (user) browser listings
+ * (Target.getTargets, /stats relay entries). Hides browser chrome and plugin
+ * surfaces — chrome://omnibox-popup, chrome://tab-search, chrome://extensions,
+ * chrome-extension:// background pages/service workers, about:blank strays —
+ * keeping only real web pages.
+ * Agent-owned browsers (builtin Chromium, plain cdp add-ons like
+ * cloakbrowser/lightpanda) report ALL page/tab targets transparently with no
+ * URL filtering, so counts match the raw CDP /json/list.
  * The relay CDP gateway itself still exposes every target to puppeteer; this
- * only controls what the human-facing listings show.
+ * only controls what the human-facing relay listings show.
  */
 export function isVisiblePageUrl(url = "") {
   return typeof url === "string" && /^https?:\/\//i.test(url);
@@ -1272,13 +1276,28 @@ export class BrowserManager {
         tabs = activePages.length;
         openTabs = await Promise.all(activePages.map(async (page) => {
           let title = "Untitled page";
-          try { title = await page.title() || title; } catch {}
+          // Lightpanda's CDP hangs page.title() (~30s) even though
+          // Runtime.evaluate works — race it so one slow title can't trip
+          // the 750ms _instanceStatWithTimeout and report 0 tabs.
+          try {
+            let timer;
+            try {
+              title = await Promise.race([
+                page.title(),
+                new Promise((resolve) => { timer = setTimeout(() => resolve(null), 400); timer.unref?.(); }),
+              ]) || title;
+            } finally {
+              clearTimeout(timer);
+            }
+          } catch {}
+          let pageUrl = "";
+          try { pageUrl = page.url(); } catch {}
           let targetId = null;
           try { targetId = page.target()?.id?.() || null; } catch {}
           const timing = targetId ? getTabTimings(backend, targetId) : null;
           return {
             title,
-            url: page.url(),
+            url: pageUrl,
             targetId,
             lastActiveAt: timing?.lastActiveAt ?? null,
             closesInMs: timing?.closesInMs ?? null,
@@ -1289,10 +1308,10 @@ export class BrowserManager {
         tabs = 0;
         openTabs = [];
       }
-      if (!extra.addOn) {
-        openTabs = openTabs.filter((t) => isVisiblePageUrl(t.url));
-        tabs = openTabs.length;
-      }
+      // Transparent by design: agent-owned browsers (chromium builtin + cdp
+      // add-ons) report every open page including about:blank / chrome://newtab/
+      // so /stats matches the raw CDP target list. Only relay (user) listings
+      // filter via isVisiblePageUrl (see _navigatorCdpStat).
 
       try {
         pid = instance.process()?.pid ?? null;

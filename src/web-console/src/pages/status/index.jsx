@@ -466,8 +466,15 @@ function Drivers({ health, instances, reload, height }) {
           const statusPill = pending ? <Pill tone="warn">PIN required</Pill> : null;
           const typePill = browser.type ? <Pill tone="off" title={browser.type}>{browser.type}</Pill> : null;
           const rawTabs = instance?.openTabs || [];
-          if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
-          const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
+          // Anti-flicker cache: a single slow/timeout poll can briefly report
+          // 0 tabs (e.g. Lightpanda title lookup). Reuse the last non-empty
+          // list only while fresh (10s TTL) so genuine closes/restarts don't
+          // leave ghost tabs under an honest "0 tabs" row text.
+          if (rawTabs.length > 0) prevTabsRef.current[backend] = { tabs: rawTabs, at: Date.now() };
+          const cached = prevTabsRef.current[backend];
+          const cacheFresh = cached && (Date.now() - cached.at < 10000);
+          if (!cacheFresh && cached) delete prevTabsRef.current[backend];
+          const tabsToShow = rawTabs.length > 0 ? rawTabs : (online && cacheFresh ? cached.tabs : []);
           const hasTabs = tabsToShow.length > 0 && online;
           const isExpanded = Boolean(expanded[backend]);
           return (
