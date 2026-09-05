@@ -129,7 +129,7 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_page_op_id ON mcp_calls(page_op_id);`
 ];
 
-export function initDb(dataDir = path.join(process.cwd(), "data")) {
+export function initDb(dataDir = process.env.NAVIGATOR_DATA_DIR || process.env.DATA_DIR || path.join(process.cwd(), "data")) {
   if (db) return db;
   mkdirSync(dataDir, { recursive: true });
   const filePath = path.join(dataDir, "navigator.db");
