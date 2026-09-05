@@ -152,6 +152,11 @@ export class BrowserManager {
     // Add-on browser state (keyed by `addon_${name}`) — lazy CDP connections
     this._addOnState = new Map();
 
+    // Lightweight CDP reachability cache (name -> { at, reachable }) — lets
+    // /health report lazy (never puppeteer-connected) CDP browsers as online
+    // when their /json/list endpoint answers, without holding a connection.
+    this._cdpProbeCache = new Map();
+
     // Shared
     this.engineWorkingWindows = new Map();
     this.pageSlotsInUse = 0;
@@ -654,7 +659,79 @@ export class BrowserManager {
   _isAddOnConnected(name) {
     const entry = this._findAddOnByName(name);
     if (entry && entry.type === "navigator-cdp") return entry.status === "connected";
-    return Boolean(this._addOnState.get(`addon_${name}`)?.browser?.connected);
+    if (this._addOnState.get(`addon_${name}`)?.browser?.connected) return true;
+    // Lazy CDP browsers hold no puppeteer connection until first use — fall
+    // back to the cached /json/list reachability probe (warmed by
+    // getInstanceStats) so /health doesn't report a live endpoint as offline.
+    const cached = this._cdpProbeCache.get(name);
+    if (cached && Date.now() - cached.at < 10000) return Boolean(cached.reachable);
+    return false;
+  }
+
+  _cdpListUrl(cdpUrl) {
+    const raw = String(cdpUrl || "").trim();
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return `${raw.replace(/\/+$/, "")}/json/list`;
+    if (/^wss?:\/\//i.test(raw)) return `${raw.replace(/^ws/i, "http").replace(/\/+$/, "")}/json/list`;
+    return null;
+  }
+
+  async _probeCdpTargets(entry, timeoutMs = 2000) {
+    const url = this._cdpListUrl(entry?.cdpUrl);
+    if (!url) throw new Error("no cdpUrl");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error("unexpected /json/list shape");
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async _cdpStatViaHttp(entry) {
+    const base = {
+      backend: entry.name,
+      pid: null,
+      addOn: true,
+      type: entry.type,
+      cdpUrl: entry.cdpUrl,
+      viaHttp: true
+    };
+    try {
+      const targets = await this._probeCdpTargets(entry);
+      const pages = targets.filter((t) => {
+        const type = String(t?.type || "").toLowerCase();
+        return type === "page" || type === "tab";
+      });
+      this._cdpProbeCache.set(entry.name, { at: Date.now(), reachable: true });
+      return {
+        ...base,
+        connected: true,
+        status: "connected",
+        tabs: pages.length,
+        openTabs: pages.map((t) => ({
+          title: t.title || t.url || "Untitled page",
+          url: t.url || "",
+          targetId: t.id || t.targetId || null,
+          lastActiveAt: null,
+          closesInMs: null,
+          autoClose: false
+        }))
+      };
+    } catch {
+      this._cdpProbeCache.set(entry.name, { at: Date.now(), reachable: false });
+      return {
+        ...base,
+        connected: false,
+        status: "available",
+        tabs: 0,
+        openTabs: []
+      };
+    }
   }
 
   /**
@@ -1086,11 +1163,19 @@ export class BrowserManager {
           statResults.push(this._navigatorCdpStat(entry));
           continue;
         }
-        statResults.push(this._instanceStatWithTimeout(
-          entry.name,
-          this._addOnConnection(entry.name),
-          { addOn: true, cdpUrl: entry.cdpUrl, type: entry.type }
-        ));
+        // Plain CDP add-ons connect lazily — when no puppeteer connection is
+        // held yet, report live tab counts via the lightweight /json/list
+        // HTTP endpoint instead of showing a reachable browser as offline.
+        const conn = this._addOnConnection(entry.name);
+        if (conn?.connected) {
+          statResults.push(this._instanceStatWithTimeout(
+            entry.name,
+            conn,
+            { addOn: true, cdpUrl: entry.cdpUrl, type: entry.type }
+          ));
+        } else {
+          statResults.push(this._cdpStatViaHttp(entry));
+        }
       }
 
       const stats = await Promise.all(statResults);
@@ -1204,7 +1289,10 @@ export class BrowserManager {
         tabs = 0;
         openTabs = [];
       }
-      if (!extra.addOn) openTabs = openTabs.filter((t) => isVisiblePageUrl(t.url));
+      if (!extra.addOn) {
+        openTabs = openTabs.filter((t) => isVisiblePageUrl(t.url));
+        tabs = openTabs.length;
+      }
 
       try {
         pid = instance.process()?.pid ?? null;
