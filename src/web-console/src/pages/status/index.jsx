@@ -89,7 +89,7 @@ function RequestActivityTrend({ trend, range, error, setRange }) {
     <section className="panel request-trend">
       <div className="request-trend-heading">
         <div>
-          <h2>Request activity <span className="sub">incoming requests and engine attempts</span></h2>
+          <h2>Request activity</h2>
           <div className="request-trend-summary">
             <b>{trend?.summary?.total || 0} total</b>
             <span>{trend?.summary?.ok || 0} succeeded</span>
