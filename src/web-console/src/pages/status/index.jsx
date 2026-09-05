@@ -463,9 +463,8 @@ function Drivers({ health, instances, reload, height }) {
                   ? "Offline — default driver not connected"
                   : "Offline — not connected";
           const dotTone = pending ? "warn" : online ? "" : "off";
-          const statusPill = pending
-            ? <Pill tone="warn">PIN required</Pill>
-            : <Pill tone={online ? "ok" : "off"}>{online ? "online" : "offline"}</Pill>;
+          const statusPill = pending ? <Pill tone="warn">PIN required</Pill> : null;
+          const typePill = browser.type ? <Pill tone="off" title={browser.type}>{browser.type}</Pill> : null;
           const rawTabs = instance?.openTabs || [];
           if (rawTabs.length > 0) prevTabsRef.current[backend] = rawTabs;
           const tabsToShow = rawTabs.length > 0 ? rawTabs : (online ? (prevTabsRef.current[backend] || []) : []);
@@ -481,11 +480,10 @@ function Drivers({ health, instances, reload, height }) {
                 onClick={() => hasTabs && toggle(backend)}
                 title={hasTabs ? (isExpanded ? "Hide tabs" : `Show ${tabsToShow.length} tabs`) : undefined}
               >
-                <span className="driver-toggle-chevron" aria-hidden="true">{hasTabs ? (isExpanded ? "▾" : "▸") : ""}</span>
                 <Dot tone={dotTone} />
                 <div className="item-main">
                   <div className="item-title">
-                    {backend} {statusPill}
+                    {backend} {typePill} {statusPill}
                   </div>
                   <div className="item-detail">{detail}</div>
                   {pending && <RelayAuth browser={browser} />}
@@ -908,9 +906,10 @@ function LiveFeed({ feed, enabledEngines, feedMaxHeight }) {
           </label>
         </span>
       }
+      style={feedMaxHeight ? { maxHeight: feedMaxHeight } : undefined}
     >
       {rows.length ? (
-        <div className="feed" style={feedMaxHeight ? { maxHeight: feedMaxHeight } : undefined}>
+        <div className="feed">
           <div className="activity-list">
             {rows.map((entry) => {
               const tone = entry.status === "ok" ? "ok" : entry.status === "fail" || entry.status === "error" ? "fail" : entry.status === "running" ? "running" : "";

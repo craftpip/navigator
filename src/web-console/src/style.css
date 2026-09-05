@@ -317,27 +317,37 @@ html[data-theme="dark"] .mode-switch button.active {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-}
-.trend-drivers > .panel .list {
-  flex: 1;
-  min-height: 0;
+  padding: 0;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--line) var(--panel2);
 }
-.trend-drivers > .panel .list::-webkit-scrollbar {
+.trend-drivers > .panel h2 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  margin: 0;
+  padding: 14px 14px 10px;
+}
+.trend-drivers > .panel .list {
+  flex: none;
+  min-height: auto;
+  padding: 0 14px 14px;
+  overflow: visible;
+}
+.trend-drivers > .panel::-webkit-scrollbar {
   width: 10px;
 }
-.trend-drivers > .panel .list::-webkit-scrollbar-track {
+.trend-drivers > .panel::-webkit-scrollbar-track {
   background: var(--panel2);
 }
-.trend-drivers > .panel .list::-webkit-scrollbar-thumb {
+.trend-drivers > .panel::-webkit-scrollbar-thumb {
   background: var(--line);
   border: 2px solid var(--panel2);
   border-radius: 8px;
 }
-.trend-drivers > .panel .list::-webkit-scrollbar-thumb:hover {
+.trend-drivers > .panel::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
 }
 .request-trend-heading {
@@ -725,19 +735,62 @@ html[data-theme="dark"] .mode-switch button.active {
   grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
   gap: 10px;
 }
+.engine-activity > .panel {
+  padding: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) var(--panel2);
+  min-height: 0;
+}
+.engine-activity > .panel h2 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  margin: 0;
+  padding: 14px 14px 10px;
+}
+.engine-activity > .panel .engine-grid,
+.engine-activity > .panel .feed,
+.engine-activity > .panel .list {
+  padding: 0 14px 14px;
+}
+.engine-activity > .panel .feed {
+  max-height: none;
+  flex: none;
+  min-height: auto;
+  overflow: visible;
+}
+.engine-activity > .panel .empty {
+  padding: 0 14px 14px;
+}
 .engine-activity > .panel:last-child {
   display: flex;
   flex-direction: column;
 }
 .engine-activity > .panel:last-child .feed {
-  flex: 1;
-  min-height: 0;
+  flex: none;
+  min-height: auto;
 }
 .engine-activity > .panel:last-child .empty {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.engine-activity > .panel::-webkit-scrollbar {
+  width: 10px;
+}
+.engine-activity > .panel::-webkit-scrollbar-track {
+  background: var(--panel2);
+}
+.engine-activity > .panel::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border: 2px solid var(--panel2);
+  border-radius: 8px;
+}
+.engine-activity > .panel::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 .list {
   display: flex;
@@ -831,6 +884,8 @@ html[data-theme="dark"] .mode-switch button.active {
 .status-dot {
   flex: none;
   margin-top: 5px;
+  margin-right: 6px;
+  background: var(--green);
 }
 .status-dot.err {
   background: var(--red);
