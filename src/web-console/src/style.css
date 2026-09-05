@@ -313,7 +313,7 @@ html[data-theme="dark"] .mode-switch button.active {
 .trend-drivers .request-trend {
   margin-bottom: 0;
 }
-.trend-drivers > .panel {
+.trend-drivers > .panel:not(.request-trend) {
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -322,7 +322,7 @@ html[data-theme="dark"] .mode-switch button.active {
   scrollbar-width: thin;
   scrollbar-color: var(--line) var(--panel2);
 }
-.trend-drivers > .panel h2 {
+.trend-drivers > .panel:not(.request-trend) h2 {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -330,24 +330,24 @@ html[data-theme="dark"] .mode-switch button.active {
   margin: 0;
   padding: 14px 14px 10px;
 }
-.trend-drivers > .panel .list {
+.trend-drivers > .panel:not(.request-trend) .list {
   flex: none;
   min-height: auto;
   padding: 0 14px 14px;
   overflow: visible;
 }
-.trend-drivers > .panel::-webkit-scrollbar {
+.trend-drivers > .panel:not(.request-trend)::-webkit-scrollbar {
   width: 10px;
 }
-.trend-drivers > .panel::-webkit-scrollbar-track {
+.trend-drivers > .panel:not(.request-trend)::-webkit-scrollbar-track {
   background: var(--panel2);
 }
-.trend-drivers > .panel::-webkit-scrollbar-thumb {
+.trend-drivers > .panel:not(.request-trend)::-webkit-scrollbar-thumb {
   background: var(--line);
   border: 2px solid var(--panel2);
   border-radius: 8px;
 }
-.trend-drivers > .panel::-webkit-scrollbar-thumb:hover {
+.trend-drivers > .panel:not(.request-trend)::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
 }
 .request-trend-heading {
