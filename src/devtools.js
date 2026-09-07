@@ -319,12 +319,28 @@ function isStaleError(err) {
  * clears its stale `sessionForTarget` maps, so a single retry after a short
  * settle restores control and the banner reappears.
  */
+// Backend actually used for the most recent devtools call against each target,
+// captured at use time by withStaleRetry (the real backend driving the action,
+// never args.browser / never a hardcoded default). Read via getLastUsedBackend().
+const lastUsedBackendByTarget = new Map();
+
+function rememberUsedBackend(targetId, backend) {
+  if (!targetId || !backend) return;
+  lastUsedBackendByTarget.set(String(targetId), backend);
+}
+
+export function getLastUsedBackend(targetId) {
+  if (!targetId) return null;
+  return lastUsedBackendByTarget.get(String(targetId)) || null;
+}
+
 async function withStaleRetry(targetId, action) {
   const tid = String(targetId || "").trim();
   if (!tid) throw new Error("targetId is required");
   let state;
   try {
     state = await getTargetState(tid);
+    rememberUsedBackend(tid, state.backend);
     return await action(state);
   } catch (err) {
     if (!isStaleError(err) || closedTargets.has(tid)) throw err;
@@ -339,6 +355,7 @@ async function withStaleRetry(targetId, action) {
     } catch (e) {
       throw err;
     }
+    rememberUsedBackend(tid, state.backend);
     return await action(state);
   }
 }

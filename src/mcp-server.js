@@ -24,7 +24,7 @@ import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSear
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, revokeMcpApiKey, setMcpApiKeyTools } from "./db.js";
-import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState } from "./devtools.js";
+import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
 import { svgExtractor, capturePageAsSvg } from "./svg.js";
@@ -2193,7 +2193,7 @@ async function handleToolCallInner(name, args = {}) {
     let result;
     if (hasTargetId) {
       mark = timer.step("prepare_execution", mark);
-      const pageOpId = recordPageOpStart({ tool: name, url: args.targetId.trim() });
+      const pageOpId = recordPageOpStart({ tool: name, url: args.targetId.trim(), backend: getLastUsedBackend(args.targetId.trim()) });
       try {
         result = await runWithHangGuard(`mcp:${name}`, () =>
           captureTargetScreenshot({
@@ -2208,6 +2208,7 @@ async function handleToolCallInner(name, args = {}) {
           id: pageOpId,
           tool: name,
           url: result.url || args.targetId.trim(),
+          backend: getLastUsedBackend(args.targetId.trim()),
           durationMs: performance.now() - screenshotStartedAt,
           responseChars: result.screenshotBase64?.length
         });
@@ -2216,6 +2217,7 @@ async function handleToolCallInner(name, args = {}) {
           id: pageOpId,
           tool: name,
           url: args.targetId.trim(),
+          backend: getLastUsedBackend(args.targetId.trim()),
           durationMs: performance.now() - screenshotStartedAt,
           ok: false,
           error: String(error?.message || error)
@@ -2797,15 +2799,23 @@ async function handleToolCallInner(name, args = {}) {
 
   if (manager.config.enableDevtoolsMcp && devtoolsToolDefinitions.some((tool) => tool.name === name)) {
     const startedAt = performance.now();
-    // Target.getTargets aggregates across all browsers — it does not run on any
-    // single engine/backend, so we store no backend (pill hidden in Live activity).
-    const devtoolsBackend = name === "Target.getTargets" ? null : (args.browser || "chromium");
+    // Record the browser that was actually used at use time — never a guessed
+    // default. Target.getTargets aggregates across all browsers (no single
+    // backend; pill hidden in Live activity). Everything else: explicit
+    // `browser` arg wins; otherwise the target's real backend captured by
+    // withStaleRetry during the call (getLastUsedBackend).
+    const resolveDevtoolsBackend = (result) =>
+      name === "Target.getTargets"
+        ? null
+        : args.browser
+          ? args.browser
+          : getLastUsedBackend(args.targetId) || (result && result.backend) || null;
     try {
       const result = await runWithHangGuard(`mcp:${name}`, () => handleDevtoolsToolCall(name, args));
       recordPageOp({
         tool: name,
         url: args.url || args.targetId || "",
-        backend: devtoolsBackend,
+        backend: resolveDevtoolsBackend(result),
         durationMs: performance.now() - startedAt,
         responseChars: JSON.stringify(result).length,
         source: "devtools"
@@ -2820,7 +2830,7 @@ async function handleToolCallInner(name, args = {}) {
         durationMs: performance.now() - startedAt,
         ok: false,
         error: String(error?.message || error),
-        backend: devtoolsBackend,
+        backend: resolveDevtoolsBackend(undefined),
         source: "devtools"
       });
       throw error;
