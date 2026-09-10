@@ -22,6 +22,7 @@
 import { WebSocketServer } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
 import { deleteRelaySession, loadRelaySessions, saveRelaySession } from "./db.js";
+import { PLUGIN_PLATFORMS } from "./config.js";
 
 const PIN_EXPIRY_MS = 60_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -363,7 +364,7 @@ export class RelayServer {
         clearTimeout(helloTimer);
         entry = this._ensureEntry(name);
         entry.ws = ws;
-        if (msg.platform === "firefox" || msg.platform === "chrome") entry.platform = msg.platform;
+        if (PLUGIN_PLATFORMS.has(msg.platform)) entry.platform = msg.platform;
         if (typeof msg.extensionVersion === "string") entry.extensionVersion = msg.extensionVersion;
         // The extension reports the exact "moz-extension://<uuid>" origin its
         // BiDi WebSocket connects from — surfaced via status()/stats so the

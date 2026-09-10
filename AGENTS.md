@@ -310,6 +310,24 @@ setsid -f npm run docs:dev </dev/null >/tmp/vitepress-dev.log 2>&1 &
 - Deps live in `docs/node_modules` (vitepress ^1.6.4); if missing, `npm install` inside `docs/`.
 - Foreground runs always die at the tool timeout — never launch a dev server bare.
 
+### Docs site served on port 1994 (`/docs/`)
+
+The VitePress docs can also be built and served **inside the navigator MCP server** at `http://10.69.1.164:1994/docs/` (same port as the web console) — no separate dev-server port needed. This is the **build-and-test workflow**: `docs:dev` on 5431 is for hot-reload authoring; producing a viewable copy on 1994 means building once and serving the static output.
+
+**How it's wired:**
+- `docs/.vitepress/config.mjs` overrides `base: "/docs/"` and `outDir: "../docs-dist"` — so the build output lands in `/www1/navigator/docs-dist/` (a repo subfolder, bind-mounted into the container at `/app/docs-dist`). Default VitePress `outDir` (`.vitepress/dist`) is NOT used.
+- `src/mcp-server.js` serves it: a `docsDistDir` path constant (`process.cwd()/docs-dist`), a `serveDocsAsset(res, pathname)` handler (mirrors the console handler, serves from the dist folder with traversal guard; path under `/docs/` → file, else `index.html`), and a route `url.pathname === "/docs" || startsWith("/docs/")`. `.woff`/`.woff2` content-types were added to `WEB_CONSOLE_CONTENT_TYPES` so font assets load.
+- The server reads straight from the bind-mounted `docs-dist/` on every request, so **a rebuild needs NO server restart** — just swap the files and refresh.
+
+**Rebuild command (run in-container):**
+```bash
+docker exec navigator sh -c "cd /app/docs && npm install --include=dev && npm run docs:build"
+```
+- `npm install --include=dev` is REQUIRED each time — the container entrypoint prunes dev deps (vitepress) on every restart/build, and without vitepress the build fails with `sh: vitepress: not found`.
+- Verify after building: `curl -m 20 -s -o /dev/null -w "%{http_code}\n" http://10.69.1.164:1994/docs/` → 200.
+
+**The `outDir` pitfall:** `outDir` is resolved relative to the project root (`/app/docs`), so it is `../docs-dist` (→ `/app/docs-dist`), NOT `../../docs-dist` (→ `/docs-dist` at the container filesystem root — a stray path outside the bind mount that the server never reads). If docs build output "vanishes" from `/docs/`, check where the latest build wrote to.
+
 ### Running tests
 
 All tests run inside the container only. The entrypoint runs `npm install --omit=dev` on every container start, which prunes dev deps from the bind-mounted host `node_modules` — so reinstall dev deps after **every** restart/build, not just the first time:

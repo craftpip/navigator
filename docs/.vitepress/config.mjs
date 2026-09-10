@@ -5,6 +5,9 @@ export default defineConfig({
   description:
     "MCP server for web search, page extraction, screenshots, and browser automation",
 
+  base: "/docs/",
+  outDir: "../docs-dist",
+
   ignoreDeadLinks: true,
 
   head: [

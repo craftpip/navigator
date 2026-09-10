@@ -417,7 +417,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(fs.readFileSync(envFile, "utf8")).toContain("SEARCH_QUEUE_ESCALATION_FACTOR=3");
     });
 
-    it("returns restartRequired for recreate-apply keys", async () => {
+    it("hot-applies recreate-apply keys — no restart required", async () => {
       const res = await fetch(`${MCP_BASE}/console/config`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -425,8 +425,8 @@ describe("mcp-server HTTP endpoints", () => {
       });
       const body = await res.json();
       expect(body.ok).toBe(true);
-      expect(body.restartRequired).toContain("CHROME_PATH");
-      expect(body.hotApplied).not.toContain("CHROME_PATH");
+      expect(body.hotApplied).toContain("CHROME_PATH");
+      expect(body.restartRequired).not.toContain("CHROME_PATH");
     });
 
     it("rejects unknown variables and invalid values", async () => {

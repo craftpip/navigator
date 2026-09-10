@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# .env is the single source of configuration (bind-mounted at /app/.env).
+# Compose no longer injects environment variables, so load what the container
+# needs before node runs. Values are parsed and exported directly — never
+# evaluated — so unquoted parentheses (BROWSER_USER_AGENT) and quoted JSON
+# (BROWSERS) are safe.
+load_dotenv() {
+  local env_file="${1:-/app/.env}"
+  local line key value stripped
+  [ -f "$env_file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    if [[ "$stripped" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      case "$value" in *" #"*) value="${value%% \#*}" ;; esac
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
+        value="${value:1:${#value}-2}"
+        value="${value//\\\"/\"}"
+        value="${value//\\\\/\\}"
+      elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export "$key=$value"
+    fi
+  done < "$env_file"
+}
+load_dotenv
+
 if [ "${ENABLE_VNC:-0}" = "1" ]; then
   export DISPLAY="${DISPLAY:-:99}"
 

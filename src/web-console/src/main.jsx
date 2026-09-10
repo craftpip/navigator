@@ -21,6 +21,7 @@ function App() {
   const [trend, setTrend] = useState(null);
   const [trendError, setTrendError] = useState("");
   const [snapshot, setSnapshot] = useState({});
+  const [ready, setReady] = useState(false);
   const [paused, setPaused] = useState(false);
   const [feed, setFeed] = useState([]);
   const [history, setHistory] = useState({
@@ -113,15 +114,16 @@ function App() {
         setSnapshot((current) => ({ ...current, ok: false }));
       }
     } finally {
+      if (full) setReady(true);
       loadingRef.current = false;
     }
   };
-  // Initial snapshot, plus a fresh full snapshot whenever returning to the
-  // status dashboard (its data goes stale while other modes idle on the
-  // light heartbeat). Landing directly on tools/keys/hints/manage never
-  // fires the heavy requests at all.
+  // Initial snapshot is always full so the header telemetry (uptime/mem/
+  // sessions) is populated on every page. Non-status modes then idle on the
+  // light heartbeat; returning to the status dashboard refetches a full
+  // snapshot (its data goes stale while other modes idle).
   useEffect(() => {
-    load(mode === "status");
+    load(true);
   }, [mode]);
   useEffect(() => {
     if (paused) return undefined;
@@ -187,6 +189,7 @@ function App() {
       {mode === "status" ? (
         <StatusView
           snapshot={snapshot}
+          ready={ready}
           history={history}
           toggleVnc={toggleVnc}
           vncBusy={vncBusy}
@@ -208,6 +211,7 @@ function App() {
       ) : (
         <StatusView
           snapshot={snapshot}
+          ready={ready}
           history={history}
           toggleVnc={toggleVnc}
           vncBusy={vncBusy}

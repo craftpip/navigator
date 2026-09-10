@@ -139,6 +139,7 @@ var ConnectionManager = (function() {
               var msg = {
                 type: 'navigator-hello',
                 browserName: browserName,
+                platform: 'firefox',
                 extensionVersion: chrome.runtime.getManifest().version
               };
               // The Remote Agent allow-lists WebSocket origins exactly

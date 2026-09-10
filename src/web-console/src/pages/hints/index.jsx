@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { editorFromPath } from "../../lib/routing.js";
 import { request } from "../../lib/request.js";
-import { Empty } from "../../components/ui.jsx";
+import { Empty, Loading, Spinner } from "../../components/ui.jsx";
 import { emptyHint } from "./constants.js";
 import { HintEditorPane } from "./HintEditor.jsx";
-import { HintGuide } from "./HintGuide.jsx";
 
 export function Hints() {
   const [state, setState] = useState(null);
@@ -121,7 +120,6 @@ export function Hints() {
           {state ? `${state.hintsPath} · ${state.count} hint${state.count === 1 ? "" : "s"}` : "loading…"}
         </span>
       </h2>
-      <HintGuide />
       <div className="manage-toolbar">
         <input
           className="manage-search"
@@ -140,7 +138,7 @@ export function Hints() {
       {error ? (
         <Empty>{error}</Empty>
       ) : !state ? (
-        <Empty>Loading hints…</Empty>
+        <Loading>Loading hints…</Loading>
       ) : (
         <div className="hints-list">
           <div className="hints-row hints-heading">
@@ -197,7 +195,7 @@ export function Hints() {
                     disabled={deleting !== null}
                     onClick={() => removeHint(index)}
                   >
-                    {deleting === index ? "Deleting…" : "Delete"}
+                    {deleting === index ? <><Spinner small /> Deleting…</> : "Delete"}
                   </button>
                   ) : null}
                 </span>

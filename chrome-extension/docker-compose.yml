@@ -1,0 +1,41 @@
+name: navigator-chrome-dev
+
+# Dedicated, independent Chromium for developing + testing the Navigator Browser
+# Relay Chrome extension. Runs in its own container so it never interferes with
+# the Chromium inside the navigator server container.
+#
+#   cd chrome-extension
+#   docker compose up -d --build         # build + start
+#   docker compose logs -f dev-chrome    # watch (PIN is printed here when pairing)
+#
+# Full dev/test cycle: see README.md in this folder.
+services:
+  dev-chrome:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: navigator-dev-chrome
+    image: navigator-dev-browser:latest
+    environment:
+      # Where the extension connects back to (navigator's relay). Override per env.
+      NAVIGATOR_URL: ${NAVIGATOR_URL:-http://10.69.1.164:1994}
+      DISPLAY: ":99"
+      BROWSER_NAME: ${BROWSER_NAME:-dev-chrome}
+    volumes:
+      # The extension source — edit files on the host, reload in Chrome.
+      - ./:/app/extension
+      # Live entrypoint/scripts — edit on the host, restart picks them up.
+      - ./scripts:/app/scripts
+    networks:
+      - navigator_default
+    ports:
+      # CDP endpoint navigator uses to drive this dev Chrome.
+      # NOTE: host :9222 is taken by cloak-browser — use 9333 here (in-container
+      # Chromium still listens on 9222); override with CHROME_CDP_PORT if needed.
+      - "${CHROME_CDP_PORT:-9333}:9222"
+      # Optional VNC to SEE the headed Chromium (noVNC at :6080). Not required.
+      - "5900:5900"
+
+networks:
+  navigator_default:
+    external: true

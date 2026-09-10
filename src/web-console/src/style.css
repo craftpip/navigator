@@ -91,7 +91,7 @@ header,
 .tools {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 6px;
 }
 
 /* Header — logo/stats on the left, mode + option buttons in one right-aligned group */
@@ -211,7 +211,7 @@ p,
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--panel);
   color: var(--blue);
   cursor: pointer;
@@ -238,6 +238,9 @@ p,
 .button.danger {
   color: var(--red);
 }
+.hdr-right .button {
+  border-radius: 50px;
+}
 .remote-desktop-actions {
   display: inline-flex;
   flex: none;
@@ -249,10 +252,10 @@ p,
   margin-left: -1px;
 }
 .remote-desktop-actions .button:first-child {
-  border-radius: 4px 0 0 4px;
+  border-radius: 50px 0 0 50px;
 }
 .remote-desktop-actions .button:last-child {
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 50px 50px 0;
 }
 .remote-desktop-actions .button:focus-visible {
   position: relative;
@@ -266,7 +269,7 @@ p,
 .mode-switch {
   display: inline-flex;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 50px;
   overflow: hidden;
 }
 .mode-switch button {
@@ -750,6 +753,7 @@ html[data-theme="dark"] .mode-switch button.active {
   margin: 0;
   padding: 14px 14px 10px;
 }
+.engine-activity > .panel .engine-summary,
 .engine-activity > .panel .engine-grid,
 .engine-activity > .panel .feed,
 .engine-activity > .panel .list {
@@ -862,7 +866,7 @@ html[data-theme="dark"] .mode-switch button.active {
   white-space: nowrap;
 }
 .item-title .pill + .pill {
-  margin-left: 6px;
+  margin-left: -7px;
 }
 .item-title .pill + .driver-roles {
   margin-left: 6px;
@@ -873,6 +877,65 @@ html[data-theme="dark"] .mode-switch button.active {
   align-items: flex-end;
   gap: 4px;
   flex: none;
+}
+.driver-menu {
+  position: relative;
+}
+.driver-menu-btn {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font: 600 16px var(--sans);
+  line-height: 1;
+  padding: 4px 6px;
+  margin: -2px 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.driver-menu-btn:hover,
+.driver-menu-btn[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--panel2);
+}
+.driver-menu-btn:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.driver-menu-popup {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 120px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.18);
+  padding: 4px;
+  z-index: 30;
+}
+.driver-menu-popup .menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  height: auto;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  border-radius: 4px;
+  color: var(--red);
+  font: 700 12px var(--sans);
+  white-space: nowrap;
+}
+.driver-menu-popup .menu-item:hover:not(:disabled) {
+  background: var(--red-bg);
+}
+.driver-menu-popup .menu-item:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.driver-menu-popup .menu-item:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 .driver-item .driver-tabs {
   flex-basis: 100%;
@@ -1433,6 +1496,17 @@ html[data-theme="dark"] .mode-switch button.active {
   letter-spacing: 0.04em;
   vertical-align: 1px;
 }
+.feed-key {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--line));
+  border-radius: 3px;
+  color: var(--blue);
+  font: 700 9px var(--mono);
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
 .feed-response {
   color: var(--muted);
   margin-top: 6px;
@@ -1494,6 +1568,28 @@ html[data-theme="dark"] .mode-switch button.active {
   to {
     transform: rotate(360deg);
   }
+}
+.activity-spinner.small {
+  width: 9px;
+  height: 9px;
+  border-width: 1.3px;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
+.loading-block {
+  padding: 14px;
+  color: var(--muted);
+  font: 700 12px var(--sans);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.loading-block .activity-spinner {
+  width: 14px;
+  height: 14px;
+  margin-right: 0;
+  vertical-align: -2px;
+  flex: none;
 }
 .feed-response .activity-spinner {
   margin-right: 5px;
@@ -2023,6 +2119,20 @@ select.config-input option {
   opacity: 0.6;
   padding: 4px 0;
 }
+.pp-card-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 2px;
+}
+.pp-card-roles {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+.pp-card-edit {
+  margin-top: 2px;
+}
 .pp-card-actions {
   display: flex;
   gap: 4px;
@@ -2077,6 +2187,42 @@ select.config-input option {
   line-height: 1.4;
   min-height: 32px;
   resize: vertical;
+}
+.browser-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.browser-form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.browser-form-label {
+  flex: 0 0 130px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: right;
+}
+.browser-form-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.browser-form-field .config-input {
+  font-size: 11px;
+  padding: 4px 6px;
+  min-width: 0;
+  width: 100%;
+}
+.browser-checkbox-group {
+  flex-wrap: wrap;
+  padding: 2px 0;
 }
 .pp-checkbox-group {
   display: flex;
@@ -2557,6 +2703,15 @@ select.config-input option {
 .api-key-modal-actions {
   justify-content: flex-end;
 }
+.api-key-modal-footer {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  font: 11px var(--sans);
+}
 .api-key-name-field {
   display: grid;
   gap: 5px;
@@ -2620,7 +2775,7 @@ select.config-input option {
 }
 .api-key-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 78px 66px;
+  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 78px 116px;
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -2657,6 +2812,15 @@ select.config-input option {
 }
 .api-key-row .button {
   justify-self: end;
+}
+.api-key-row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.api-key-row-actions .button {
+  justify-self: auto;
+  white-space: nowrap;
 }
 .api-key-row small {
   color: var(--muted);

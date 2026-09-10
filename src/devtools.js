@@ -2579,6 +2579,33 @@ export async function handleDevtoolsToolCall(name, args = {}) {
 }
 
 export function formatDevtoolsToolResponse(name, payload) {
+  if (name === "Target.getTargets" && payload && Array.isArray(payload.targets)) {
+    // Markdown, grouped by ownership. Each target's `backend` field is its
+    // browser name (the same names list_browsers reports), so the render uses
+    // it as the browser label — not a backend identity.
+    const groups = [];
+    for (const ownership of ["user", "agent"]) {
+      const targets = payload.targets.filter((t) => (t.ownership === "user" ? "user" : "agent") === ownership);
+      if (targets.length) groups.push([ownership, targets]);
+    }
+    const lines = [name];
+    for (const [ownership, targets] of groups) {
+      lines.push("", `## ${ownership} — ${targets.length} target${targets.length === 1 ? "" : "s"}`);
+      targets.forEach((t, index) => {
+        lines.push(`${index + 1}. **${t.backend}** — ${t.title || t.url || "(untitled)"}`);
+        lines.push(`   url: ${t.url || "about:blank"}`);
+        lines.push(`   targetId: \`${t.targetId}\``);
+      });
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: lines.join("\n")
+        }
+      ]
+    };
+  }
   const lines = [name];
   lines.push("", "```json", JSON.stringify(payload, null, 2), "```");
   return {

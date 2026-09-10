@@ -234,6 +234,10 @@ export function createMcpApiKey({ name, secret, allowedTools = null }) {
   return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools FROM api_keys WHERE id = ?").get(result.lastInsertRowid);
 }
 
+export function renameMcpApiKey(id, name) {
+  return getDb().prepare("UPDATE api_keys SET name = ? WHERE id = ?").run(name, id).changes > 0;
+}
+
 export function revokeMcpApiKey(id) {
   return getDb().prepare("DELETE FROM api_keys WHERE id = ?").run(id).changes > 0;
 }

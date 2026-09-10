@@ -224,7 +224,8 @@ export function getRecentActivity({ sinceId = 0, sinceOpId = 0, limit = 100, inc
   const attemptStmt = db.prepare("SELECT * FROM engine_attempts WHERE search_id = ? ORDER BY id");
   const entries = searches.map((search) => {
     const { response_preview, ...rest } = search;
-    return { ...rest, attempts: attemptStmt.all(search.id) };
+    const keyInfo = keyInfoFromCall(findMcpCallForEntry({ ts: search.ts, tool: "web_search" }));
+    return { ...rest, attempts: attemptStmt.all(search.id), ...keyInfo };
   });
   let pageOps = [];
   if (includePageOps) {
@@ -232,7 +233,10 @@ export function getRecentActivity({ sinceId = 0, sinceOpId = 0, limit = 100, inc
       .prepare("SELECT * FROM page_ops WHERE id > ? OR ts >= ? ORDER BY id DESC LIMIT ?")
       .all(Number(sinceOpId) || 0, recentCutoff, Math.min(500, Math.max(1, Number(limit) || 100)));
     // Strip preview for polling — detail endpoint serves it on demand
-    pageOps = pageOps.map(({ response_preview, ...rest }) => rest);
+    pageOps = pageOps.map(({ response_preview, ...rest }) => {
+      const keyInfo = keyInfoFromCall(findMcpCallForEntry({ ts: rest.ts, tool: rest.tool }));
+      return { ...rest, ...keyInfo };
+    });
   }
   return { entries, pageOps };
 }
@@ -278,6 +282,24 @@ export function getMcpCallById(id) {
   return getDb().prepare("SELECT * FROM mcp_calls WHERE id = ?").get(Number(id) || 0) || null;
 }
 
+function keyInfoFromCall(call) {
+  if (!call) return { api_key_id: null, api_key_name: null, api_key_preview: null };
+  return {
+    api_key_id: call.api_key_id ?? null,
+    api_key_name: call.api_key_name || null,
+    api_key_preview: call.api_key_preview || null,
+  };
+}
+
+function findMcpCallForEntry({ ts, tool }) {
+  if (!ts || !tool) return null;
+  return (
+    getDb()
+      .prepare("SELECT * FROM mcp_calls WHERE tool = ? AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1")
+      .get(tool, ts - 10000, ts + 10000, ts) || null
+  );
+}
+
 export function getMcpCallForActivity(key) {
   // key is s-<id> or p-<id>
   if (typeof key !== "string") return null;
@@ -287,7 +309,7 @@ export function getMcpCallForActivity(key) {
     if (direct) return direct;
     const search = getDb().prepare("SELECT ts FROM searches WHERE id = ?").get(searchId);
     if (search) {
-      return getDb().prepare("SELECT * FROM mcp_calls WHERE tool = 'web_search' AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1").get(search.ts - 10000, search.ts + 10000, search.ts) || null;
+      return findMcpCallForEntry({ ts: search.ts, tool: "web_search" }) || null;
     }
     return null;
   }
@@ -297,7 +319,7 @@ export function getMcpCallForActivity(key) {
     if (direct) return direct;
     const op = getDb().prepare("SELECT ts, tool FROM page_ops WHERE id = ?").get(pageOpId);
     if (op) {
-      return getDb().prepare("SELECT * FROM mcp_calls WHERE tool = ? AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1").get(op.tool, op.ts - 10000, op.ts + 10000, op.ts) || null;
+      return findMcpCallForEntry({ ts: op.ts, tool: op.tool }) || null;
     }
     return null;
   }

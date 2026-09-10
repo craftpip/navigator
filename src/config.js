@@ -260,13 +260,18 @@ export function parseBrowsersEnv(raw) {
     }
 
     // Plugin identify the navigator-cdp extension kind. "auto" infers from the
-    // live connection (hello.platform or browserName).
+    // live connection (hello.platform or browserName). The set matches what the
+    // relay extensions report: firefox, plus every Chromium-based browser the
+    // Chrome extension can detect (chrome, chromium, edge, opera, vivaldi, brave).
     const plugin = entry.plugin === undefined || entry.plugin === null
       ? "auto"
       : (typeof entry.plugin === "string" ? String(entry.plugin).trim().toLowerCase() : "");
-    if (plugin !== "auto" && plugin !== "chrome" && plugin !== "firefox") {
+    if (plugin !== "auto" && !PLUGIN_PLATFORMS.has(plugin)) {
       throw new Error(
-        `BROWSERS browser "${name}" has an unknown plugin "${plugin}" — valid plugins: auto, chrome, firefox`
+        `BROWSERS browser "${name}" has an unknown plugin "${plugin}" — valid plugins: ${[
+          "auto",
+          ...PLUGIN_PLATFORMS,
+        ].join(", ")}`
       );
     }
 
@@ -350,6 +355,12 @@ export async function resolveChromePath() {
 }
 
 const headlessDefault = !process.env.DISPLAY;
+// The browser kinds the relay extensions report in navigator-hello.platform:
+// firefox (from the BiDi extension) plus every Chromium-based browser the
+// Chrome extension can detect (chrome/chromium/edge/opera/vivaldi/brave).
+export const PLUGIN_PLATFORMS = Object.freeze(new Set([
+  "chrome", "chromium", "edge", "opera", "vivaldi", "brave", "firefox",
+]));
 export const DEFAULT_MAX_CHARS = parseInteger(process.env.WEB_FETCH_MAX_CHARS, 90000);
 export const DEFAULT_SEARCH_ENABLED_ENGINES = Object.freeze([
   "duckduckgo_api",

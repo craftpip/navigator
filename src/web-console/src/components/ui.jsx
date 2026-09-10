@@ -25,6 +25,21 @@ export function Empty({ children }) {
   return <div className="empty">{children}</div>;
 }
 
+export function Spinner({ small }) {
+  return (
+    <span className={`activity-spinner${small ? " small" : ""}`} aria-hidden="true" />
+  );
+}
+
+export function Loading({ children }) {
+  return (
+    <div className="loading-block">
+      <Spinner />
+      {children}
+    </div>
+  );
+}
+
 export function Trend({ label, values, color }) {
   if (values.length < 2)
     return (

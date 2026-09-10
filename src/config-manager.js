@@ -1,6 +1,10 @@
-import { parseApiKeys, parseBoolean, parseEngines, parsePostProcessorModels, parseToolList } from "./config.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseApiKeys, parseBoolean, parseBrowsersEnv, parseEngines, parsePostProcessorModels, parseToolList } from "./config.js";
+import { clearDomainHintCache } from "./domain-hints.js";
 
 const WAIT_UNTIL_VALUES = new Set(["load", "domcontentloaded", "networkidle0", "networkidle2"]);
+const defaultHintsPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "domain-hints.json");
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -54,6 +58,14 @@ function parseWithType(type, entry, raw) {
 
 export function validateConfigValue(entry, raw) {
   if (!entry) return { valid: false, error: "unknown variable" };
+  if (entry.key === "BROWSERS") {
+    try {
+      parseBrowsersEnv(String(raw));
+      return { valid: true, value: String(raw) };
+    } catch (error) {
+      return { valid: false, error: error?.message || "invalid BROWSERS value" };
+    }
+  }
   return parseWithType(entry.type, entry, raw);
 }
 
@@ -158,11 +170,46 @@ const HOT_APPLYERS = {
   ENABLE_HANG_RESTART: (config, value) => { config.enableHangRestart = value; },
   HANG_RESTART_TIMEOUT_MS: (config, value) => { config.hangRestartTimeoutMs = value; },
   ENABLE_VNC: (config, value) => { config.vncEnabled = value; },
+  VNC_PORT: (config, value) => { config.vncPort = value; },
+  NOVNC_PORT: (config, value) => { config.novncPort = value; },
   MCP_API_KEYS: (config, value) => { config.mcpApiKeys = value; },
   MCP_ALLOW_UNAUTHENTICATED: (config, value) => { config.mcpAllowUnauthenticated = value; },
   POST_PROCESSOR_MODELS: (config, value) => {
     config.postProcessorModels = parsePostProcessorModels(value) || [];
-  }
+  },
+  BROWSERS: (config, value) => {
+    config.browsers = parseBrowsersEnv(String(value));
+  },
+  HEADLESS: (config, value) => { config.headless = value; },
+  CHROME_PATH: (config, value) => { config.chromePath = String(value); },
+  CHROME_USER_DATA_DIR: (config, value) => { config.chromeUserDataDir = String(value); },
+  CHROME_PROFILE_DIR: (config, value) => { config.chromeProfileDir = String(value); },
+  PRELAUNCH_BROWSER: (config, value) => { config.prelaunchBrowser = value; },
+  STARTUP_URL: (config, value) => { config.startupUrl = String(value); },
+  BROWSER_USER_AGENT: (config, value) => { config.userAgent = String(value); },
+  SEARCH_QUEUE_ERROR_GAP_PERCENTILE: (config, value) => { config.searchQueueErrorGapPercentile = Math.min(1, value); },
+  SEARCH_QUEUE_ERROR_GAP_SAFETY: (config, value) => { config.searchQueueErrorGapSafety = Math.max(1, value); },
+  SEARCH_QUEUE_DECAY_PER_SUCCESS: (config, value) => { config.searchQueueDecayPerSuccess = Math.min(1, value); },
+  SEARCH_QUEUE_PROFILE_PATH: (config, value) => { config.searchQueueProfilePath = String(value); },
+  SEARCH_QUEUE_W_SUCCESS: (config, value) => { config.searchQueueWSuccess = value; },
+  SEARCH_QUEUE_W_RESULTS: (config, value) => { config.searchQueueWResults = value; },
+  SEARCH_QUEUE_W_STABILITY: (config, value) => { config.searchQueueWStability = value; },
+  SEARCH_QUEUE_W_RECENCY: (config, value) => { config.searchQueueWRecency = value; },
+  SEARCH_QUEUE_W_RECOVERY: (config, value) => { config.searchQueueWRecovery = value; },
+  DOMAIN_HINTS_PATH: (config, value) => {
+    const p = String(value || "").trim();
+    config.domainHintsPath = p ? path.resolve(p) : defaultHintsPath;
+    clearDomainHintCache();
+  },
+  ENABLE_WEB_CONSOLE: (config, value) => { config.enableWebConsole = value; },
+  ENABLE_HTTP_HEALTH: (config, value) => { config.enableHttpHealth = value; },
+  ENABLE_HTTP_MCP: (config, value) => { config.enableHttpMcp = value; },
+  ENABLE_STDIO_MCP: (config, value) => { config.enableStdioMcp = value; },
+  ENABLE_DEVTOOLS_MCP: (config, value) => { config.enableDevtoolsMcp = value; },
+  MCP_API_PORT: (config, value) => { config.mcpApiPort = value; },
+  MCP_API_HOST: (config, value) => { config.mcpApiHost = String(value); },
+  ENABLE_SCREENSHOT_DOWNLOAD_LINK: (config, value) => { config.enableScreenshotDownloadLink = value; },
+  ENABLE_SCREENSHOT_PATH: (config, value) => { config.screenshotPathPrefix = String(value || "").trim() || null; }
 };
 
 export function hotApplyConfig(config, key, value) {

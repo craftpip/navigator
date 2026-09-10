@@ -15,13 +15,18 @@ export function Layout({
   toggleVnc,
   vncBusy,
 }) {
-  const [dark, setDark] = useState(
-    () => localStorage.getItem("navigator-theme") === "dark",
+  const [theme, setTheme] = useState(
+    () =>
+      localStorage.getItem("navigator-theme") ||
+      (typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"),
   );
   useEffect(() => {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-    localStorage.setItem("navigator-theme", dark ? "dark" : "light");
-  }, [dark]);
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("navigator-theme", theme);
+  }, [theme]);
   const status = telemetry.ok ? "ok" : "off";
   const narrow = useNarrow(720);
   return (
@@ -86,8 +91,34 @@ export function Layout({
               Back to console
             </a>
           )}
-          <button className="button" onClick={() => setDark(!dark)}>
-            {dark ? "Light" : "Dark"}
+          <button
+            className="button theme-toggle"
+            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            title={`Theme: ${theme}`}
+            aria-label={`Theme: ${theme}`}
+          >
+            {theme === "light" ? (
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <circle cx="8" cy="8" r="3.5" fill="currentColor" />
+                <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+                  <line x1="8" y1="1.5" x2="8" y2="3" />
+                  <line x1="8" y1="13" x2="8" y2="14.5" />
+                  <line x1="1.5" y1="8" x2="3" y2="8" />
+                  <line x1="13" y1="8" x2="14.5" y2="8" />
+                  <line x1="3.5" y1="3.5" x2="4.5" y2="4.5" />
+                  <line x1="11.5" y1="11.5" x2="12.5" y2="12.5" />
+                  <line x1="12.5" y1="3.5" x2="11.5" y2="4.5" />
+                  <line x1="4.5" y1="11.5" x2="3.5" y2="12.5" />
+                </g>
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path
+                  d="M13.6 9.8A5.6 5.6 0 0 1 6.2 2.4a5.6 5.6 0 1 0 7.4 7.4z"
+                  fill="currentColor"
+                />
+              </svg>
+            )}
           </button>
           {toggleVnc && (
             vncBusy ? (

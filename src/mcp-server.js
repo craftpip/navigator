@@ -23,7 +23,7 @@ import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
-import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, revokeMcpApiKey, setMcpApiKeyTools } from "./db.js";
+import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools } from "./db.js";
 import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
@@ -39,6 +39,9 @@ const PACKAGE_JSON = require("../package.json");
 
 const webConsoleDir = path.join(process.cwd(), "src", "web-console", "dist");
 const webConsoleIndexPath = path.join(webConsoleDir, "index.html");
+
+const docsDistDir = path.join(process.cwd(), "docs-dist");
+const docsDistIndexPath = path.join(docsDistDir, "index.html");
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
@@ -69,7 +72,9 @@ const WEB_CONSOLE_CONTENT_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",
-  ".svg": "image/svg+xml"
+  ".svg": "image/svg+xml",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2"
 };
 
 const CONSOLE_ENGINE_REGISTRY = SUPPORTED_ENGINES.map((id) => {
@@ -378,6 +383,34 @@ async function serveWebConsoleAsset(res, pathname) {
   }
 }
 
+async function serveDocsAsset(res, pathname) {
+  const docsPrefix = "/docs/";
+  const relativePath = pathname.startsWith(docsPrefix)
+    ? pathname.slice(docsPrefix.length)
+    : "";
+  const assetPath = path.resolve(docsDistDir, relativePath || "index.html");
+  if (!assetPath.startsWith(`${docsDistDir}${path.sep}`) && assetPath !== docsDistIndexPath) {
+    sendJson(res, 403, { ok: false, error: "Invalid docs asset path" });
+    return;
+  }
+
+  try {
+    const content = await fs.readFile(assetPath);
+    const extension = path.extname(assetPath);
+    res.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": WEB_CONSOLE_CONTENT_TYPES[extension] || "application/octet-stream"
+    });
+    res.end(content);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      sendJson(res, 404, { ok: false, error: "Docs not available. Run docs build inside the container." });
+      return;
+    }
+    throw error;
+  }
+}
+
 function setCorsHeaders(res) {
   res.setHeader("access-control-allow-origin", "*");
   res.setHeader("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -573,6 +606,19 @@ async function handleConsoleApiKeys(manager, body) {
     return getConsoleApiKeysPayload(manager);
   }
 
+  if (action === "rename") {
+    const id = Number(body?.id);
+    const name = String(body?.name || "").trim();
+    if (!name || name.length > 80) {
+      return { ok: false, error: "Key name must be between 1 and 80 characters" };
+    }
+    if (!Number.isInteger(id) || !renameMcpApiKey(id, name)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    syncMcpApiKeys(manager);
+    return getConsoleApiKeysPayload(manager);
+  }
+
   if (action === "set_tools") {
     const id = Number(body?.id);
     const availableTools = new Set(getToolGroups().flatMap((group) => group.tools));
@@ -641,7 +687,8 @@ async function applyConfigUpdates(manager, body) {
       }
       const parsed = validateConfigValue(entry, rawValue);
       if (!parsed.valid) {
-        payload.invalid.push({ key, error: `invalid value for ${entry.type}` });
+        const detail = parsed.error ? ` — ${parsed.error}` : "";
+        payload.invalid.push({ key, error: `invalid value for ${entry.type}${detail}` });
         continue;
       }
       validated.push({ key, entry, parsed });
@@ -677,6 +724,7 @@ async function applyConfigUpdates(manager, body) {
         if (entry && entry.applies === "hot") {
           hotApplyConfig(manager.config, key, entry.fallback);
           payload.hotApplied.push(`${key}→default`);
+          delete process.env[key];
         } else {
           payload.restartRequired.push(`${key}→default`);
         }
@@ -700,8 +748,6 @@ async function applyConfigUpdates(manager, body) {
         const key = String(rawKey).toUpperCase();
         if (changedKeys.has(key)) {
           process.env[key] = String(rawValue);
-          const entry = CONFIG_SCHEMA.find((s) => s.key === key);
-          if (entry) hotApplyConfig(manager.config, key, rawValue);
         }
       }
     }
@@ -2745,32 +2791,66 @@ async function handleToolCallInner(name, args = {}) {
   if (name === "list_browsers") {
     const manager = await getBrowserManager();
     const effective = manager._effectiveAddOns();
-    const browsers = [
-      {
-        name: "chromium",
-        role: manager.config.browsers?.find((b) => b.name === "chromium")?.role || ["default"],
-        type: "builtin",
-        ownership: browserOwnership("builtin"),
-        connected: Boolean(manager.browser?.connected),
-        status: manager.browser?.connected ? "connected" : "disconnected"
-      },
-      ...effective.map((b) => ({
-        name: b.name,
-        role: b.role,
-        type: b.type,
-        ownership: browserOwnership(b.type),
-        plugin: b.plugin,
-        configured: b.configured,
-        status: b.status,
-        paired: b.paired ?? (b.type === "navigator-cdp" ? relayServer.isPaired(b.name) : undefined),
-        connected: b.type === "cdp" ? manager._isAddOnConnected(b.name) : b.status === "connected",
-        ...(b.type === "navigator-cdp"
-          ? { cdpUrl: relayServer.gatewayWsUrl(b.name) }
-          : b.cdpUrl ? { cdpUrl: b.cdpUrl } : {})
-      }))
-    ];
+    const effectiveByName = new Map(effective.map((b) => [b.name, b]));
+    // Priority order = BROWSERS array order (same as the console's browser
+    // drivers panel), with dynamic relay registrations appended after configured
+    // entries — never add-on registration order.
+    const ordered = [];
+    for (const cfg of manager.config.browsers) {
+      if (!cfg.addOn) {
+        ordered.push({
+          name: cfg.name,
+          ownership: browserOwnership("builtin"),
+          plugin: cfg.plugin,
+          status: manager.browser?.connected ? "connected" : "disconnected",
+          paired: undefined,
+          connected: Boolean(manager.browser?.connected)
+        });
+      } else {
+        const eff = effectiveByName.get(cfg.name);
+        if (!eff) continue;
+        ordered.push({
+          name: eff.name,
+          ownership: browserOwnership(eff.type),
+          plugin: eff.plugin,
+          status: eff.status,
+          paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
+          connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
+        });
+      }
+    }
+    for (const eff of effective) {
+      if (!manager.config.browsers.some((c) => c.name === eff.name)) {
+        ordered.push({
+          name: eff.name,
+          ownership: browserOwnership(eff.type),
+          plugin: eff.plugin,
+          status: eff.status,
+          paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
+          connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
+        });
+      }
+    }
+    const tabsByBrowser = new Map(
+      (await manager.getInstanceStats()).map((s) => [s.backend, s.tabs])
+    );
+    const rows = ordered.map((b, index) => {
+      const state = b.status === "auth_pending"
+        ? "PENDING PIN authorization — unpaired incoming request"
+        : b.connected
+          ? "connected"
+          : b.paired
+            ? "offline — paired, awaiting connection"
+            : "offline — not connected";
+      const detected = b.plugin && b.plugin !== "auto" ? ` (${b.plugin})` : "";
+      const rawTabs = tabsByBrowser.get(b.name);
+      const tabs = b.connected && typeof rawTabs === "number" ? rawTabs : "—";
+      return `| ${index + 1} | **${b.name}** | ${tabs} | ${b.ownership} | ${state}${detected} |`;
+    });
     timer.end({ status: "ok" });
-    return asMarkdownContent(JSON.stringify({ browsers }, null, 2));
+    return asMarkdownContent(
+      `| Priority | Browser | Tabs | Ownership | Status |\n|----------|---------|------|-----------|--------|\n${rows.join("\n")}`
+    );
   }
 
   if (name === "web_page_links") {
@@ -3540,6 +3620,11 @@ async function maybeStartHttpServer(managerOverride) {
           return;
         }
         await serveWebConsoleAsset(res, url.pathname);
+        return;
+      }
+
+      if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
+        await serveDocsAsset(res, url.pathname);
         return;
       }
 

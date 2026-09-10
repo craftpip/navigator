@@ -3,6 +3,30 @@ var ConnectionManager = (function() {
   var _listeners = [];
   var _intentionalDisconnect = false;
 
+  // Identify which Chromium-based browser this extension is running in.
+  // Edge/Opera/Vivaldi/Chromium mark their UA distinctly; Brave deliberately
+  // mimics Chrome's UA, so it must be probed via navigator.brave.isBrave()
+  // (async, resolves to true only inside Brave).
+  function detectPlatform(done) {
+    var ua = String(navigator.userAgent || '');
+    var platform = 'chrome';
+    if (/Edg\//.test(ua)) platform = 'edge';
+    else if (/OPR\//.test(ua)) platform = 'opera';
+    else if (/Vivaldi\//.test(ua)) platform = 'vivaldi';
+    else if (/Chromium\//.test(ua)) platform = 'chromium';
+    if (platform === 'chrome' && navigator.brave && typeof navigator.brave.isBrave === 'function') {
+      try {
+        Promise.resolve(navigator.brave.isBrave()).then(function (isBrave) {
+          done(isBrave ? 'brave' : 'chrome');
+        }, function () {
+          done('chrome');
+        });
+        return;
+      } catch (e) {}
+    }
+    done(platform);
+  }
+
   function get() {
     return _connection;
   }
@@ -135,17 +159,20 @@ var ConnectionManager = (function() {
               Config.saveServerUrl(rawUrl);
               notify({ type: 'connection-status-changed' });
 
-              var msg = {
-                type: 'navigator-hello',
-                browserName: browserName,
-                extensionVersion: chrome.runtime.getManifest().version
-              };
-              if (sessionToken) {
-                msg.sessionToken = sessionToken;
-                Logger.info('[Connection] Including session token');
-              }
-              ConnectionManager.send(msg);
-              fireCallbackOnce({ success: true });
+              detectPlatform(function(platform) {
+                var msg = {
+                  type: 'navigator-hello',
+                  browserName: browserName,
+                  platform: platform,
+                  extensionVersion: chrome.runtime.getManifest().version
+                };
+                if (sessionToken) {
+                  msg.sessionToken = sessionToken;
+                  Logger.info('[Connection] Including session token');
+                }
+                ConnectionManager.send(msg);
+                fireCallbackOnce({ success: true });
+              });
             };
 
             ws.onclose = function(event) {
