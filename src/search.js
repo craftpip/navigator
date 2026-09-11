@@ -156,11 +156,17 @@ const activityCounters = {
   searchResults: 0,
   fetches: 0,
   screenshots: 0,
-  botBlocks: 0
+  botBlocks: 0,
+  cdpConnections: 0
 };
 
 export function getActivityCounters() {
   return { ...activityCounters };
+}
+
+/** Plan 55 — count accepted external /cdp sessions (surfaced in /stats counters). */
+export function recordCdpConnection() {
+  activityCounters.cdpConnections += 1;
 }
 
 function routeKey(engine) {

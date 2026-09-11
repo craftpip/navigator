@@ -2888,7 +2888,7 @@ select.config-input option {
 }
 .api-key-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 78px 116px;
+  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 110px 116px;
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -2936,6 +2936,8 @@ select.config-input option {
   white-space: nowrap;
 }
 .api-key-row small {
+  display: grid;
+  gap: 2px;
   color: var(--muted);
   font: 10px var(--sans);
   white-space: nowrap;
@@ -2979,6 +2981,69 @@ select.config-input option {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+.api-key-browsers {
+  margin: 8px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel2);
+}
+.api-key-browsers summary {
+  padding: 7px 8px;
+  cursor: pointer;
+  color: var(--muted);
+  font: 11px var(--sans);
+}
+.api-key-browser-groups {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+.api-key-browser-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.api-key-browser-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.api-key-browser-on {
+  color: var(--green, #3fb950);
+  font-size: 9px;
+}
+.api-key-browser-off {
+  color: var(--muted);
+  font-size: 9px;
+}
+.api-key-browser-note {
+  color: var(--muted);
+  font: 10px var(--sans);
+}
+.api-key-browser-note code {
+  font-family: var(--mono);
+}
+.api-key-cdp-urls {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+}
+.api-key-cdp-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.api-key-cdp-url code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 @media (max-width: 640px) {
   .api-key-create {

@@ -51,6 +51,8 @@ export const CONFIG_SCHEMA = [
   { key: "ENABLE_HTTP_HEALTH", category: "console", type: "boolean", fallback: false, applies: "hot", description: "Serve /health and /stats." },
   { key: "ENABLE_HTTP_MCP", category: "console", type: "boolean", fallback: false, applies: "hot", description: "Serve the MCP endpoint at /mcp." },
   { key: "MCP_ALLOW_UNAUTHENTICATED", category: "console", type: "boolean", fallback: true, applies: "hot", description: "Allow /mcp requests without an API key." },
+  { key: "ENABLE_CDP_SHARING", category: "console", type: "boolean", fallback: true, applies: "hot", description: "Expose configured browsers as authenticated CDP endpoints at /cdp/<browser>?key= (plan 55). CDP always requires a valid API key." },
+  { key: "MCP_PUBLIC_URL", category: "console", type: "string", fallback: "", applies: "hot", description: "Public base URL advertised in CDP connect URLs (e.g. https://navigator.example.com). Empty = derive from MCP_API_HOST/MCP_API_PORT." },
   { key: "ENABLE_STDIO_MCP", category: "console", type: "boolean", fallback: true, applies: "hot", description: "Run MCP over stdio." },
   { key: "ENABLE_DEVTOOLS_MCP", category: "console", type: "boolean", fallback: false, applies: "hot", description: "Expose devtools browser tools via MCP." },
   { key: "MCP_API_PORT", category: "console", type: "number", fallback: 1994, applies: "hot", description: "Port the HTTP server listens on." },

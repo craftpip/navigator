@@ -1,7 +1,8 @@
 # 55 — CDP URL Sharing for API Keys (BrowserStack-style Browser Access)
 
-**Status:** Proposed
+**Status:** Implemented — host-verified and container-verified (2026-09-12): `vitest run tests/cdp-share.test.js tests/mcp-server.test.js` = 109/109 pass; console `vite build` clean; full suite 629 pass / 2 pre-existing failures (`tests/devtools.test.js`, `tests/svg.test.js` — both fail at HEAD too, unrelated). Live-Chromium `puppeteer.connect` e2e still pending on a real deployment.
 **Created:** 2026-09-11
+**Implemented:** 2026-09-11
 **Scope:** DB migration + server (`src/db.js`, `src/mcp-server.js`, new `src/cdp-share.js`, `src/relay-server.js`, `src/browser.js`, `src/config.js` + `config-schema.js`) + console keys modal (`src/web-console/src/pages/keys/index.jsx` + `style.css`). No change to the MCP tool surface — this is a raw CDP endpoint served by the existing HTTP server.
 
 ---

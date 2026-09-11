@@ -463,6 +463,8 @@ export async function loadConfig() {
     enableHttpMcp: parseBoolean(process.env.ENABLE_HTTP_MCP, true),
     mcpApiKeys: parseApiKeys(process.env.MCP_API_KEYS),
     mcpAllowUnauthenticated: parseBoolean(process.env.MCP_ALLOW_UNAUTHENTICATED, true),
+    enableCdpSharing: parseBoolean(process.env.ENABLE_CDP_SHARING, true),
+    mcpPublicUrl: (process.env.MCP_PUBLIC_URL || "").trim() || null,
     enableStdioMcp: parseBoolean(process.env.ENABLE_STDIO_MCP, false),
     enableDevtoolsMcp: parseBoolean(process.env.ENABLE_DEVTOOLS_MCP, true),
     enableScreenshotDownloadLink: parseBoolean(process.env.ENABLE_SCREENSHOT_DOWNLOAD_LINK, false),

@@ -16,6 +16,7 @@ import {
 import { DEFAULT_MAX_CHARS } from "./config.js";
 import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowserPrompt } from "./browser.js";
 import { relayServer } from "./relay-server.js";
+import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
@@ -23,7 +24,7 @@ import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
-import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools } from "./db.js";
+import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers } from "./db.js";
 import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
@@ -546,16 +547,31 @@ function getAllowedToolsForRequest(headers, config) {
 }
 
 async function getConsoleApiKeysPayload(manager) {
+  const health = await manager.getHealth().catch(() => null);
   return {
     ok: true,
     allowUnauthenticated: manager.config.mcpAllowUnauthenticated,
     toolGroups: getToolGroups(),
+    browsers: (health?.browsers || []).map((b) => ({
+      name: b.name,
+      type: b.type,
+      role: b.role,
+      status: b.status,
+      connected: Boolean(b.connected)
+    })),
+    cdpHost: (() => {
+      try { return new URL(manager.config.mcpApiHost || "http://localhost").hostname || "127.0.0.1"; }
+      catch { return "127.0.0.1"; }
+    })(),
+    cdpPort: manager.config.mcpApiPort,
+    cdpBase: cdpBaseUrl(manager.config),
     keys: listMcpApiKeys().map((key) => ({
       id: key.id,
       name: key.name,
       preview: maskApiKey(key.secret),
       createdAt: key.created_at,
-      allowedTools: parseAllowedTools(key.allowed_tools)
+      allowedTools: parseAllowedTools(key.allowed_tools),
+      allowedBrowsers: parseAllowedBrowsers(key.allowed_browsers)
     }))
   };
 }
@@ -603,7 +619,11 @@ async function handleConsoleApiKeys(manager, body) {
     const allowedTools = Array.isArray(body?.allowedTools)
       ? [...new Set(body.allowedTools.filter((tool) => availableTools.has(tool)))]
       : [...availableTools];
-    createMcpApiKey({ name, secret: key, allowedTools });
+    const availableBrowsers = new Set(listShareableBrowserNames(manager));
+    const allowedBrowsers = Array.isArray(body?.allowedBrowsers)
+      ? [...new Set(body.allowedBrowsers.filter((name) => availableBrowsers.has(name)))]
+      : [...availableBrowsers];
+    createMcpApiKey({ name, secret: key, allowedTools, allowedBrowsers });
     syncMcpApiKeys(manager);
     return { ok: true, key, ...await getConsoleApiKeysPayload(manager) };
   }
@@ -637,6 +657,18 @@ async function handleConsoleApiKeys(manager, body) {
       ? [...new Set(body.allowedTools.filter((tool) => availableTools.has(tool)))]
       : [];
     if (!Number.isInteger(id) || !setMcpApiKeyTools(id, allowedTools)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    return getConsoleApiKeysPayload(manager);
+  }
+
+  if (action === "set_browsers") {
+    const id = Number(body?.id);
+    const availableBrowsers = new Set(listShareableBrowserNames(manager));
+    const allowedBrowsers = Array.isArray(body?.allowedBrowsers)
+      ? [...new Set(body.allowedBrowsers.filter((name) => availableBrowsers.has(name)))]
+      : [];
+    if (!Number.isInteger(id) || !setMcpApiKeyBrowsers(id, allowedBrowsers)) {
       return { ok: false, error: "Unknown API key" };
     }
     return getConsoleApiKeysPayload(manager);
@@ -2867,16 +2899,14 @@ async function handleToolCallInner(name, args = {}) {
       const detected = b.plugin && b.plugin !== "auto" ? ` (${b.plugin})` : "";
       const rawTabs = tabsByBrowser.get(b.name);
       const tabs = b.connected && typeof rawTabs === "number" ? rawTabs : "—";
-      return `| ${index + 1} | **${b.name}** | ${tabs} | ${b.ownership} | ${state}${detected} |`;
-    });
-    const promptLines = ordered.map((b, index) => {
-      const prompt = b.prompt?.trim();
-      return `   ${index + 1}. **${b.name}** — ${prompt || "(no custom prompt)"}`;
+      const prompt = b.prompt?.trim() || "(no custom prompt)";
+      const promptCell = prompt.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      return `| ${index + 1} | **${b.name}** | ${tabs} | ${b.ownership} | ${state}${detected} | ${promptCell} |`;
     });
     timer.end({ status: "ok" });
     return asMarkdownContent(
-      `| Priority | Browser | Tabs | Ownership | Status |\n|----------|---------|------|-----------|--------|\n${rows.join("\n")}` +
-      `\n\n**Execution order & prompts** — browsers are preferred in Priority order (lowest first). Each browser is only used when every browser before it is unavailable or rejects the task:\n${promptLines.join("\n")}`
+      `| Execution order | Browser | Tabs | Ownership | Status | Prompt |\n|------------------|---------|------|-----------|--------|--------|\n${rows.join("\n")}` +
+      `\n\nBrowsers are preferred in execution-order (lowest first) — each browser is only used when every browser before it is unavailable or rejects the task.`
     );
   }
 
@@ -3316,6 +3346,19 @@ async function maybeStartHttpServer(managerOverride) {
       if (url.pathname === "/debug/detach_all") {
         const result = relayServer.detachAllDebuggers();
         sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (url.pathname === "/cdp") {
+        // Plan 55 — authenticated browser discovery for CDP URL sharing.
+        // Same key gate as the /cdp/<browser> upgrade (steps 1–3); CDP never
+        // honors MCP_ALLOW_UNAUTHENTICATED.
+        const auth = authorizeCdpKey(req, url, manager.config);
+        if (auth.status) {
+          sendJson(res, auth.status, { ok: false, error: auth.error });
+          return;
+        }
+        sendJson(res, 200, await getCdpDiscoveryPayload(manager));
         return;
       }
 
@@ -4105,6 +4148,12 @@ async function maybeStartHttpServer(managerOverride) {
       port: manager.config.mcpApiPort
     });
   }
+
+  // Mount the authenticated external CDP surface (plan 55): /cdp/<browser>
+  // upgrades (key always required) + GET /cdp discovery (routed above).
+  // Mounted after the relay so each upgrade handler owns only its paths —
+  // cdp-share ignores non-/cdp, relay ignores /cdp (carve-out).
+  initCdpSharing({ server, manager, logToolError });
 
   const keepaliveEncoder = new TextEncoder();
   const keepaliveFrame = keepaliveEncoder.encode(": keepalive\n\n");

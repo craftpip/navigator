@@ -9,6 +9,12 @@ function sameTools(a, b) {
   return sa.length === sb.length && sa.every((tool, index) => tool === sb[index]);
 }
 
+function sameBrowsers(a, b) {
+  const sa = [...new Set(a)].sort();
+  const sb = [...new Set(b)].sort();
+  return sa.length === sb.length && sa.every((name, index) => name === sb[index]);
+}
+
 export function Keys() {
   const [state, setState] = useState(null);
   const [message, setMessage] = useState("");
@@ -16,6 +22,8 @@ export function Keys() {
   const [secret, setSecret] = useState("");
   const [name, setName] = useState("");
   const [allowedTools, setAllowedTools] = useState([]);
+  const [allowedBrowsers, setAllowedBrowsers] = useState([]);
+  const [createdBrowsers, setCreatedBrowsers] = useState([]);
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [revoking, setRevoking] = useState(null);
@@ -24,6 +32,7 @@ export function Keys() {
       const payload = await request("/console/api-keys");
       setState(payload);
       setAllowedTools(payload.toolGroups.flatMap((group) => group.tools));
+      setAllowedBrowsers((payload.browsers || []).map((browser) => browser.name));
     } catch (error) {
       setMessage(error.message);
       setKind("err");
@@ -33,6 +42,7 @@ export function Keys() {
     load();
   }, []);
   const allTools = () => state?.toolGroups?.flatMap((group) => group.tools) || [];
+  const allBrowsers = () => (state?.browsers || []).map((browser) => browser.name);
   const postKeys = async (body) => {
     const next = await request("/console/api-keys", {
       method: "POST",
@@ -45,13 +55,17 @@ export function Keys() {
   const openCreate = () => {
     setName("");
     setAllowedTools(allTools());
+    setAllowedBrowsers(allBrowsers());
     setSecret("");
+    setCreatedBrowsers([]);
     setModal("create");
   };
   const openEdit = (key) => {
     setName(key.name);
-    setAllowedTools(key.allowedTools === null ? allTools() : key.allowedTools);
+    setAllowedTools(key.allowedTools == null ? allTools() : key.allowedTools);
+    setAllowedBrowsers(key.allowedBrowsers == null ? allBrowsers() : key.allowedBrowsers);
     setSecret("");
+    setCreatedBrowsers([]);
     setModal(key);
   };
   const closeModal = () => {
@@ -63,8 +77,9 @@ export function Keys() {
     setSaving(true);
     try {
       if (modal === "create") {
-        const next = await postKeys({ action: "create", name: trimmed, allowedTools });
+        const next = await postKeys({ action: "create", name: trimmed, allowedTools, allowedBrowsers });
         setSecret(next.key || "");
+        setCreatedBrowsers([...allowedBrowsers]);
         setMessage("API key created.");
         setKind("ok");
       } else {
@@ -76,6 +91,11 @@ export function Keys() {
         const effective = modal.allowedTools === null ? allTools() : modal.allowedTools;
         if (!sameTools(allowedTools, effective)) {
           await postKeys({ action: "set_tools", id: modal.id, allowedTools });
+          changed = true;
+        }
+        const effectiveBrowsers = modal.allowedBrowsers == null ? allBrowsers() : modal.allowedBrowsers;
+        if (!sameBrowsers(allowedBrowsers, effectiveBrowsers)) {
+          await postKeys({ action: "set_browsers", id: modal.id, allowedBrowsers });
           changed = true;
         }
         if (changed) {
@@ -115,6 +135,19 @@ export function Keys() {
       ? current.filter((tool) => !tools.includes(tool))
       : [...new Set([...current, ...tools])],
   );
+  const toggleBrowser = (browser) => setAllowedBrowsers((current) =>
+    current.includes(browser) ? current.filter((name) => name !== browser) : [...current, browser],
+  );
+  const copyText = async (text, okMessage) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(okMessage);
+      setKind("ok");
+    } catch {
+      setMessage("Copy failed. Select the text manually.");
+      setKind("err");
+    }
+  };
   return (
     <section className="grid keys-grid">
       <Panel title="API keys" wide>
@@ -172,6 +205,29 @@ export function Keys() {
                   ))}
                 </div>
               </details>
+              <details className="api-key-browsers" open>
+                <summary>{allowedBrowsers.length === allBrowsers().length ? "All browsers allowed" : `${allowedBrowsers.length} of ${allBrowsers().length} browsers allowed`}</summary>
+                <div className="api-key-browser-groups">
+                  <div className="api-key-tool-actions">
+                    <button type="button" onClick={() => setAllowedBrowsers(allBrowsers())}>Allow all</button>
+                    <button type="button" onClick={() => setAllowedBrowsers([])}>Clear all</button>
+                  </div>
+                  <div className="api-key-browser-items">
+                    {(state?.browsers || []).map((browser) => (
+                      <span className="api-key-browser-row" key={browser.name}>
+                        <Check label={browser.name} checked={allowedBrowsers.includes(browser.name)} onChange={() => toggleBrowser(browser.name)} />
+                        <span
+                          className={browser.connected ? "api-key-browser-on" : "api-key-browser-off"}
+                          title={`${browser.type} · ${browser.status}`}
+                        >
+                          {browser.connected ? "●" : "○"}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                  <small className="api-key-browser-note">Drives that browser over CDP at <code>/cdp/&lt;browser&gt;?key=</code> — relay browsers are the user's real window.</small>
+                </div>
+              </details>
             </div>
             <div className="api-key-modal-actions">
               <button type="button" className="button" onClick={closeModal}>Cancel</button>
@@ -187,19 +243,29 @@ export function Keys() {
             <code>{secret}</code>
             <button
               className="button"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(secret);
-                  setMessage("API key copied.");
-                  setKind("ok");
-                } catch {
-                  setMessage("Copy failed. Select the key text manually.");
-                  setKind("err");
-                }
-              }}
+              onClick={() => copyText(secret, "API key copied.")}
             >
               Copy key
             </button>
+            {createdBrowsers.length > 0 && (
+              <div className="api-key-cdp-urls">
+                <b>Puppeteer connect URL — one per browser:</b>
+                {createdBrowsers.map((browser) => {
+                  const connectUrl = `${state?.cdpBase || `ws://${state?.cdpHost || "127.0.0.1"}:${state?.cdpPort || 1994}`}/cdp/${encodeURIComponent(browser)}?key=${secret}`;
+                  return (
+                    <div className="api-key-cdp-url" key={browser}>
+                      <code>{connectUrl}</code>
+                      <button
+                        className="button"
+                        onClick={() => copyText(connectUrl, `CDP URL for ${browser} copied.`)}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         <div className="api-key-list">
@@ -218,7 +284,10 @@ export function Keys() {
                   <b>{key.name}</b>
                   <time dateTime={new Date(key.createdAt).toISOString()}>{formatKeyDate(key.createdAt)}</time>
                   <code>{key.preview}</code>
-                  <small>{key.allowedTools === null ? "all tools" : `${key.allowedTools.length} tools`}</small>
+                  <small>
+                    <span>{key.allowedTools == null ? "all tools" : `${key.allowedTools.length} tools`}</span>
+                    <span>{key.allowedBrowsers == null ? "all browsers" : `${key.allowedBrowsers.length} browsers`}</span>
+                  </small>
                   <div className="api-key-row-actions">
                     <button className="button" onClick={() => openEdit(key)}>Edit</button>
                     <button

@@ -319,6 +319,9 @@ export class RelayServer {
       socket.destroy();
       return;
     }
+    // /cdp/* is owned by the authenticated external CDP surface
+    // (src/cdp-share.js, plan 55) — never destroy those sockets here.
+    if (url.pathname === "/cdp" || url.pathname.startsWith("/cdp/")) return;
     if (url.pathname === "/relay") {
       this._handleExtensionUpgrade(req, socket, head);
       return;
@@ -339,7 +342,7 @@ export class RelayServer {
 
   _handleGatewayUpgrade(name, req, socket, head) {
     this._wss.handleUpgrade(req, socket, head, (ws) => {
-      this._handleGateway(name, ws);
+      this.attachGatewayClient(name, ws);
     });
   }
 
@@ -698,7 +701,15 @@ export class RelayServer {
 
   // ---- Gateway (/browser/<name>) -----------------------------------------
 
-  _handleGateway(name, ws) {
+  /**
+   * Register a WebSocket as a browser-level CDP client of a relay browser.
+   * Used by the in-process puppeteer gateway (`/browser/<name>`) and by the
+   * authenticated external CDP surface (`/cdp/<name>`, src/cdp-share.js) —
+   * one representation of client registration, cannot drift.
+   * @param {string} name browser name
+   * @param {WebSocket} ws raw WebSocket (a raw CDP socket, not the extension's)
+   */
+  attachGatewayClient(name, ws) {
     const entry = this._entries.get(name);
     if (!entry || entry.status !== "connected") {
       log(`gateway connect for unknown/disconnected browser "${name}"`);

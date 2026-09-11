@@ -126,7 +126,8 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_ts ON mcp_calls(ts);
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_tool ON mcp_calls(tool);
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_search_id ON mcp_calls(search_id);
-    CREATE INDEX IF NOT EXISTS idx_mcp_calls_page_op_id ON mcp_calls(page_op_id);`
+    CREATE INDEX IF NOT EXISTS idx_mcp_calls_page_op_id ON mcp_calls(page_op_id);`,
+  `ALTER TABLE api_keys ADD COLUMN allowed_browsers TEXT;`
 ];
 
 export function initDb(dataDir = process.env.NAVIGATOR_DATA_DIR || process.env.DATA_DIR || path.join(process.cwd(), "data")) {
@@ -226,12 +227,12 @@ export function initializeMcpApiKeys(legacyKeys = []) {
 }
 
 export function listMcpApiKeys() {
-  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools FROM api_keys ORDER BY created_at DESC, id DESC").all();
+  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys ORDER BY created_at DESC, id DESC").all();
 }
 
-export function createMcpApiKey({ name, secret, allowedTools = null }) {
-  const result = getDb().prepare("INSERT INTO api_keys (name, secret, created_at, allowed_tools) VALUES (?, ?, ?, ?)").run(name, secret, Date.now(), allowedTools === null ? null : JSON.stringify(allowedTools));
-  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools FROM api_keys WHERE id = ?").get(result.lastInsertRowid);
+export function createMcpApiKey({ name, secret, allowedTools = null, allowedBrowsers = null }) {
+  const result = getDb().prepare("INSERT INTO api_keys (name, secret, created_at, allowed_tools, allowed_browsers) VALUES (?, ?, ?, ?, ?)").run(name, secret, Date.now(), allowedTools === null ? null : JSON.stringify(allowedTools), allowedBrowsers === null ? null : JSON.stringify(allowedBrowsers));
+  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys WHERE id = ?").get(result.lastInsertRowid);
 }
 
 export function renameMcpApiKey(id, name) {
@@ -244,6 +245,10 @@ export function revokeMcpApiKey(id) {
 
 export function setMcpApiKeyTools(id, allowedTools) {
   return getDb().prepare("UPDATE api_keys SET allowed_tools = ? WHERE id = ?").run(JSON.stringify(allowedTools), id).changes > 0;
+}
+
+export function setMcpApiKeyBrowsers(id, allowedBrowsers) {
+  return getDb().prepare("UPDATE api_keys SET allowed_browsers = ? WHERE id = ?").run(JSON.stringify(allowedBrowsers), id).changes > 0;
 }
 
 export function closeDb() {

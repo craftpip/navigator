@@ -91,13 +91,24 @@ function makeMockManager(overrides = {}) {
       novncPort: 1996,
       debug: false,
       logToolErrors: true,
+      browsers: [
+        { name: "chromium", role: ["default"], type: "inbuilt", addOn: false },
+        { name: "cloakbrowser", role: ["default"], type: "cdp", cdpUrl: "http://cloak:9222", addOn: true },
+      ],
       ...overrides,
     },
+    _effectiveAddOns: () => [
+      { name: "cloakbrowser", type: "cdp", role: ["default"], cdpUrl: "http://cloak:9222", status: "available", configured: true },
+    ],
     getHealth: vi.fn().mockResolvedValue({
       ok: true,
       browserConnected: true,
       openPageSlots: { used: 0, max: 10 },
       pageLimiter: { inUse: 0 },
+      browsers: [
+        { name: "chromium", type: "inbuilt", role: ["default"], status: "disconnected", connected: false },
+        { name: "cloakbrowser", type: "cdp", role: ["default"], status: "available", connected: false },
+      ],
     }),
     getInstanceStats: vi.fn().mockResolvedValue([
       { backend: "chromium", connected: false, tabs: 0, pid: null, type: "inbuilt" },
@@ -334,9 +345,13 @@ describe("mcp-server HTTP endpoints", () => {
       expect(keys.status).toBe(200);
       expect(await keys.json()).not.toHaveProperty("consoleKey");
 
+      const clientKey = await fetch(`${MCP_BASE}/console/mcp-client-key`);
+      const client = await clientKey.json();
+      expect(client.ok).toBe(true);
+
       const response = await fetch(`${MCP_BASE}/console/mcp`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", authorization: `Bearer ${client.key}` },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       });
       expect(response.status).toBe(200);
@@ -367,6 +382,88 @@ describe("mcp-server HTTP endpoints", () => {
         body: JSON.stringify({ action: "revoke", id: key.id }),
       });
       expect(revoked.status).toBe(200);
+    });
+
+    it("lists browsers and per-key browser access in the keys payload (plan 55)", async () => {
+      const res = await fetch(`${MCP_BASE}/console/api-keys`);
+      expect(res.status).toBe(200);
+      const payload = await res.json();
+      expect(payload.browsers.map((b) => b.name)).toEqual(
+        expect.arrayContaining(["chromium", "cloakbrowser"])
+      );
+      expect(payload.browsers[0]).toMatchObject({
+        name: expect.any(String),
+        type: expect.any(String),
+        connected: expect.any(Boolean),
+      });
+      expect(payload).toHaveProperty("cdpBase");
+      expect(payload).toHaveProperty("cdpPort");
+    });
+
+    it("creates keys with browser access, replaces it via set_browsers, drops unknown names (plan 55)", async () => {
+      const created = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          name: "CDP scoped key",
+          allowedTools: ["web_search"],
+          allowedBrowsers: ["cloakbrowser", "no-such-browser"],
+        }),
+      });
+      const payload = await created.json();
+      expect(created.status).toBe(200);
+      const key = payload.keys.find((entry) => entry.preview === `${payload.key.slice(0, 12)}...${payload.key.slice(-12)}`);
+      // Unknown browser names are dropped on create.
+      expect(key).toMatchObject({ name: "CDP scoped key", allowedBrowsers: ["cloakbrowser"] });
+
+      const replaced = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "set_browsers", id: key.id, allowedBrowsers: ["chromium"] }),
+      });
+      const after = await replaced.json();
+      expect(replaced.status).toBe(200);
+      expect(after.keys.find((entry) => entry.id === key.id)).toMatchObject({
+        allowedBrowsers: ["chromium"],
+      });
+
+      const revoked = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "revoke", id: key.id }),
+      });
+      expect(revoked.status).toBe(200);
+    });
+
+    it("GET /cdp requires a key and lists shareable browsers (plan 55)", async () => {
+      const anon = await fetch(`${MCP_BASE}/cdp`);
+      expect(anon.status).toBe(401);
+
+      const created = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "create", name: "CDP discovery key" }),
+      });
+      const payload = await created.json();
+      const authed = await fetch(`${MCP_BASE}/cdp`, {
+        headers: { authorization: `Bearer ${payload.key}` },
+      });
+      expect(authed.status).toBe(200);
+      const body = await authed.json();
+      expect(body.ok).toBe(true);
+      expect(body.browsers.map((b) => b.name)).toEqual(
+        expect.arrayContaining(["chromium", "cloakbrowser"])
+      );
+      const cloak = body.browsers.find((b) => b.name === "cloakbrowser");
+      expect(cloak.cdpUrl).toContain("/cdp/cloakbrowser?key=<your key>");
+
+      const key = payload.keys.find((entry) => entry.preview === `${payload.key.slice(0, 12)}...${payload.key.slice(-12)}`);
+      await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "revoke", id: key.id }),
+      });
     });
   });
 

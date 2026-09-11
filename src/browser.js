@@ -179,6 +179,11 @@ export class BrowserManager {
     // Add-on browser state (keyed by `addon_${name}`) — lazy CDP connections
     this._addOnState = new Map();
 
+    // Dedicated Chromium instances launched per external /cdp session
+    // (plan 55 §2.3 — fresh, isolated, navigator-owned, closed on disconnect).
+    // Map of browser -> temp profile dir, so shutdown() can reap strays.
+    this._sharedBrowsers = new Map();
+
     // Lightweight CDP reachability cache (name -> { at, reachable }) — lets
     // /health report lazy (never puppeteer-connected) CDP browsers as online
     // when their /json/list endpoint answers, without holding a connection.
@@ -502,6 +507,59 @@ export class BrowserManager {
       return this.browser;
     } finally {
       this.launching = null;
+    }
+  }
+
+  /**
+   * Launch a fresh, dedicated Chromium for one external /cdp session
+   * (plan 55 §2.3 — inbuilt isolation). Unlike getBrowser(), this never
+   * touches the shared internal instance: the external client gets its own
+   * browser process + profile dir and cannot see/close navigator's own
+   * search/fetch tabs. Navigator owns the instance — call
+   * closeSharedBrowser() (or browser.close()) when the session ends.
+   * Tracked in _sharedBrowsers so shutdown() can reap strays.
+   * @returns {Promise<import("puppeteer-core").Browser>} the dedicated browser
+   */
+  async createSharedBrowser() {
+    const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), "navigator-shared-"));
+    const browser = await puppeteer.launch({
+      executablePath: this.config.chromePath,
+      headless: this.config.headless,
+      userDataDir: profileDir,
+      args: this.buildLaunchArgs("Default"),
+      defaultViewport: {
+        width: MONITOR_WIDTH,
+        height: MONITOR_HEIGHT,
+        deviceScaleFactor: 1
+      },
+      timeout: this.config.browserOpTimeoutMs
+    });
+    this._sharedBrowsers.set(browser, profileDir);
+    browser.once("disconnected", () => this.closeSharedBrowser(browser).catch(() => {}));
+    logBrowserEvent("chromium.shared-ready", { profileDir });
+    return browser;
+  }
+
+  /**
+   * Close a browser created by createSharedBrowser() and reap its temp
+   * profile dir. Safe to call twice; never touches the shared internal
+   * instance or add-on connections.
+   */
+  async closeSharedBrowser(browser) {
+    if (!browser) return;
+    const profileDir = this._sharedBrowsers.get(browser);
+    this._sharedBrowsers.delete(browser);
+    try {
+      if (browser.connected) await browser.close();
+    } catch {
+      // already gone — fall through to dir cleanup
+    }
+    if (profileDir) {
+      try {
+        await fs.rm(profileDir, { recursive: true, force: true });
+      } catch {
+        // ignore temp cleanup errors
+      }
     }
   }
 
@@ -1435,6 +1493,15 @@ export class BrowserManager {
   }
 
   async shutdown() {
+    // Shared-session Chromiums (plan 55, /cdp) — owned, close + reap dirs.
+    for (const browser of [...this._sharedBrowsers.keys()]) {
+      try {
+        await this.closeSharedBrowser(browser);
+      } catch {
+        // ignore close errors on shutdown
+      }
+    }
+
     // Chromium shutdown (owned — close)
     if (this.browser) {
       try {
