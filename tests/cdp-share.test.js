@@ -8,7 +8,7 @@ import {
   cdpConnectUrl,
   listShareableBrowserNames,
 } from "../src/cdp-share.js";
-import { initDb, createMcpApiKey, revokeMcpApiKey, closeDb } from "../src/db.js";
+import { initDb, createMcpApiKey, revokeMcpApiKey, listMcpApiKeys, getDb, closeDb } from "../src/db.js";
 
 beforeAll(() => {
   initDb();
@@ -109,6 +109,28 @@ describe("checkBrowserAccess", () => {
     const record = { allowed_browsers: JSON.stringify(["cloakbrowser"]) };
     expect(checkBrowserAccess(record, "cloakbrowser")).toBe(true);
     expect(checkBrowserAccess(record, "chromium")).toBe(false);
+  });
+});
+
+describe("revokeMcpApiKey with used key (FK regression)", () => {
+  it("nulls mcp_calls references before deleting, so used keys revoke cleanly", () => {
+    const row = createMcpApiKey({ name: "cdp revoke-with-calls", secret: "nvg_revoke_used" });
+    const db = getDb();
+    const callId = db
+      .prepare(
+        "INSERT INTO mcp_calls (ts, tool, api_key_id, api_key_name, api_key_preview, ok, source) VALUES (?, 'cdp:unit', ?, 'cdp revoke-with-calls', 'nvg_revoke_used', 1, 'mcp')"
+      )
+      .run(Date.now(), row.id).lastInsertRowid;
+    try {
+      expect(revokeMcpApiKey(row.id)).toBe(true);
+      expect(listMcpApiKeys().some((k) => k.id === row.id)).toBe(false);
+      const after = db.prepare("SELECT api_key_id, api_key_name, api_key_preview FROM mcp_calls WHERE id = ?").get(callId);
+      expect(after.api_key_id).toBeNull();
+      expect(after.api_key_name).toBeNull();
+      expect(after.api_key_preview).toBeNull();
+    } finally {
+      db.prepare("DELETE FROM mcp_calls WHERE id = ?").run(callId);
+    }
   });
 });
 

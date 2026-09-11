@@ -240,7 +240,15 @@ export function renameMcpApiKey(id, name) {
 }
 
 export function revokeMcpApiKey(id) {
-  return getDb().prepare("DELETE FROM api_keys WHERE id = ?").run(id).changes > 0;
+  // mcp_calls.api_key_id references api_keys(id) without ON DELETE — NULL the
+  // call references first so revoking any used key doesn't hit the FK.
+  const database = getDb();
+  const detach = database.prepare("UPDATE mcp_calls SET api_key_id = NULL, api_key_name = NULL, api_key_preview = NULL WHERE api_key_id = ?");
+  const remove = database.prepare("DELETE FROM api_keys WHERE id = ?");
+  return database.transaction(() => {
+    detach.run(id);
+    return remove.run(id).changes > 0;
+  })();
 }
 
 export function setMcpApiKeyTools(id, allowedTools) {
