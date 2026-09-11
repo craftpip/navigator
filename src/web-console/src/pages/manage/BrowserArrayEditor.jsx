@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { BROWSER_ROLES, BROWSER_EMPTY_ENTRY, BROWSER_TYPE_LABEL } from "./constants.js";
-import { normalizeBrowserType, parseBrowsersEntries, serializeBrowsersEntries } from "./browser-utils.js";
+import { normalizeBrowserType, parseBrowsersEntries, serializeBrowsersEntries, builtinBrowserPrompt } from "./browser-utils.js";
 import { BrowserEditModal } from "./BrowserEditModal.jsx";
 
 export { normalizeBrowserType, parseBrowsersEntries, serializeBrowsersEntries };
@@ -93,7 +93,7 @@ export function BrowserArrayEditor({ value, onChange, ok, message }) {
               </div>
               <div className="pp-card-summary">
                 {isBuiltIn ? (
-                  <span className="pp-card-roles">Built-in browser</span>
+                  <span className="pp-card-roles">{builtinBrowserPrompt(entries, index)}</span>
                 ) : entry.role && entry.role.length ? (
                   <span className="pp-card-roles">roles: {entry.role.join(" · ")}</span>
                 ) : (

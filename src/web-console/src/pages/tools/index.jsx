@@ -18,7 +18,6 @@ function Tools() {
     selectTool,
     setValue,
     run,
-    clear,
   } = useTools();
 
   return (
@@ -55,7 +54,6 @@ function Tools() {
               <ResponsePanel
                 response={response}
                 toolName={toolName}
-                onClear={clear}
               />
             </div>
           )}

@@ -29,6 +29,21 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
 const HELLO_TIMEOUT_MS = 10_000;
 const GATEWAY_WAIT_MS = 3_000;
+// Deadline for commands the gateway forwards to the extension via
+// `_sendExtensionCommand`. A response the extension never sends (socket flap
+// dropped the frame, SW suspended) must not orphan its pending and leave the
+// gateway client waiting on its own timeout — the relay resolves it with an
+// explicit error so the caller fails fast. Mirrors the standard op window so a
+// healthy-but-slow command (heavy evaluate, big screenshot serialization) is
+// never false-faulted.
+const RELAY_COMMAND_TIMEOUT_MS = 60_000;
+// Created-target attach retry: the gateway acks Target.createTarget and then
+// attaches the new tab; puppeteer hard-waits 30s (waitForTarget default) for the
+// synthesized attachedToTarget. If the extension socket flaps between the two,
+// retry while the socket settles — bounded a few seconds under the 30s wait so
+// the ack is never the thing that hangs.
+const CREATOR_ATTACH_ATTEMPTS = 4;
+const CREATOR_ATTACH_RETRY_MS = 750;
 
 function log(message, ...args) {
   console.error(`[relay] ${message}`, ...args);
@@ -453,11 +468,28 @@ export class RelayServer {
         // tab was closed. Purge the stale session maps so the next
         // _ensureTargetSession creates a fresh chrome.debugger.attach instead
         // of replaying the dead sessionId ("Tab not attached").
+        //
+        // BEFORE clearing the maps, forward a session-scoped
+        // Target.detachedFromTarget to every client tracking the target —
+        // that event is what resolves puppeteer's page.close() (TargetManager
+        // listens on the session), and this is the only moment the sessionId
+        // is still known: once the maps are purged here, the later _diffTabs
+        // can only emit destroy-without-detach and page.close() hangs forever.
         const tabIdStr = String(msg.tabId);
         const targetId = entry.tabIdToTarget.get(tabIdStr);
         if (targetId) {
           const sess = entry.sessionForTarget.get(targetId);
           if (sess) {
+            for (const client of [...entry.clients.values()]) {
+              const cs = client.sessionForTarget;
+              if (cs && cs.has(targetId)) {
+                this._emitToClient(client, {
+                  method: "Target.detachedFromTarget",
+                  params: { sessionId: cs.get(targetId), targetId }
+                });
+                log(`[relay] tab_detached: emitting detachedFromTarget session=${cs.get(targetId)} (client ${client.id})`);
+              }
+            }
             entry.sessionForTarget.delete(targetId);
             entry.extSessionToTarget.delete(sess);
             for (const client of entry.clients.values()) {
@@ -471,6 +503,15 @@ export class RelayServer {
           for (const [sess, tid] of [...entry.extSessionToTarget.entries()]) {
             const mappedTab = [...entry.tabIdToTarget.entries()].find(([, v]) => v === tid)?.[0];
             if (mappedTab === tabIdStr) {
+              for (const client of [...entry.clients.values()]) {
+                const cs = client.sessionForTarget;
+                if (cs && cs.has(tid)) {
+                  this._emitToClient(client, {
+                    method: "Target.detachedFromTarget",
+                    params: { sessionId: cs.get(tid), targetId: tid }
+                  });
+                }
+              }
               entry.sessionForTarget.delete(tid);
               entry.extSessionToTarget.delete(sess);
               for (const client of entry.clients.values()) {
@@ -537,10 +578,16 @@ export class RelayServer {
   }
 
   _teardownEntry(entry) {
-    // Flush every pending command so gateway clients (puppeteer) get clean
-    // "browser disconnected" errors instead of hanging until their 30s timeout.
-    for (const [id, pending] of [...entry.pendingCommands]) {
-      entry.pendingCommands.delete(id);
+    // Flush every pending command for THIS entry's clients so gateway clients
+    // (puppeteer) get clean "browser disconnected" errors instead of hanging
+    // until their own timeout. The pending map is instance-level
+    // (this._pendingCommands) — match by gateway clientId, or by the entryName
+    // tag carried on attach / sendCommand pendings (which have clientId null).
+    for (const [id, pending] of [...this._pendingCommands]) {
+      if (pending.entryName && pending.entryName !== entry.name) continue;
+      if (pending.clientId != null && !entry.clients.has(pending.clientId)) continue;
+      this._pendingCommands.delete(id);
+      if (pending.timer) clearTimeout(pending.timer);
       if (pending.marker === "attach") {
         pending.resolve(null);
         continue;
@@ -621,6 +668,7 @@ export class RelayServer {
     for (const [targetId] of client.tabs) {
       if (!current.has(targetId)) {
         this._emitToClient(client, { method: "Target.targetDestroyed", params: { targetId } });
+        log(`[relay] _diffTabsForClient: emitting targetDestroyed for ${targetId} (client ${client.id})`);
         // Chromium also detaches the session when a target is destroyed — the
         // session-scoped detachedFromTarget is what resolves puppeteer's
         // page.close() (TargetManager's session-level detached listener).
@@ -631,6 +679,7 @@ export class RelayServer {
             method: "Target.detachedFromTarget",
             params: { sessionId: session, targetId }
           });
+          log(`[relay] _diffTabsForClient: emitting detachedFromTarget session=${session} (client ${client.id})`);
         }
       }
     }
@@ -771,14 +820,32 @@ export class RelayServer {
     }
   }
 
-  _sendExtensionCommand(entry, { id, method, params, sessionId }, clientId) {
+  _sendExtensionCommand(entry, { id, method, params, sessionId }, clientId, timeoutMs = RELAY_COMMAND_TIMEOUT_MS) {
     if (!this._canSend(entry)) {
       const client = entry.clients.get(clientId);
       if (client) this._reply(client, id, null, new Error("browser disconnected"));
       return;
     }
     const globalId = this._nextCommandId++;
-    this._pendingCommands.set(globalId, { clientId, id, sessionId, method, params: params || {} });
+    const pending = { clientId, id, sessionId, method, params: params || {} };
+    this._pendingCommands.set(globalId, pending);
+    // Every forwarded command carries a reply deadline so a dropped response
+    // (extension flap, suspended SW) surfaces as a clean error to the awaiting
+    // client instead of an orphaned pending that outlives the client's wait.
+    pending.timer = setTimeout(() => {
+      if (!this._pendingCommands.has(globalId)) return;
+      this._pendingCommands.delete(globalId);
+      log(`[relay] ${method} got no extension reply within ${timeoutMs}ms — replying timeout to client ${clientId}`);
+      if (clientId != null) {
+        const client = entry.clients.get(clientId);
+        if (client && client.ws.readyState === client.ws.OPEN) {
+          this._reply(client, id, null, {
+            code: -32000,
+            message: `${method} timed out on the browser (no reply within ${timeoutMs}ms)`
+          });
+        }
+      }
+    }, timeoutMs);
     const msg = { id: globalId, method, params: params || {} };
     if (sessionId) msg.sessionId = sessionId;
     sendJson(entry.ws, msg);
@@ -791,7 +858,7 @@ export class RelayServer {
    * found" — the created tab can never be driven (stuck at about:blank).
    */
   _registerCreatedTarget(entry, { targetId, tabId = null, url = "about:blank" } = {}, creatorClientId = null) {
-    if (!targetId) return;
+    if (!targetId) return null;
     const info = {
       targetId,
       type: "page",
@@ -806,24 +873,66 @@ export class RelayServer {
     if (existing) Object.assign(existing, info);
     else entry.tabs.push(info);
     if (tabId != null) entry.tabIdToTarget.set(String(tabId), targetId);
+    // The creator gets an immediate attachedToTarget (puppeteer waits for it
+    // on Target.createTarget); every other client gets the normal
+    // targetCreated diff.  This avoids a late-joining client storm. Returns the
+    // creator's attach promise (null when no creator attach is pending, so the
+    // createTarget ack can go straight out).
+    let creatorAttach = null;
     for (const client of [...entry.clients.values()]) {
-      // The creator gets an immediate attachedToTarget (puppeteer waits for it
-      // on Target.createTarget); every other client gets the normal
-      // targetCreated diff.  This avoids a late-joining client storm.
       if (creatorClientId && client.id === creatorClientId && isPageTarget(info)) {
-        void this._ensureTargetSession(entry, info).then((sessionId) => {
-          if (!sessionId || !entry.clients.has(client.id)) return;
+        creatorAttach = this._attachCreatedTarget(entry, client, info);
+      } else {
+        this._diffTabsForClient(entry, client);
+      }
+    }
+    return creatorAttach;
+  }
+
+  /**
+   * Attach a just-created target and emit the synthesized attachedToTarget to
+   * its creator. Runs with flap retry: a socket swap during attach (old socket
+   * closed but the entry's ws already replaced, so teardown never ran) must not
+   * strand the creator — the attach is re-sent on the live socket. On a same-
+   * socket attach timeout the tab is genuinely unresponsive, so stop (a retry on
+   * the same socket could hit a duplicate-attach error where the first attach
+   * actually landed). Bounded a few seconds under puppeteer's 30s waitForTarget.
+   *
+   * @returns {Promise<boolean>} true when attached and the event was emitted.
+   */
+  async _attachCreatedTarget(entry, client, info) {
+    const name = entry.name;
+    const targetId = info.targetId;
+    let cur = entry;
+    for (let attempt = 0; attempt < CREATOR_ATTACH_ATTEMPTS; attempt++) {
+      if (!this._canSend(cur)) {
+        cur = this._entries.get(name);
+        if (!cur || !this._canSend(cur)) {
+          await new Promise((r) => setTimeout(r, CREATOR_ATTACH_RETRY_MS));
+          continue;
+        }
+      }
+      const sessionId = await this._ensureTargetSession(cur, info);
+      if (sessionId) {
+        if (cur.clients.has(client.id)) {
           client.tabs.set(targetId, { ...info });
           clientSessions(client).set(targetId, sessionId);
           this._emitToClient(client, {
             method: "Target.attachedToTarget",
             params: { sessionId, targetInfo: { ...info, attached: true }, waitingForDebugger: false }
           });
-        });
-      } else {
-        this._diffTabsForClient(entry, client);
+        }
+        return true;
       }
+      // Timeout on the current socket. Only retry across an entry replacement
+      // (a fresh entry means a fresh socket — the previous attach is moot);
+      // a same-socket timeout means the extension is unresponsive, not slow.
+      const after = this._entries.get(name);
+      if (!after || after === cur) return false;
+      cur = after;
+      await new Promise((r) => setTimeout(r, CREATOR_ATTACH_RETRY_MS));
     }
+    return false;
   }
 
   /**
@@ -838,7 +947,7 @@ export class RelayServer {
 
     return new Promise((resolve) => {
       const globalId = this._nextCommandId++;
-      this._pendingCommands.set(globalId, { clientId: null, marker: "attach", targetId, resolve });
+      this._pendingCommands.set(globalId, { clientId: null, marker: "attach", entryName: entry.name, targetId, resolve });
       sendJson(entry.ws, {
         id: globalId,
         method: "Target.attachToTarget",
@@ -986,8 +1095,16 @@ export class RelayServer {
 
   _onCdpResponse(entry, msg) {
     const pending = this._pendingCommands.get(msg.id);
-    if (!pending) return;
+    if (!pending) {
+      log(`[relay] cdp_response WITH NO PENDING for id=${msg.id} (method=${msg.method || "?"}) result=${JSON.stringify(msg.result || msg.error || {}).slice(0, 120)}`);
+      return;
+    }
     this._pendingCommands.delete(msg.id);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (pending.method === "Target.closeTarget") {
+      const tracked = [...entry.clients.values()].map((c) => (c.tabs.has(pending.params?.targetId) ? 1 : 0)).join(",");
+      log(`[relay] closeTarget response arrived id=${msg.id} target=${pending.params?.targetId} err=${msg.error ? 1 : 0} clientsTracking=[${tracked}]`);
+    }
 
     if (pending.marker === "attach") {
       if (!msg.error && msg.result && typeof msg.result.sessionId === "string") {
@@ -1004,14 +1121,48 @@ export class RelayServer {
 
     // A client-created target must enter the registry immediately, otherwise
     // the client's own Target.attachToTarget can't find it (stuck about:blank).
+    // The createTarget ack is HELD until the attach settles: puppeteer's
+    // browser.newPage() hard-waits (30s default waitForTarget) on the
+    // synthesized attachedToTarget for the new tab, so a flap between the
+    // createTarget reply and the attach must not strand it. On success the ack
+    // goes out with the extension's result; on attach failure the orphan tab is
+    // closed best-effort and the command errors fast instead of being left to
+    // the client's own timeout.
     if (pending.clientId != null &&
         pending.method === "Target.createTarget" &&
         !msg.error && msg.result && msg.result.targetId) {
-      this._registerCreatedTarget(entry, {
+      const attach = this._registerCreatedTarget(entry, {
         targetId: msg.result.targetId,
         tabId: msg.result.tabId ?? null,
         url: pending.params?.url || "about:blank"
       }, pending.clientId);
+      if (attach) {
+        const creator = entry.clients.get(pending.clientId);
+        if (creator && creator.ws.readyState === creator.ws.OPEN) {
+          void attach.then((attached) => {
+            const live = entry.clients.get(pending.clientId);
+            if (!live || live.ws.readyState !== live.ws.OPEN) return; // client went away mid-attach
+            if (attached) {
+              this._reply(live, pending.id, msg.result || {});
+              return;
+            }
+            const cur = this._entries.get(entry.name);
+            if (cur && this._canSend(cur)) {
+              this._sendExtensionCommand(cur, {
+                id: this._nextCommandId++,
+                method: "Target.closeTarget",
+                params: { targetId: msg.result.targetId }
+              }, null, GATEWAY_WAIT_MS);
+            }
+            log(`[relay] new tab ${msg.result.targetId} created but never attached — erroring the client command`);
+            this._reply(live, pending.id, null, {
+              code: -32000,
+              message: `New tab ${msg.result.targetId} was created but the extension did not attach it (unresponsive browser)`
+            });
+          });
+        }
+        return; // the ack is deferred to the attach settlement above
+      }
     }
 
     // Proactively evict a closed target so puppeteer doesn't wait for a
@@ -1082,7 +1233,10 @@ export class RelayServer {
 
     if (pending.clientId == null) return;
     const client = entry.clients.get(pending.clientId);
-    if (!client || client.ws.readyState !== client.ws.OPEN) return;
+    if (!client || client.ws.readyState !== client.ws.OPEN) {
+      log(`[relay] DROPPING client reply id=${pending.id} method=${pending.method} (clientId=${pending.clientId} gone or not open)`);
+      return;
+    }
     const reply = { id: pending.id };
     if (msg.error) {
       reply.error = msg.error;
@@ -1096,6 +1250,9 @@ export class RelayServer {
     if (msg.sessionId) reply.sessionId = msg.sessionId;
     else if (pending.sessionId) reply.sessionId = pending.sessionId;
     sendJson(client.ws, reply);
+    if (pending.method === "Target.closeTarget") {
+      log(`[relay] replied closeTarget id=${pending.id} to client ${pending.clientId}`);
+    }
   }
 
   _onCdpEvent(entry, msg) {
@@ -1198,6 +1355,7 @@ export class RelayServer {
         clientId: null,
         id: globalId,
         marker: "sendCommand",
+        entryName: entry.name,
         sessionId,
         method,
         params: params || {},

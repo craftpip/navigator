@@ -131,7 +131,7 @@ export function Drivers({ health, instances, reload, height }) {
     setSaveNotice(
       result.restartRequired?.includes("BROWSERS")
         ? "Browsers apply after a container restart — restart navigator to activate."
-        : "Saved. Browsers are active immediately — no restart needed.",
+        : "Saved. Browsers are active immediately.",
     );
     if (reload) await reload();
   };

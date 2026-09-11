@@ -14,7 +14,7 @@ import {
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import { DEFAULT_MAX_CHARS } from "./config.js";
-import { getBrowserManager, resolveBrowserParam, browserOwnership } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowserPrompt } from "./browser.js";
 import { relayServer } from "./relay-server.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
@@ -578,6 +578,17 @@ async function persistMcpApiAuth(manager, { allowUnauthenticated = manager.confi
   envFileState.changed = false;
   recordEnvChange({ action: "update_mcp_api_auth", keys: ["MCP_ALLOW_UNAUTHENTICATED"] });
   return { backup };
+}
+
+const CONSOLE_TOOLS_KEY_NAME = "Web Tools UI";
+
+function ensureConsoleToolsApiKey() {
+  const existing = listMcpApiKeys().find((key) => key.name === CONSOLE_TOOLS_KEY_NAME);
+  if (existing) return existing;
+  return createMcpApiKey({
+    name: CONSOLE_TOOLS_KEY_NAME,
+    secret: `nvg_${randomBytes(32).toString("base64url")}`
+  });
 }
 
 async function handleConsoleApiKeys(manager, body) {
@@ -2802,6 +2813,7 @@ async function handleToolCallInner(name, args = {}) {
           name: cfg.name,
           ownership: browserOwnership("builtin"),
           plugin: cfg.plugin,
+          prompt: undefined,
           status: manager.browser?.connected ? "connected" : "disconnected",
           paired: undefined,
           connected: Boolean(manager.browser?.connected)
@@ -2813,6 +2825,7 @@ async function handleToolCallInner(name, args = {}) {
           name: eff.name,
           ownership: browserOwnership(eff.type),
           plugin: eff.plugin,
+          prompt: cfg.prompt,
           status: eff.status,
           paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
           connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
@@ -2825,12 +2838,21 @@ async function handleToolCallInner(name, args = {}) {
           name: eff.name,
           ownership: browserOwnership(eff.type),
           plugin: eff.plugin,
+          prompt: undefined,
           status: eff.status,
           paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
           connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
         });
       }
     }
+    // The built-in never takes a configured prompt — emit its position-derived
+    // message so the agent sees the actual execution order (no prompt battle
+    // against the configured add-ons).
+    ordered.forEach((b, index) => {
+      if (b.name === "chromium" && !b.prompt) {
+        b.prompt = builtinBrowserPrompt(index + 1, ordered.length);
+      }
+    });
     const tabsByBrowser = new Map(
       (await manager.getInstanceStats()).map((s) => [s.backend, s.tabs])
     );
@@ -2847,9 +2869,14 @@ async function handleToolCallInner(name, args = {}) {
       const tabs = b.connected && typeof rawTabs === "number" ? rawTabs : "—";
       return `| ${index + 1} | **${b.name}** | ${tabs} | ${b.ownership} | ${state}${detected} |`;
     });
+    const promptLines = ordered.map((b, index) => {
+      const prompt = b.prompt?.trim();
+      return `   ${index + 1}. **${b.name}** — ${prompt || "(no custom prompt)"}`;
+    });
     timer.end({ status: "ok" });
     return asMarkdownContent(
-      `| Priority | Browser | Tabs | Ownership | Status |\n|----------|---------|------|-----------|--------|\n${rows.join("\n")}`
+      `| Priority | Browser | Tabs | Ownership | Status |\n|----------|---------|------|-----------|--------|\n${rows.join("\n")}` +
+      `\n\n**Execution order & prompts** — browsers are preferred in Priority order (lowest first). Each browser is only used when every browser before it is unavailable or rejects the task:\n${promptLines.join("\n")}`
     );
   }
 
@@ -2890,9 +2917,20 @@ async function handleToolCallInner(name, args = {}) {
         : args.browser
           ? args.browser
           : getLastUsedBackend(args.targetId) || (result && result.backend) || null;
+    // Record the operation as soon as it starts so devtools calls (e.g. a
+    // closing a relay tab that never acks) still show up in Live activity
+    // while they're still "running" — the result update below then fills in
+    // duration/status when the call returns.
+    const pageOpId = recordPageOpStart({
+      tool: name,
+      url: args.url || args.targetId || "",
+      backend: resolveDevtoolsBackend(null),
+      source: "devtools"
+    });
     try {
       const result = await runWithHangGuard(`mcp:${name}`, () => handleDevtoolsToolCall(name, args));
       recordPageOp({
+        id: pageOpId,
         tool: name,
         url: args.url || args.targetId || "",
         backend: resolveDevtoolsBackend(result),
@@ -2905,6 +2943,7 @@ async function handleToolCallInner(name, args = {}) {
       return formatDevtoolsToolResponse(name, result);
     } catch (error) {
       recordPageOp({
+        id: pageOpId,
         tool: name,
         url: args.url || args.targetId || "",
         durationMs: performance.now() - startedAt,
@@ -3050,6 +3089,7 @@ function createMcpServer(allowedTools = null) {
 async function maybeStartHttpServer(managerOverride) {
   const manager = managerOverride || (await getBrowserManager());
   initDb();
+  ensureConsoleToolsApiKey();
   syncMcpApiKeys(manager);
   const wantsRelay = (manager.config.browsers || []).some(
     (b) => b.addOn && b.type === "navigator-cdp"
@@ -3423,13 +3463,50 @@ async function maybeStartHttpServer(managerOverride) {
           sendJson(res, 405, { ok: false, error: "Method not allowed" });
           return;
         }
-        const response = await handleStatelessMcpPost(await readJsonBody(req));
+        const providedKey = getMcpApiKey(req.headers);
+        const validKeys = [...(manager.config.mcpApiKeys || []), CONSOLE_API_KEY];
+        if (!providedKey || !validKeys.some((key) => key === providedKey)) {
+          sendMcpUnauthorized(res);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const t0 = Date.now();
+        const isToolCall = body?.method === "tools/call";
+        const response = await handleStatelessMcpPost(body);
         if (response === null) {
           res.writeHead(204);
           res.end();
           return;
         }
+        if (isToolCall) {
+          try {
+            const tool = body?.params?.name || "unknown";
+            const args = body?.params?.arguments || {};
+            const ip = getClientIp(req);
+            const keyInfo = getMcpCallKeyInfo(req.headers);
+            const rawText = response?.result?.content?.[0]?.text ?? "";
+            const preview = String(rawText || JSON.stringify(response?.result || "")).slice(0, 8000);
+            const ok = !response?.result?.isError;
+            const error = ok ? "" : String(rawText || "error").slice(0, 500);
+            recordMcpCall({ tool, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: Date.now() - t0, ok, error, source: "mcp" });
+          } catch {}
+        }
         sendJson(res, 200, response);
+        return;
+      }
+
+      if (url.pathname === "/console/mcp-client-key") {
+        if (!manager.config.enableWebConsole || !manager.config.enableHttpMcp) {
+          sendJson(res, 404, { ok: false, error: "Web tools not available" });
+          return;
+        }
+        if (method !== "GET") {
+          sendJson(res, 405, { ok: false, error: "Method not allowed" });
+          return;
+        }
+        const record = ensureConsoleToolsApiKey();
+        syncMcpApiKeys(manager);
+        sendJson(res, 200, { ok: true, name: record.name, preview: maskApiKey(record.secret), key: record.secret });
         return;
       }
 

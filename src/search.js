@@ -264,10 +264,17 @@ export function recordEngineAttempt(engine, status, errorMsg, resultCount = 0, d
   if (engineAttemptLog.length > ENGINE_ATTEMPT_LOG_MAX) {
     engineAttemptLog.splice(0, engineAttemptLog.length - ENGINE_ATTEMPT_LOG_MAX);
   }
+  const recordEngineBackend = () => {
+    try {
+      return getEngineDriver(engine)?.backend || null;
+    } catch {
+      return getEngineMetadata(engine)?.backend || null;
+    }
+  };
   persistEngineAttemptLog();
   recordDbEngineAttempt({
     engine,
-    backend: null,
+    backend: recordEngineBackend(),
     status,
     resultCount,
     error: status === "ok" ? "" : readableErrorMessage(errorMsg),

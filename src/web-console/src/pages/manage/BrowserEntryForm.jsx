@@ -70,6 +70,20 @@ export function BrowserEntryForm({ entry, onChange, locked, lockType }) {
               </div>
             </div>
           )}
+          <div className="browser-form-row browser-form-prompt">
+            <label className="browser-form-label" htmlFor="browser-entry-prompt">LLM prompt</label>
+            <div className="browser-form-field">
+              <textarea
+                id="browser-entry-prompt"
+                className="config-input browser-form-textarea"
+                rows={3}
+                spellCheck={false}
+                value={entry.prompt || ""}
+                onChange={(e) => setField("prompt", e.target.value)}
+                placeholder="e.g. Prefer this browser for logged-in sites; it is the user's real window."
+              />
+            </div>
+          </div>
         </>
       )}
     </div>

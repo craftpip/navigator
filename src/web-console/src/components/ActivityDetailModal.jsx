@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { request } from "../lib/request.js";
 import { formatBrowser, formatMs, formatTime, formatRelativeTime } from "../lib/format.js";
+import { renderMarkdown } from "../markdown.js";
 import { Pill, Dot } from "./ui.jsx";
 
 function DetailRow({ label, value, mono }) {
@@ -21,6 +22,7 @@ export function ActivityDetailModal({ entryKey, fallbackEntry, onClose }) {
   const [mcpCall, setMcpCall] = useState(null);
   const [loading, setLoading] = useState(Boolean(entryKey));
   const [error, setError] = useState("");
+  const [previewMode, setPreviewMode] = useState("markdown");
 
   useEffect(() => {
     if (!entryKey) return;
@@ -116,14 +118,33 @@ export function ActivityDetailModal({ entryKey, fallbackEntry, onClose }) {
             <div className="activity-detail-col">
           <div className="activity-detail-section">
             <h4>Request</h4>
-            {!isSearch && entry.tool !== "Target.getTargets" ? <DetailRow label="Browser" value={browser || "-"} /> : null}
             {!isSearch && !isDevtools ? <DetailRow label="URL" value={entry.url || entry.request || ""} mono /> : null}
             {isDevtools ? <DetailRow label="Target" value={entry.url || ""} mono /> : null}
                 {isSearch ? <DetailRow label="Query" value={entry.query || entry.request || ""} mono /> : null}
                 {isSearch && entry.variants ? <DetailRow label="Variants" value={(() => { try { const v = JSON.parse(entry.variants); return Array.isArray(v) ? v.join(" · ") : entry.variants; } catch { return entry.variants; } })()} mono /> : null}
                 {isSearch ? <DetailRow label="Requested engine" value={entry.requested_engine || ""} mono /> : null}
                 {isSearch && entry.engines ? <DetailRow label="Engines" value={(() => { try { const v = JSON.parse(entry.engines); return Array.isArray(v) ? v.join(", ") : entry.engines; } catch { return entry.engines; } })()} mono /> : null}
-                {mcpCall?.args_json ? <DetailRow label="Raw arguments" value={(() => { try { return JSON.stringify(JSON.parse(mcpCall.args_json), null, 2); } catch { return mcpCall.args_json; } })()} mono /> : null}
+                {mcpCall?.args_json ? (
+                  <div className="activity-detail-args">
+                    <div className="activity-detail-table cols2">
+                      <div className="activity-detail-table-head"><span>Key</span><span>Value</span></div>
+                      {(() => {
+                        try {
+                          const parsed = JSON.parse(mcpCall.args_json);
+                          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                            return Object.entries(parsed).map(([k, v]) => (
+                              <div className="activity-detail-table-row" key={k}>
+                                <span className="mono">{k}</span>
+                                <span className="mono">{typeof v === "string" ? v : JSON.stringify(v, null, 2)}</span>
+                              </div>
+                            ));
+                          }
+                        } catch {}
+                        return <div className="empty">Raw arguments not parseable</div>;
+                      })()}
+                    </div>
+                  </div>
+                ) : null}
               </div>
               {mcpCall ? (
                 <div className="activity-detail-section">
@@ -149,10 +170,36 @@ export function ActivityDetailModal({ entryKey, fallbackEntry, onClose }) {
                   </div>
                 ) : null}
               </div>
+              {!isSearch && entry.tool !== "Target.getTargets" ? <DetailRow label="Browser used" value={browser || "-"} /> : null}
               {(mcpCall?.response_preview || entry.response_preview) ? (
                 <div className="activity-detail-section">
-                  <h4>Raw MCP response</h4>
-                  <div className="activity-detail-preview">{String(mcpCall?.response_preview || entry.response_preview || "").slice(0, 8000)}</div>
+                  <div className="activity-detail-sec-head">
+                    <h4>Raw MCP response</h4>
+                    <div className="activity-detail-view-toggle" role="group" aria-label="Raw MCP response view">
+                      <button
+                        className={previewMode === "raw" ? "active" : ""}
+                        onClick={() => setPreviewMode("raw")}
+                        title="Show the raw response text"
+                      >
+                        Raw
+                      </button>
+                      <button
+                        className={previewMode === "markdown" ? "active" : ""}
+                        onClick={() => setPreviewMode("markdown")}
+                        title="Preview the markdown response as rendered HTML"
+                      >
+                        Preview
+                      </button>
+                    </div>
+                  </div>
+                  {previewMode === "markdown" ? (
+                    <div
+                      className="activity-detail-preview activity-detail-preview-md"
+                      dangerouslySetInnerHTML={{ __html: renderMarkdown(String(mcpCall?.response_preview || entry.response_preview || "").slice(0, 8000)) }}
+                    />
+                  ) : (
+                    <div className="activity-detail-preview">{String(mcpCall?.response_preview || entry.response_preview || "").slice(0, 8000)}</div>
+                  )}
                 </div>
               ) : null}
             </div>

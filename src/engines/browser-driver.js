@@ -2,6 +2,7 @@ import { SearchEngineDriver } from "./driver.js";
 import { dedupeDirectAnswers } from "./util.js";
 
 export class BrowserSearchDriver extends SearchEngineDriver {
+  backend = "chromium";
   async extractViaEvaluate(page, extractFn) {
     const payload = await page.evaluate(extractFn);
     return {

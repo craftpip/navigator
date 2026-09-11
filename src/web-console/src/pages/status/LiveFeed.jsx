@@ -47,6 +47,8 @@ export function buildFeed(entries, pageOps) {
               : "searching…",
         duration: isRunning ? "…" : attempt.duration_ms != null ? formatMs(attempt.duration_ms) : "",
         error: attempt.error || "",
+        result_count: attempt.result_count,
+        duration_ms: attempt.duration_ms,
       };
     });
     const okBackends = [...new Set(attempts

@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { renderMarkdown } from "../../markdown.js";
 
-export function ResponsePanel({ response, toolName, onClear }) {
+export function ResponsePanel({ response, toolName }) {
   const [viewMode, setViewMode] = useState("markdown");
 
   const renderedHtml = useMemo(() => renderMarkdown(response.output), [response.output]);
@@ -71,9 +71,9 @@ export function ResponsePanel({ response, toolName, onClear }) {
           <button
             className={viewMode === "markdown" ? "active" : ""}
             onClick={() => setViewMode("markdown")}
-            title="Show the raw markdown response"
+            title="Show the raw response text"
           >
-            Markdown
+            Raw
           </button>
           <button
             className={viewMode === "html" ? "active" : ""}
@@ -83,9 +83,6 @@ export function ResponsePanel({ response, toolName, onClear }) {
             Preview
           </button>
         </div>
-        <button className="clear" onClick={onClear}>
-          Clear
-        </button>
       </div>
       {viewMode === "html" ? (
         svgPreviewSegments ? (

@@ -693,8 +693,20 @@ async function closeTarget(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const state = await getTargetState(args.targetId);
+  // page.close() on a relay browser waits for the extension round-trip, which
+  // can be dropped silently when the extension's socket flaps or a response
+  // arrives after the pending command was evicted. Bound the wait so the tool
+  // never hangs forever, then release our handle either way.
+  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  let timedOut = false;
   try {
-    await state.page.close();
+    await Promise.race([
+      state.page.close(),
+      new Promise((resolve) => setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, timeoutMs))
+    ]);
   } catch (error) {
     // For relay (user-owned) tabs the extension may already be gone; still
     // release our handle so the target never leaks in targetsById.
@@ -706,7 +718,8 @@ async function closeTarget(args = {}) {
   devtoolsCounters.targetsClosed += 1;
   return {
     targetId: state.targetId,
-    closed: true
+    closed: true,
+    ...(timedOut ? { timedOut: true } : {})
   };
 }
 

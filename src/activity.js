@@ -274,7 +274,28 @@ export function recordMcpCall({ tool, args, responsePreview, ip, apiKeyId, apiKe
         searchId ? Number(searchId) : null,
         pageOpId ? Number(pageOpId) : null
       );
-    return Number(info.lastInsertRowid);
+    const callId = Number(info.lastInsertRowid);
+    if (!searchId && !pageOpId && tool) {
+      const ts = Date.now();
+      try {
+        if (tool === "web_search") {
+          const row = getDb()
+            .prepare("SELECT id FROM searches WHERE ts <= ? ORDER BY ts DESC LIMIT 1")
+            .get(ts);
+          if (row) {
+            getDb().prepare("UPDATE mcp_calls SET search_id = ? WHERE id = ?").run(row.id, callId);
+          }
+        } else {
+          const row = getDb()
+            .prepare("SELECT id FROM page_ops WHERE tool = ? AND ts <= ? ORDER BY ts DESC LIMIT 1")
+            .get(String(tool), ts);
+          if (row) {
+            getDb().prepare("UPDATE mcp_calls SET page_op_id = ? WHERE id = ?").run(row.id, callId);
+          }
+        }
+      } catch {}
+    }
+    return callId;
   });
 }
 

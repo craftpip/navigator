@@ -53,8 +53,7 @@ function Manage({ config, reload }) {
       });
       await reload();
       setMessage(
-        success ||
-          `Saved. ${result.hotApplied?.length || 0} setting(s) applied immediately — no restart needed.`,
+        success || `Saved. ${result.hotApplied?.length || 0} setting(s) applied.`,
       );
       setKind("ok");
     } catch (error) {

@@ -3,6 +3,17 @@ import { formatMs } from "../../lib/format.js";
 import { list } from "../../lib/request.js";
 import { extractToolResult } from "./extract.js";
 
+let clientKeyPromise = null;
+function getClientKey() {
+  if (!clientKeyPromise) {
+    clientKeyPromise = fetch("/console/mcp-client-key")
+      .then((res) => res.json())
+      .then((data) => (data && data.ok && data.key) || "")
+      .catch(() => "");
+  }
+  return clientKeyPromise;
+}
+
 export function useTools() {
   const [tools, setTools] = useState([]);
   const [toolName, setToolName] = useState("");
@@ -56,10 +67,12 @@ export function useTools() {
 
   const mcpRequest = async (method, params) => {
     const t0 = performance.now();
+    const key = await getClientKey();
     const response = await fetch("/console/mcp", {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        ...(key ? { authorization: `Bearer ${key}` } : {}),
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -226,10 +239,6 @@ export function useTools() {
     }
   };
 
-  const clear = () => {
-    setToolResponse(toolName, {});
-  };
-
   return {
     tools,
     toolName,
@@ -244,6 +253,5 @@ export function useTools() {
     selectTool,
     setValue,
     run,
-    clear,
   };
 }

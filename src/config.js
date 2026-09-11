@@ -173,7 +173,7 @@ export function parseBrowsersEnv(raw) {
       "⚠️  BROWSERS env var not set. Using the built-in Chromium browser only. " +
       "Set BROWSERS to configure add-on browsers."
     );
-    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, prompt: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
   }
 
   let parsed;
@@ -190,7 +190,7 @@ export function parseBrowsersEnv(raw) {
   }
   if (!parsed.length) {
     console.warn("⚠️  BROWSERS env var is an empty array. Adding the built-in Chromium browser.");
-    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
+    return [{ name: "chromium", role: ["default"], cdpUrl: undefined, prompt: undefined, type: "inbuilt", plugin: "auto", addOn: false }];
   }
 
   const seen = new Set();
@@ -279,6 +279,25 @@ export function parseBrowsersEnv(raw) {
       ? String(entry.cdpUrl).trim()
       : undefined;
 
+    // Optional agent-facing instruction shown in list_browsers ("LLM prompt").
+    // Only add-ons may carry one — the built-in Chromium's prompt is derived
+    // from its position in the execution order, so a hand-written prompt there
+    // could put it in a "battle of prompts" with the configured add-ons.
+    const prompt = entry.prompt === undefined || entry.prompt === null
+      ? undefined
+      : (typeof entry.prompt !== "string"
+          ? (() => {
+              throw new Error(
+                `BROWSERS browser "${name}" has a non-string "prompt" — the LLM prompt must be a string, got ${JSON.stringify(entry.prompt)}`
+              );
+            })()
+          : String(entry.prompt).trim() || undefined);
+    if (type === "inbuilt" && prompt) {
+      throw new Error(
+        `BROWSERS browser "chromium" should not carry a "prompt" — the built-in's prompt is generated from its position in the BROWSERS execution order, not configured`
+      );
+    }
+
     if (type === "cdp" && !cdpUrl) {
       throw new Error(
         `BROWSERS browser "${name}" has no cdpUrl — a cdp-type browser needs a CDP endpoint; ` +
@@ -292,12 +311,12 @@ export function parseBrowsersEnv(raw) {
     }
     if (name === "chromium") chromiumSeen = true;
 
-    return { name, role, cdpUrl, type, plugin, addOn: type !== "inbuilt" };
+    return { name, role, cdpUrl, prompt, type, plugin, addOn: type !== "inbuilt" };
   });
 
   if (!chromiumSeen) {
     console.warn("⚠️  BROWSERS is missing Chromium — adding the built-in browser at the end of the array.");
-    browsers.push({ name: "chromium", role: ["default"], cdpUrl: undefined, type: "inbuilt", plugin: "auto", addOn: false });
+    browsers.push({ name: "chromium", role: ["default"], cdpUrl: undefined, prompt: undefined, type: "inbuilt", plugin: "auto", addOn: false });
   }
 
   return browsers;

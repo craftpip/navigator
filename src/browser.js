@@ -45,6 +45,29 @@ export function browserOwnership(type) {
   return type === "navigator-cdp" ? "user" : "agent";
 }
 
+/**
+ * The built-in Chromium's agent-facing prompt. The built-in is never
+ * user-editable (no custom prompt allowed in BROWSERS — parseBrowsersEnv
+ * rejects it) — instead its prompt is derived from where it sits in the
+ * execution order so the agent doesn't end up in a "battle of prompts"
+ * where a generic built-in description beats the configured add-ons.
+ *
+ * `position` is 1-based within the ordered list list_browsers reports.
+ */
+export function builtinBrowserPrompt(position, total) {
+  if (total <= 1) {
+    return "Built-in Chromium — the only configured browser; always used for every role.";
+  }
+  if (position === 1) {
+    return "Built-in Chromium — listed first in the execution order (primary). The add-ons after it are fallbacks for the roles they cover.";
+  }
+  return (
+    `Built-in Chromium — browser #${position} of ${total} in the execution order. ` +
+    `The ${position - 1} browser(s) listed before it are preferred and tried first; ` +
+    "the built-in is used only when those are unavailable."
+  );
+}
+
 const LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
 const CLONE_EXCLUDE_NAMES = new Set([
   "SingletonLock",

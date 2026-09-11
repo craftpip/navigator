@@ -422,6 +422,59 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
       try { await browser.disconnect(); } catch {}
     }
   }, 30000);
+
+  it("createTarget ack is held until the new tab attaches (attachedToTarget precedes the ack)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "hold-browser");
+    const fake = new FakeExtension(ws);
+    const gw = await open(`${wsBase}/browser/hold-browser`);
+    flushAll(gw);
+    gw.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
+    await nextMessage(gw, (m) => m.id === 1);
+    gw.send(JSON.stringify({ id: 2, method: "Target.createTarget", params: { url: "about:blank" } }));
+
+    const attached = await nextMessage(gw, (m) => m.method === "Target.attachedToTarget", 8000);
+    expect(attached.params.targetInfo.targetId).toMatch(/^tab-/);
+    const ack = await nextMessage(gw, (m) => m.id === 2, 8000);
+    expect(ack.result.targetId).toBe(attached.params.targetInfo.targetId);
+    expect(ack.error).toBeUndefined();
+    gw.close();
+  });
+
+  it("createTarget errors fast (not a 30s hang) when the extension never attaches — flapped attach", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "flap-browser");
+    const orphanCloses = [];
+    const fake = new FakeExtension(ws);
+    const baseCommand = fake._onCommand.bind(fake);
+    fake._onCommand = (msg) => {
+      if (msg.method === "Target.attachToTarget") return; // flap dropped the reply
+      if (msg.method === "Target.closeTarget") {
+        orphanCloses.push(msg.params.targetId);
+        return fake.reply(msg.id, {});
+      }
+      return baseCommand(msg);
+    };
+
+    const gw = await open(`${wsBase}/browser/flap-browser`);
+    flushAll(gw);
+    gw.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
+    await nextMessage(gw, (m) => m.id === 1);
+    const start = Date.now();
+    gw.send(JSON.stringify({ id: 2, method: "Target.createTarget", params: { url: "about:blank" } }));
+    const reply = await nextMessage(gw, (m) => m.id === 2, 12000);
+    const elapsed = Date.now() - start;
+    // Far under puppeteer's 30s waitForTarget — the relay must settle the
+    // command itself instead of leaving the client to time out.
+    expect(elapsed).toBeLessThan(10000);
+    expect(reply.error).toBeTruthy();
+    expect(reply.error.message).toMatch(/did not attach/);
+    // The orphan tab is closed best-effort by the relay so no ghost tab is left
+    // in the user's browser after a failed createTarget.
+    await new Promise((r) => setTimeout(r, 600));
+    expect(orphanCloses).toContain(reply.error.message.match(/New tab (\S+) was created/)?.[1]);
+    gw.close();
+  });
 });
 
 describe("routing: auth_pending navigator-cdp is never a routing candidate (resolveBrowserParam)", () => {
