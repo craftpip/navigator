@@ -1,6 +1,6 @@
 import { defineConfig } from "vitepress";
 
-const base = "/docs/";
+const base = process.env.DOCS_BASE || "/docs/";
 
 export default defineConfig({
   title: "Navigator",
