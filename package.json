@@ -66,7 +66,7 @@
     "better-sqlite3": "^11.10.0",
     "cloakbrowser": "^0.5.7",
     "jsdom": "^27.0.0",
-    "puppeteer-core": "^24.21.0",
+    "puppeteer-core": "^25.8.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "trafilatura": "^0.2.0",
