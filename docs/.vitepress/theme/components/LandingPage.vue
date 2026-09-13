@@ -13,7 +13,7 @@
             all through one self-hosted server that works with Claude, Cursor, OpenCode, and more.
           </p>
           <div class="ctas">
-            <a href="/getting-started" class="cta-primary">
+            <a :href="withBase('/guides/getting-started.html')" class="cta-primary">
               Get Started
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </a>
@@ -25,8 +25,14 @@
         </div>
         <div class="shot-wrap">
           <div class="shot-frame">
-            <img src="/console-dark.jpg" alt="Navigator console" class="shot-dark" />
-            <img src="/console-light.jpg" alt="Navigator console" class="shot-light" />
+            <div class="shot-chrome" aria-hidden="true">
+              <div class="shot-dots"><span></span><span></span><span></span></div>
+              <span class="shot-address">localhost:1994</span>
+            </div>
+            <div class="shot-screen">
+              <img src="/console-dark.jpg" alt="Navigator console" class="shot-dark" />
+              <img src="/console-light.jpg" alt="Navigator console" class="shot-light" />
+            </div>
           </div>
         </div>
       </div>
@@ -101,7 +107,7 @@
       <h2>Give your agents the real web.</h2>
       <p>Self-hosted. Private. Runs in a single container.</p>
       <div class="ctas" style="margin-top:28px">
-        <a href="/getting-started" class="cta-primary">
+        <a :href="withBase('/guides/getting-started.html')" class="cta-primary">
           Get Started
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </a>
@@ -117,13 +123,14 @@
       <span class="dot">&middot;</span>
       <a href="https://github.com/craftpip/navigator">GitHub</a>
       <span class="dot">&middot;</span>
-      <a href="/changelog">Changelog</a>
+      <a :href="withBase('/changelog.html')">Changelog</a>
     </footer>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { withBase } from 'vitepress'
 import ForestCanvas from './ForestCanvas.vue'
 import FeatureVisual from './FeatureVisual.vue'
 
@@ -328,61 +335,48 @@ const features = [
     </svg>`
   },
   {
-    name: 'Token-Optimized Screenshots',
-    visual: 'screenshot',
-    desc: 'Choose low, medium, or high JPEG quality to control image size. Return the screenshot inline as base64, or return only a file path so the agent can inspect it when needed or pass it directly to another tool without loading the image into the conversation.',
+    name: 'Bring Any Browser',
+    visual: 'relay',
+    desc: 'Pair your real Chrome or Firefox through Browser Relay and keep its logins, cookies, and sessions. Or connect Navigator to any browser with a CDP endpoint over WebSocket or HTTP.',
     illustration: `<svg viewBox="0 0 480 280" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="30" y="30" width="220" height="170" rx="10" fill="#f8fafc" stroke="#d1d5db" stroke-width="1.5"/>
-      <rect x="30" y="30" width="220" height="28" rx="10" fill="#e5e7eb"/>
-      <rect x="30" y="48" width="220" height="10" fill="#e5e7eb"/>
-      <circle cx="46" cy="44" r="5" fill="#fca5a5"/>
-      <circle cx="60" cy="44" r="5" fill="#fde68a"/>
-      <circle cx="74" cy="44" r="5" fill="#86efac"/>
-      <rect x="44" y="66" width="192" height="10" rx="3" fill="#cbd5e1"/>
-      <rect x="44" y="82" width="160" height="7" rx="2" fill="#e2e8f0"/>
-      <rect x="44" y="95" width="180" height="7" rx="2" fill="#e2e8f0"/>
-      <rect x="44" y="112" width="80" height="60" rx="6" fill="#dbeafe"/>
-      <rect x="132" y="112" width="108" height="8" rx="2" fill="#e2e8f0"/>
-      <rect x="132" y="126" width="96" height="6" rx="2" fill="#e2e8f0"/>
-      <rect x="132" y="138" width="100" height="6" rx="2" fill="#e2e8f0"/>
-      <rect x="132" y="150" width="88" height="6" rx="2" fill="#e2e8f0"/>
-      <rect x="132" y="162" width="104" height="6" rx="2" fill="#e2e8f0"/>
-      <rect x="132" y="174" width="72" height="6" rx="2" fill="#e2e8f0"/>
-      <path d="M260,115 L305,115" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4"/>
-      <path d="M300,110 L308,115 L300,120" fill="#94a3b8"/>
-      <rect x="320" y="30" width="135" height="52" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
-      <rect x="335" y="42" width="14" height="14" rx="3" fill="#2563eb" opacity="0.2"/>
-      <rect x="335" y="60" width="14" height="14" rx="3" fill="#2563eb" opacity="0.2"/>
-      <line x1="342" y1="56" x2="342" y2="60" stroke="#2563eb" stroke-width="2" opacity="0.5" stroke-dasharray="2 2"/>
-      <rect x="358" y="45" width="70" height="6" rx="2" fill="#2563eb" opacity="0.2"/>
-      <rect x="358" y="56" width="55" height="5" rx="2" fill="#2563eb" opacity="0.12"/>
-      <rect x="358" y="65" width="60" height="5" rx="2" fill="#2563eb" opacity="0.12"/>
-      <rect x="320" y="94" width="135" height="52" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
-      <rect x="335" y="104" width="14" height="18" rx="2" fill="#059669" opacity="0.25"/>
-      <path d="M345,104 L349,104 L349,110 L345,104" fill="#059669" opacity="0.3"/>
-      <rect x="358" y="108" width="70" height="6" rx="2" fill="#059669" opacity="0.2"/>
-      <rect x="358" y="119" width="55" height="5" rx="2" fill="#059669" opacity="0.12"/>
-      <rect x="358" y="128" width="60" height="5" rx="2" fill="#059669" opacity="0.12"/>
-      <rect x="320" y="158" width="135" height="52" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
-      <circle cx="342" cy="178" r="7" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.4"/>
-      <circle cx="354" cy="178" r="7" fill="none" stroke="#7c3aed" stroke-width="2" opacity="0.4"/>
-      <rect x="358" y="172" width="70" height="6" rx="2" fill="#7c3aed" opacity="0.2"/>
-      <rect x="358" y="183" width="55" height="5" rx="2" fill="#7c3aed" opacity="0.12"/>
-      <rect x="358" y="192" width="60" height="5" rx="2" fill="#7c3aed" opacity="0.12"/>
-      <circle cx="100" cy="240" r="18" fill="none" stroke="#dc2626" stroke-width="2" opacity="0.4"/>
-      <circle cx="100" cy="240" r="8" fill="#dc2626" opacity="0.15"/>
-      <circle cx="155" cy="240" r="12" fill="none" stroke="#d97706" stroke-width="2" opacity="0.4"/>
-      <circle cx="155" cy="240" r="5" fill="#d97706" opacity="0.15"/>
-      <circle cx="200" cy="240" r="6" fill="none" stroke="#059669" stroke-width="2" opacity="0.5"/>
-      <circle cx="200" cy="240" r="2.5" fill="#059669" opacity="0.3"/>
-      <path d="M120,240 L135,240" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3 2"/>
-      <path d="M170,240 L186,240" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3 2"/>
+      <rect x="28" y="44" width="132" height="88" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+      <rect x="28" y="44" width="132" height="24" rx="12" fill="#dbeafe"/>
+      <rect x="28" y="58" width="132" height="10" fill="#dbeafe"/>
+      <circle cx="43" cy="56" r="4" fill="#fca5a5"/>
+      <circle cx="55" cy="56" r="4" fill="#fde68a"/>
+      <circle cx="67" cy="56" r="4" fill="#86efac"/>
+      <circle cx="94" cy="94" r="17" fill="none" stroke="#2563eb" stroke-width="2" opacity="0.45"/>
+      <circle cx="94" cy="94" r="6" fill="#2563eb" opacity="0.22"/>
+      <rect x="320" y="44" width="132" height="88" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+      <rect x="337" y="62" width="98" height="12" rx="3" fill="#7c3aed" opacity="0.16"/>
+      <rect x="337" y="82" width="76" height="7" rx="2" fill="#7c3aed" opacity="0.24"/>
+      <rect x="337" y="96" width="92" height="7" rx="2" fill="#7c3aed" opacity="0.16"/>
+      <text x="386" y="121" text-anchor="middle" font-size="11" fill="#7c3aed" opacity="0.75" font-family="monospace">ws://  http://</text>
+      <path d="M160 88 H204" stroke="#2563eb" stroke-width="2" stroke-dasharray="5 5" opacity="0.45"/>
+      <path d="M320 88 H276" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5 5" opacity="0.45"/>
+      <path d="M198 82 L208 88 L198 94" fill="#2563eb" opacity="0.6"/>
+      <path d="M282 82 L272 88 L282 94" fill="#7c3aed" opacity="0.6"/>
+      <rect x="202" y="55" width="76" height="66" rx="16" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+      <path d="M222 78 H258 M222 88 H258 M222 98 H248" stroke="#059669" stroke-width="4" stroke-linecap="round" opacity="0.32"/>
+      <circle cx="240" cy="140" r="5" fill="#059669"/>
+      <path d="M240 121 V210" stroke="#059669" stroke-width="2" opacity="0.38"/>
+      <path d="M240 174 H118 V206 M240 174 H362 V206" stroke="#059669" stroke-width="2" opacity="0.38"/>
+      <rect x="58" y="206" width="120" height="42" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+      <circle cx="78" cy="227" r="7" fill="#059669" opacity="0.22"/>
+      <rect x="92" y="220" width="68" height="6" rx="2" fill="#059669" opacity="0.26"/>
+      <rect x="92" y="232" width="48" height="5" rx="2" fill="#059669" opacity="0.15"/>
+      <rect x="302" y="206" width="120" height="42" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+      <circle cx="322" cy="227" r="7" fill="#059669" opacity="0.22"/>
+      <rect x="336" y="220" width="68" height="6" rx="2" fill="#059669" opacity="0.26"/>
+      <rect x="336" y="232" width="48" height="5" rx="2" fill="#059669" opacity="0.15"/>
+      <text x="94" y="151" text-anchor="middle" font-size="11" fill="#2563eb" opacity="0.75" font-family="monospace">BROWSER RELAY</text>
+      <text x="386" y="151" text-anchor="middle" font-size="11" fill="#7c3aed" opacity="0.75" font-family="monospace">ANY CDP</text>
     </svg>`
   },
   {
     name: 'Full Browser Control',
     visual: 'control',
-    desc: 'Nineteen CDP tools. Navigate, click, type, read the DOM, inspect network requests, read console logs. Open persistent tabs. Your agent drives the browser like a user — but faster.',
+    desc: 'Twenty-four CDP tools. Navigate, click, type, read the DOM, inspect network requests, read console logs. Open persistent tabs, manage windows. Your agent drives the browser like a user — but faster.',
     illustration: `<svg viewBox="0 0 480 280" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect x="40" y="20" width="260" height="210" rx="10" fill="#f8fafc" stroke="#d1d5db" stroke-width="1.5"/>
       <rect x="40" y="20" width="260" height="28" rx="10" fill="#e5e7eb"/>
@@ -565,8 +559,8 @@ const why = [
 const stats = [
   { val: '12', label: 'Search routes' },
   { val: '4', label: 'Browser backends' },
-  { val: '19', label: 'DevTools commands' },
-  { val: '7', label: 'Search engines' },
+  { val: '24', label: 'DevTools commands' },
+  { val: '12', label: 'Search engines' },
 ]
 </script>
 
@@ -1029,29 +1023,31 @@ html.dark .card:hover {
 }
 
 .hero {
-  min-height: min(900px, calc(100vh - 20px));
-  padding: 118px 32px 82px;
-  text-align: left;
+  min-height: auto;
+  padding: 132px 32px 112px;
+  text-align: center;
   isolation: isolate;
   overflow: hidden;
   background:
-    radial-gradient(circle at 8% 8%, rgba(126, 190, 112, 0.16), transparent 25rem),
+    radial-gradient(circle at 50% 10%, rgba(126, 190, 112, 0.2), transparent 34rem),
     linear-gradient(180deg, #f8faf5 0%, var(--marsh-50) 100%);
 }
 
 .hero-shell {
   position: relative;
   z-index: 1;
-  width: min(1240px, 100%);
+  width: min(1180px, 100%);
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(420px, 0.88fr) minmax(580px, 1.12fr);
-  gap: clamp(48px, 6vw, 92px);
+  display: flex;
+  flex-direction: column;
+  gap: 62px;
   align-items: center;
 }
 
 .hero-content {
-  max-width: 560px;
+  max-width: 850px;
+  margin: 0 auto;
+  text-align: center;
   animation: hero-copy-in 0.75s cubic-bezier(.2,.8,.2,1) both;
 }
 
@@ -1062,6 +1058,7 @@ html.dark .card:hover {
   color: var(--forest-700);
   background: rgba(255, 255, 255, 0.7);
   border-color: color-mix(in srgb, var(--forest-600) 24%, transparent);
+  margin-bottom: 24px;
   padding: 7px 14px 7px 11px;
   box-shadow: 0 8px 28px -20px rgba(10, 80, 38, 0.7);
   backdrop-filter: blur(10px);
@@ -1077,10 +1074,10 @@ html.dark .card:hover {
 }
 
 .title {
-  max-width: 620px;
-  margin-bottom: 24px;
-  font-size: clamp(4rem, 5.7vw, 6.1rem);
-  line-height: 0.92;
+  max-width: 920px;
+  margin: 0 auto 24px;
+  font-size: clamp(4.4rem, 7.4vw, 7rem);
+  line-height: 0.9;
   letter-spacing: -0.058em;
   background: linear-gradient(132deg, var(--forest-950) 15%, var(--forest-700) 58%, #55a83a 100%);
   -webkit-background-clip: text;
@@ -1089,19 +1086,19 @@ html.dark .card:hover {
 
 .subtitle {
   margin-bottom: 14px;
-  font-size: clamp(1.15rem, 1.8vw, 1.42rem);
+  font-size: clamp(1.2rem, 2vw, 1.55rem);
   letter-spacing: -0.02em;
   color: var(--forest-900);
 }
 
 .desc {
-  max-width: 540px;
-  margin-bottom: 34px;
-  font-size: 0.98rem;
+  max-width: 700px;
+  margin: 0 auto 34px;
+  font-size: 1rem;
   line-height: 1.82;
 }
 
-.ctas { justify-content: flex-start; }
+.ctas { justify-content: center; }
 
 .cta-primary,
 .cta-secondary {
@@ -1129,8 +1126,8 @@ html.dark .card:hover {
 
 .shot-wrap {
   width: 100%;
-  max-width: none;
-  margin: 0;
+  max-width: 1100px;
+  margin: 0 auto;
   padding: 0;
   isolation: isolate;
   animation: console-in 0.9s 0.12s cubic-bezier(.2,.8,.2,1) both;
@@ -1139,7 +1136,7 @@ html.dark .card:hover {
 .shot-wrap::before {
   content: "";
   position: absolute;
-  inset: 12% -6% -10% 8%;
+  inset: 8% 4% -14%;
   z-index: -1;
   border-radius: 40%;
   background: radial-gradient(circle, rgba(35, 145, 72, 0.24), transparent 68%);
@@ -1148,23 +1145,46 @@ html.dark .card:hover {
 
 .shot-frame {
   position: relative;
-  border: 7px solid color-mix(in srgb, var(--forest-950) 94%, #27352b);
-  border-radius: 22px;
-  background: var(--forest-950);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--forest-700) 28%, var(--lp-border));
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--forest-950) 96%, #27352b);
   box-shadow:
-    0 40px 80px -40px rgba(4, 41, 19, 0.65),
-    0 18px 30px -24px rgba(4, 41, 19, 0.72),
+    0 46px 90px -42px rgba(4, 41, 19, 0.7),
+    0 20px 34px -26px rgba(4, 41, 19, 0.74),
     inset 0 0 0 1px rgba(255,255,255,0.08);
-  transform: perspective(1400px) rotateY(-2.5deg) rotateX(1deg);
   transition: transform 0.45s cubic-bezier(.2,.8,.2,1), box-shadow 0.45s ease;
 }
 
 .shot-frame:hover {
-  transform: perspective(1400px) rotateY(0) rotateX(0) translateY(-4px);
+  transform: translateY(-5px);
   box-shadow: 0 48px 90px -38px rgba(4, 41, 19, 0.72);
 }
 
-.shot-frame img { border-radius: 14px; }
+.shot-chrome {
+  height: 46px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  padding: 0 16px;
+  border-bottom: 1px solid #dce4de;
+  color: #647169;
+  background: #f1f5f2;
+  font: 500 11px "JetBrains Mono", ui-monospace, monospace;
+}
+
+.shot-dots { display: flex; gap: 7px; justify-self: start; }
+.shot-dots span { width: 8px; height: 8px; border-radius: 50%; background: #9aa89f; }
+.shot-dots span:nth-child(2) { opacity: 0.7; }
+.shot-dots span:nth-child(3) { opacity: 0.45; }
+.shot-address {
+  padding: 5px 22px;
+  border: 1px solid #d9e1db;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.72);
+}
+.shot-screen { line-height: 0; }
+.shot-frame img { border-radius: 0; }
 
 .logos {
   position: relative;
@@ -1332,13 +1352,13 @@ html.dark .card:hover {
 
 @media (max-width: 1100px) {
   .hero { padding-top: 112px; }
-  .hero-shell { grid-template-columns: 0.9fr 1.1fr; gap: 38px; }
-  .title { font-size: clamp(3.45rem, 6vw, 5rem); }
+  .hero-shell { gap: 54px; }
+  .title { font-size: clamp(4rem, 8vw, 6rem); }
 }
 
 @media (max-width: 900px) {
   .hero { min-height: auto; padding: 110px 24px 88px; }
-  .hero-shell { grid-template-columns: 1fr; gap: 52px; }
+  .hero-shell { gap: 52px; }
   .hero-content { max-width: 700px; text-align: center; margin: 0 auto; }
   .desc { margin-left: auto; margin-right: auto; }
   .ctas { justify-content: center; }
@@ -1351,13 +1371,14 @@ html.dark .card:hover {
 }
 
 @media (max-width: 768px) {
-  .hero { padding: 96px 20px 112px; }
-  .hero-shell { gap: 42px; }
+  .hero { padding: 106px 20px 92px; }
+  .hero-shell { gap: 40px; }
   .title { font-size: clamp(3.05rem, 14vw, 4.15rem); line-height: .94; }
   .subtitle { font-size: 1.08rem; }
   .desc { font-size: .9rem; line-height: 1.76; }
-  .shot-frame { border-width: 4px; border-radius: 16px; }
-  .shot-frame img { border-radius: 10px; }
+  .shot-frame { border-radius: 14px; }
+  .shot-chrome { height: 38px; padding: 0 11px; }
+  .shot-address { margin: 0 12px; padding: 4px 10px; overflow: hidden; text-overflow: ellipsis; }
   .logos { width: calc(100% - 32px); margin-bottom: -66px; padding: 20px 16px; border-radius: 18px; }
   .logos-row { gap: 7px; }
   .logos-row > span:not(.sep) { font-size: .7rem; padding: 5px 9px; }

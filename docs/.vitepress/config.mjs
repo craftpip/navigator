@@ -1,11 +1,13 @@
 import { defineConfig } from "vitepress";
 
+const base = "/docs/";
+
 export default defineConfig({
   title: "Navigator",
   description:
     "MCP server for web search, page extraction, screenshots, and browser automation",
 
-  base: "/docs/",
+  base,
   outDir: "../docs-dist",
 
   ignoreDeadLinks: true,
@@ -27,7 +29,7 @@ export default defineConfig({
         href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap",
       },
     ],
-    ["link", { rel: "icon", href: "/navigator-logo.png" }],
+    ["link", { rel: "icon", href: `${base}navigator-logo.png` }],
     [
       "meta",
       {
@@ -133,7 +135,7 @@ export default defineConfig({
       {
         text: "Browsers",
         collapsible: true,
-        collapsed: false,
+        collapsed: true,
         items: [
           { text: "Overview", link: "/guides/browsers/overview" },
           { text: "External CDP Browsers", link: "/guides/browsers/cdp-addons" },

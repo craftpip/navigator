@@ -129,16 +129,38 @@ html.dark .lp .subtitle {
   color: #dcebdd;
 }
 
+html.dark .lp .shot-chrome {
+  color: rgba(231, 242, 232, 0.62);
+  background: #0a1c11;
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+html.dark .lp .shot-dots span {
+  background: #486353;
+}
+
+html.dark .lp .shot-address {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 /* ── Navbar logo size ── */
 .VPNavBarTitle .logo {
-  height: 50px;
+  height: 85px;
   margin-right: 16px;
+  transform: translate(0, 16px);
+  transition: height 300ms ease, transform 300ms ease;
+}
+
+body:has(.lp) .VPNavBarTitle .logo {
+  height: 116px;
+  transform: translateY(23px);
 }
 
 @media (max-width: 960px) {
-  .VPNavBarTitle .logo {
-    height: 42px;
-    margin-right: 12px;
+  body:not(:has(.lp)) .VPNavBarTitle .logo {
+    height: 70px;
+    transform: translateY(6px);
   }
 }
 
