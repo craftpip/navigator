@@ -18,7 +18,7 @@ docker compose logs -f         # watch startup logs / extension output
 | Port | Purpose |
 |---|---|
 | `9333:9222` | CDP endpoint, exposed so navigator (or you) can drive the dev Chrome (host :9222 is taken by cloak-browser — override with `CHROME_CDP_PORT`) |
-| `5900` | VNC — connect a VNC client to <host>:5900 to SEE the headed Chromium |
+| `5900` | VNC — connect a VNC client to localhost:5900 to SEE the headed Chromium |
 | network | joins `navigator_default` so the extension can dial `navigator:1994/relay` |
 
 ## Full development / test cycle (Chrome)
@@ -47,8 +47,8 @@ docker compose logs -f         # watch startup logs / extension output
 ### Manual (visual) cycle
 
 1. `docker compose up -d`
-2. Open a VNC client to `<host>:5900` to see the Chrome window.
-3. Click the extension icon → Browser name + server URL (`10.69.1.164:1994`) →
+2. Open a VNC client to `localhost:5900` to see the Chrome window.
+3. Click the extension icon → Browser name + server URL (`localhost:1994`) →
    **Connect**.
 4. Fetch the PIN: `curl -s $NAVIGATOR_URL/stats | jq '.relay.pending[0].pin'`
    (60s expiry) → enter it → **Verify** → status becomes **Connected**.
@@ -117,7 +117,7 @@ the previous version. Never lose or share it.
 - Calls `ConnectionManager.connect()` / `ConnectionManager.send({type:'pin'})`
   directly (routing via `chrome.runtime.sendMessage` from the SW to itself is
   unreliable in MV3).
-- The relay URL must be **bare `host:port`** (`10.69.1.164:1994`) — the extension's
+- The relay URL must be **bare `host:port`** (`localhost:1994`) — the extension's
   `buildCandidateUrls` turns a bare host:port into `ws://<hostport>/relay`; an
   `http://` URL is passed through as-is and the `WebSocket` constructor rejects it.
 - Clears the stored session token before connecting so every run is a fresh PIN

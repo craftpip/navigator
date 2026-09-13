@@ -40,7 +40,7 @@ npm i -g web-ext
 ./launch-firefox.sh
 
 # 3. In the opened Firefox toolbar, open the relay popup:
-#      Server URL : http://10.69.1.164:1994   (relay WS auto-derived)
+#      Server URL : http://localhost:1994   (relay WS auto-derived)
 #      Connect (enter the PIN shown by the navigator side)
 #      Connect BiDi  (ws://127.0.0.1:9222/session)
 ```

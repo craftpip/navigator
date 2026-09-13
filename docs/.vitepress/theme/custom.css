@@ -533,6 +533,12 @@ html.dark .env-var {
   border-color: rgba(16, 185, 129, 0.3);
 }
 
+/* ── CDP Sharing sidebar icon (emoji before the label, with real margin) ── */
+.VPSidebarItem a.link[href*="cdp-sharing"]::before {
+  content: "🔗";
+  margin-right: 0.5em;
+}
+
 /* ── Tool name badge (distinct from plain inline code) ── */
 .tool-name {
   display: inline-flex;

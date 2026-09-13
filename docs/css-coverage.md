@@ -1,6 +1,6 @@
 # CSS Coverage — SVG Fidelity
 
-Generated 2026-08-22 17:25 via `page.evaluate(getComputedStyle)` on `http://10.69.1.164:1994/` (1920×947, 60 visible els, 443 total props).
+Generated 2026-08-22 17:25 via `page.evaluate(getComputedStyle)` on `http://localhost:1994/` (1920×947, 60 visible els, 443 total props).
 
 ## Summary
 - Captured today (`extractor.js:91` + `dom-snapshot.js:72`): ~34 props

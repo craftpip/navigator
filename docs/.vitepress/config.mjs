@@ -131,6 +131,20 @@ export default defineConfig({
         ],
       },
       {
+        text: "Browsers",
+        collapsible: true,
+        collapsed: false,
+        items: [
+          { text: "Overview", link: "/guides/browsers/overview" },
+          { text: "External CDP Browsers", link: "/guides/browsers/cdp-addons" },
+          { text: "CloakBrowser", link: "/guides/browsers/cloakbrowser" },
+          { text: "Lightpanda", link: "/guides/browsers/lightpanda" },
+          { text: "Chrome Extension", link: "/guides/browsers/chrome-extension" },
+          { text: "Firefox Extension", link: "/guides/browsers/firefox-extension" },
+          { text: "CDP Sharing", link: "/guides/browsers/cdp-sharing" },
+        ],
+      },
+      {
         text: "Self-Hosting",
         collapsible: true,
         collapsed: true,
@@ -181,6 +195,19 @@ export default defineConfig({
             collapsed: true,
             items: [
               { text: "Operations and Configuration", link: "/operations/operations-and-configuration" },
+            ],
+          },
+          {
+            text: "Browsers",
+            collapsible: true,
+            collapsed: true,
+            items: [
+              { text: "BROWSERS Array", link: "/reference/browsers/browser-array" },
+              { text: "External CDP", link: "/reference/browsers/external-cdp" },
+              { text: "CDP Sharing", link: "/reference/browsers/cdp-sharing" },
+              { text: "CloakBrowser", link: "/reference/browsers/cloakbrowser" },
+              { text: "Lightpanda", link: "/reference/browsers/lightpanda" },
+              { text: "Relay Extensions", link: "/reference/browsers/extensions" },
             ],
           },
           {
