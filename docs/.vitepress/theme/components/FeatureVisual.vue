@@ -122,7 +122,7 @@
         </g>
       </g>
 
-      <g v-else-if="type === 'remote'" class="remote-art">
+       <g v-else-if="type === 'remote'" class="remote-art">
         <g class="remote-monitor" filter="url(#shadow-remote)">
           <rect x="54" y="61" width="318" height="210" rx="17"/><rect class="monitor-screen" x="67" y="74" width="292" height="171" rx="10"/>
           <path class="monitor-bar" d="M67 108h292"/><circle cx="87" cy="91" r="5"/><circle cx="104" cy="91" r="5"/>
@@ -134,10 +134,34 @@
           <rect x="410" y="105" width="106" height="132" rx="14"/><rect x="421" y="119" width="84" height="91" rx="7"/>
           <rect class="client-hero" x="433" y="136" width="60" height="20" rx="5"/><path class="client-lines" d="M433 174h42M433 188h60"/><circle cx="463" cy="223" r="5"/>
         </g>
-        <g class="live-badge"><rect x="407" y="67" width="109" height="27" rx="13.5"/><circle cx="424" cy="80.5" r="5"/><text x="438" y="83.5">LIVE VIEW</text></g>
-      </g>
+         <g class="live-badge"><rect x="407" y="67" width="109" height="27" rx="13.5"/><circle cx="424" cy="80.5" r="5"/><text x="438" y="83.5">LIVE VIEW</text></g>
+       </g>
 
-      <g v-else class="console-art">
+       <g v-else-if="type === 'relay'" class="relay-art">
+         <g class="relay-browser" filter="url(#shadow-relay)">
+           <rect x="42" y="72" width="172" height="164" rx="16"/><path d="M42 108h172"/>
+           <circle cx="63" cy="90" r="5"/><circle cx="80" cy="90" r="5"/><circle cx="97" cy="90" r="5"/>
+           <rect class="relay-address" x="117" y="82" width="77" height="16" rx="8"/>
+           <rect class="relay-page" x="64" y="126" width="128" height="82" rx="10"/>
+           <path class="relay-lines" d="M79 150h68M79 166h91M79 182h48"/>
+         </g>
+         <path class="relay-link" d="M214 154h53M214 184h53"/>
+         <g class="relay-hub" filter="url(#shadow-relay)">
+           <rect x="267" y="128" width="74" height="82" rx="17"/>
+           <path d="M286 154h36M286 169h36M286 184h24"/>
+         </g>
+         <path class="relay-link" d="M341 154h43M341 184h43"/>
+         <g class="relay-endpoint" filter="url(#shadow-relay)">
+           <rect x="384" y="72" width="134" height="164" rx="16"/>
+           <text x="451" y="113">CDP ENDPOINT</text>
+           <rect x="404" y="130" width="94" height="26" rx="7"/>
+           <path d="M418 143h66M404 178h78M404 194h54"/>
+           <circle cx="405" cy="216" r="5"/>
+         </g>
+         <g class="relay-label"><rect x="208" y="244" width="192" height="27" rx="13.5"/><circle cx="226" cy="257.5" r="5"/><text x="240" y="260.5">BROWSER RELAY</text></g>
+       </g>
+
+       <g v-else class="console-art">
         <g class="console-shell" filter="url(#shadow-console)"><rect x="42" y="48" width="476" height="246" rx="18"/><path d="M42 88h476"/><circle cx="64" cy="68" r="5"/><circle cx="81" cy="68" r="5"/><circle cx="98" cy="68" r="5"/></g>
         <g class="metric-card"><rect x="66" y="112" width="126" height="64" rx="11"/><path class="metric" d="M82 153c17-30 35 8 51-14s27-4 43-20"/><circle cx="176" cy="119" r="4"/></g>
         <g class="metric-card"><rect x="205" y="112" width="126" height="64" rx="11"/><circle class="ring-bg" cx="237" cy="144" r="18"/><path class="ring-value" d="M237 126a18 18 0 1 1-17 12"/><path d="M267 136h45M267 149h32"/></g>
@@ -162,6 +186,7 @@ const sources = [{ x: 88, y: 96 }, { x: 82, y: 224 }, { x: 164, y: 58 }, { x: 16
 .capture-frame>rect:first-child,.quality-panel>rect:first-child,.delivery-options g>rect:first-child{fill:var(--lp-surface);stroke:var(--lp-border)}.capture-frame>path:first-of-type{stroke:var(--lp-border)}.capture-frame circle{fill:var(--lp-border)}.capture-hero{fill:url(#wash-screenshot)}.capture-lines{fill:none;stroke:var(--lp-border);stroke-width:6;stroke-linecap:round}.capture-corners{fill:none;stroke:var(--ink);stroke-width:2;stroke-linecap:round}.capture-link,.delivery-link{fill:none;stroke:var(--ink);stroke-width:2.5;stroke-dasharray:5 6}.capture-arrow,.delivery-arrow{fill:var(--ink)}.quality-title{fill:var(--ink);font:700 9px Inter,sans-serif;letter-spacing:1.2px}.quality-choice rect{fill:var(--lp-surface);stroke:var(--lp-border)}.quality-choice circle{fill:none;stroke:var(--lp-border);stroke-width:2}.quality-choice text,.delivery-options text{fill:var(--lp-muted);font:700 8px Inter,sans-serif;letter-spacing:.7px}.quality-choice path{stroke:var(--lp-border);stroke-width:3;stroke-linecap:round}.quality-choice.selected rect{fill:color-mix(in srgb,var(--ink) 10%,var(--lp-surface));stroke:var(--ink)}.quality-choice.selected circle{fill:var(--ink);stroke:var(--ink)}.quality-choice.selected text{fill:var(--ink)}.delivery-options .file-output>rect{fill:color-mix(in srgb,#10b981 9%,var(--lp-surface));stroke:#10b981}.delivery-options .file-output text{fill:#059669}.file-icon,.base64-icon{fill:none;stroke:var(--ink);stroke-width:1.8;stroke-linejoin:round}.path-line{stroke:var(--lp-border);stroke-width:4;stroke-linecap:round}.file-output>circle{fill:#10b981}
 .command-list>path{stroke:var(--lp-border);stroke-width:2}.command-list g>circle{fill:var(--lp-surface);stroke:var(--lp-border)}.command-list g>rect{fill:var(--lp-surface);stroke:var(--lp-border)}.command-list text{fill:var(--lp-muted);font:700 8px Inter,sans-serif;letter-spacing:.5px}.command-list g>text:first-of-type{text-anchor:middle}.command-list .command-active>circle{fill:var(--ink);stroke:var(--ink)}.command-list .command-active>text:first-of-type{fill:#fff}.command-list .command-active>rect{fill:color-mix(in srgb,var(--ink) 10%,var(--lp-surface));stroke:var(--ink)}.command-list .command-active>text:last-of-type{fill:var(--ink)}.control-link{stroke:var(--ink);stroke-width:2.5;stroke-dasharray:5 6}.control-arrow{fill:var(--ink)}.browser-control>rect:first-child{fill:var(--lp-surface);stroke:var(--lp-border)}.browser-control>path:first-of-type{stroke:var(--lp-border)}.browser-control>circle:not(.click-ring){fill:var(--lp-border)}.control-card{fill:color-mix(in srgb,var(--ink) 7%,var(--lp-surface))}.control-lines{stroke:var(--lp-border);stroke-width:6;stroke-linecap:round}.click-target{fill:var(--ink)}.browser-control text{fill:#fff;font:700 9px Inter,sans-serif;letter-spacing:.7px}.browser-control .button-label{text-anchor:middle}.click-ring{fill:none;stroke:var(--ink);stroke-width:2;animation:pulse 2s ease-out infinite;transform-box:fill-box;transform-origin:center}.cursor{fill:var(--lp-text);stroke:var(--lp-surface);stroke-width:2}
 .remote-monitor>rect:first-child,.remote-client>rect:first-child{fill:var(--lp-surface);stroke:var(--lp-border)}.monitor-screen,.remote-client>rect:nth-child(2){fill:color-mix(in srgb,var(--lp-surface) 95%,var(--ink));stroke:var(--lp-border)}.monitor-bar{stroke:var(--lp-border)}.remote-monitor>circle,.remote-client>circle{fill:var(--lp-border)}.monitor-hero,.client-hero{fill:url(#wash-remote)}.monitor-lines,.client-lines{stroke:var(--lp-border);stroke-width:6;stroke-linecap:round}.monitor-stand{fill:none;stroke:var(--lp-border);stroke-width:5;stroke-linecap:round}.remote-link{stroke:var(--ink);stroke-width:3;stroke-dasharray:5 6;animation:dash 4s linear infinite}.remote-pulse{fill:var(--ink);filter:url(#glow-remote)}.live-badge rect{fill:color-mix(in srgb,#10b981 12%,var(--lp-surface));stroke:#10b981}.live-badge circle{fill:#10b981}.live-badge text{fill:#059669;font:700 8px Inter,sans-serif;letter-spacing:.8px}
-.console-shell rect{fill:#0c1710;stroke:#294333}.console-shell path{stroke:#294333}.console-shell circle{fill:#486353}.metric-card rect,.activity-panel rect{fill:#132219;stroke:#294333}.metric,.ring-value{fill:none;stroke:#53c778;stroke-width:3;stroke-linecap:round}.ring-bg{fill:none;stroke:#294333;stroke-width:5}.ring-value{stroke-width:5}.metric-card path:not(.metric):not(.ring-value):not(.bars){stroke:#294333;stroke-width:5;stroke-linecap:round}.bars{stroke:#8dbb53;stroke-width:7;stroke-linecap:round}.activity-panel circle{fill:#53c778}.activity-panel circle:nth-of-type(2){fill:#72b45b}.activity-panel circle:nth-of-type(3){fill:#9bbd56}.activity-panel path{stroke:#294333;stroke-width:5;stroke-linecap:round}.activity-panel .time{stroke:#486353;stroke-width:3}
+.relay-browser>rect:first-child,.relay-endpoint>rect:first-child{fill:var(--visual-surface);stroke:var(--visual-border)}.relay-browser>path:first-of-type{stroke:var(--visual-border)}.relay-browser>circle{fill:var(--visual-dot)}.relay-address{fill:var(--visual-muted)}.relay-page{fill:color-mix(in srgb,var(--ink) 10%,var(--visual-surface))}.relay-lines{fill:none;stroke:var(--visual-border);stroke-width:6;stroke-linecap:round}.relay-link{fill:none;stroke:var(--ink);stroke-width:2.5;stroke-dasharray:5 6;animation:dash 4s linear infinite}.relay-hub rect{fill:color-mix(in srgb,var(--ink) 13%,var(--visual-surface));stroke:var(--ink);stroke-width:1.5}.relay-hub path{stroke:var(--ink);stroke-width:4;stroke-linecap:round}.relay-endpoint text{fill:var(--ink);font:700 8px Inter,sans-serif;letter-spacing:.8px;text-anchor:middle}.relay-endpoint rect:not(:first-child){fill:var(--visual-muted)}.relay-endpoint path{stroke:var(--visual-border);stroke-width:5;stroke-linecap:round}.relay-endpoint circle{fill:#10b981}.relay-label rect{fill:color-mix(in srgb,#10b981 11%,var(--visual-surface));stroke:#10b981}.relay-label circle{fill:#10b981}.relay-label text{fill:#059669;font:700 8px Inter,sans-serif;letter-spacing:.8px}
+.console-shell rect{fill:var(--visual-shell);stroke:var(--visual-border)}.console-shell path{stroke:var(--visual-border)}.console-shell circle{fill:var(--visual-dot)}.metric-card rect,.activity-panel rect{fill:var(--visual-surface);stroke:var(--visual-border)}.metric,.ring-value{fill:none;stroke:var(--visual-green);stroke-width:3;stroke-linecap:round}.ring-bg{fill:none;stroke:var(--visual-border);stroke-width:5}.ring-value{stroke-width:5}.metric-card path:not(.metric):not(.ring-value):not(.bars){stroke:var(--visual-border);stroke-width:5;stroke-linecap:round}.bars{stroke:var(--visual-olive);stroke-width:7;stroke-linecap:round}.activity-panel circle{fill:var(--visual-green)}.activity-panel circle:nth-of-type(2){fill:var(--visual-olive)}.activity-panel circle:nth-of-type(3){fill:#9bbd56}.activity-panel path{stroke:var(--visual-border);stroke-width:5;stroke-linecap:round}.activity-panel .time{stroke:var(--visual-dot);stroke-width:3}
 @keyframes dash{to{stroke-dashoffset:-48}}@keyframes pulse{0%{transform:scale(.5);opacity:.55}80%,100%{transform:scale(1.8);opacity:0}}@keyframes blink{50%{opacity:.35}}@media(prefers-reduced-motion:reduce){.art *{animation:none!important}}@media(max-width:768px){.art{border-radius:16px}}
 </style>

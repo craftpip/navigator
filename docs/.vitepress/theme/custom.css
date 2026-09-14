@@ -105,6 +105,13 @@ html.dark .shot-light { display: none !important; }
 html.dark .lp {
   --lp-blue: #5fce7b;
   --lp-blue-soft: rgba(95, 206, 123, 0.11);
+  --visual-shell: #0c1710;
+  --visual-surface: #132219;
+  --visual-border: #294333;
+  --visual-muted: #213a29;
+  --visual-dot: #486353;
+  --visual-green: #53c778;
+  --visual-olive: #8dbb53;
   background: var(--vp-c-bg);
 }
 

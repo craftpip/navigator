@@ -1019,6 +1019,13 @@ html.dark .card:hover {
   --lp-blue: var(--forest-600);
   --lp-blue-soft: color-mix(in srgb, var(--forest-500) 10%, transparent);
   --lp-purple: #67a33f;
+  --visual-shell: #edf4ee;
+  --visual-surface: #ffffff;
+  --visual-border: #cad9cd;
+  --visual-muted: #dfeae1;
+  --visual-dot: #9aaca0;
+  --visual-green: #1d8446;
+  --visual-olive: #72a944;
   background: var(--vp-c-bg);
 }
 
