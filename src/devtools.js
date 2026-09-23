@@ -12,6 +12,7 @@ const DEFAULT_HTML_LIMIT = 20000;
 const INACTIVITY_TIMEOUT_MS = 300_000;
 const INACTIVITY_CHECK_INTERVAL_MS = 30_000;
 const CLOSED_TARGET_RETENTION_MS = 600_000;
+const MAX_FORMAT_OUTPUT_CHARS = 120000;
 
 const targetsById = new Map();
 const closedTargets = new Map();
@@ -243,6 +244,31 @@ function assertEnabled(manager) {
   }
 }
 
+/**
+ * Release every tracked devtools target whose backend matches `backendName`.
+ * Used by the browser config lifecycle boundary when a browser is removed or
+ * its identity changes: Navigator-created agent targets are closed, adopted
+ * user tabs are only released (their real tab is never closed), and no stale
+ * handle for the old backend remains drivable.
+ */
+export function releaseTargetsByBackend(backendName) {
+  if (!backendName) return [];
+  const released = [];
+  for (const [targetId, state] of [...targetsById.entries()]) {
+    if (String(state.backend || "").toLowerCase() !== String(backendName).toLowerCase()) continue;
+    targetsById.delete(targetId);
+    clearTab(state.backend, targetId);
+    if (state.adopted) {
+      released.push(`${targetId}: released adopted handle`);
+    } else {
+      closedTargets.set(targetId, { closedAt: new Date().toISOString() });
+      state.page.close?.()?.catch(() => {});
+      released.push(`${targetId}: closed navigator target`);
+    }
+  }
+  return released;
+}
+
 export async function getTargetState(targetId) {
   const tid = String(targetId || "").trim();
   if (!tid) throw new Error(`targetId is required`);
@@ -334,21 +360,56 @@ export function getLastUsedBackend(targetId) {
   return lastUsedBackendByTarget.get(String(targetId)) || null;
 }
 
-async function withStaleRetry(targetId, action) {
+function unknownAfterDispatch(targetId, operation, cause) {
+  const err = new Error(
+    `${operation} for target ${targetId}: the browser debugger session was lost while the command may have been in flight ` +
+    `(${cause.message}). The action MAY have been applied — outcome unknown. ` +
+    `Verify the page/target state first (e.g. DOM.getDocument or Runtime.evaluate) before retrying; ` +
+    `a blind retry can double-dispatch a write.`
+  );
+  err.name = "UnknownDispatchError";
+  err.targetId = targetId;
+  err.operation = operation;
+  err.retrySafe = false;
+  err.stage = "dispatch";
+  return err;
+}
+
+async function withStaleRetry(targetId, action, { retryable = true, operation = "devtools command" } = {}) {
   const tid = String(targetId || "").trim();
   if (!tid) throw new Error("targetId is required");
-  let state;
-  try {
-    state = await getTargetState(tid);
-    rememberUsedBackend(tid, state.backend);
-    return await action(state);
-  } catch (err) {
-    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
+  const purgeStale = () => {
     const stale = targetsById.get(tid);
     if (stale) {
       targetsById.delete(tid);
       clearTab(stale.backend, tid);
     }
+  };
+  let state;
+  try {
+    state = await getTargetState(tid);
+  } catch (err) {
+    // Handle was stale before any work was dispatched — safe to purge and
+    // re-acquire for every caller, read or mutation. Nothing has been sent yet.
+    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
+    purgeStale();
+    await new Promise((r) => setTimeout(r, 450));
+    try {
+      state = await getTargetState(tid);
+    } catch (e) {
+      throw err;
+    }
+  }
+  rememberUsedBackend(tid, state.backend);
+  try {
+    return await action(state);
+  } catch (err) {
+    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
+    purgeStale();
+    // The session died mid-dispatch. Only re-run actions that are safe to
+    // repeat (reads). A mutation may already have landed — report the outcome
+    // as explicitly unknown instead of silently double-dispatching the write.
+    if (!retryable) throw unknownAfterDispatch(tid, operation, err);
     await new Promise((r) => setTimeout(r, 450));
     try {
       state = await getTargetState(tid);
@@ -358,6 +419,60 @@ async function withStaleRetry(targetId, action) {
     rememberUsedBackend(tid, state.backend);
     return await action(state);
   }
+}
+
+function rawCommandIsReadOnly(method) {
+  return /^(Page|DOM|Runtime|Network|CSS|Accessibility|Browser|Target|IO|SystemInfo|Memory|Performance)\.(get|query|describe|resolve|search)/i.test(method) ||
+    /^Runtime\.(evaluate|callFunctionOn)/i.test(method);
+}
+
+const READ_ONLY_OPERATIONS = new Set([
+  "Target.getTargets",
+  "Runtime.evaluate",
+  "Runtime.getConsoleMessages",
+  "Network.getRequests",
+  "DOM.getDocument",
+  "DOM.querySelector",
+  "DOM.querySelectorAll",
+  "DOM.getOuterHTML",
+  "DOM.getCompactHTML",
+  "DOM.scrollIntoViewIfNeeded",
+  "Browser.getWindowForTarget"
+]);
+
+function operationIsReadOnly(name, args) {
+  if (name === "Target.sendCommand") return rawCommandIsReadOnly(String(args.method || ""));
+  return READ_ONLY_OPERATIONS.has(name);
+}
+
+const DEVTOOLS_TIMEOUT_CODE = "DEVTOOLS_OPERATION_TIMEOUT";
+
+export class DevtoolsOperationTimeoutError extends Error {
+  constructor({ operation, targetId, backend, timeoutMs, retrySafe }) {
+    const detail = retrySafe
+      ? `The command may still be in flight, but this operation is read-only — re-running it is safe.`
+      : `The write may already have been applied — outcome unknown. Verify the page/target state first (e.g. DOM.getDocument or Runtime.evaluate) before considering a retry; a blind retry can double-dispatch the write.`;
+    super(
+      `${operation} timed out after ${timeoutMs}ms (target ${targetId || "unknown"}, backend ${backend || "unknown"}). ${detail}`
+    );
+    this.name = "DevtoolsOperationTimeoutError";
+    this.code = DEVTOOLS_TIMEOUT_CODE;
+    this.operation = operation;
+    this.targetId = targetId || null;
+    this.backend = backend || null;
+    this.timeoutMs = timeoutMs;
+    this.stage = "operation";
+    this.retrySafe = retrySafe === true;
+  }
+}
+
+function isDevtoolsOperationTimeout(error) {
+  return error?.code === DEVTOOLS_TIMEOUT_CODE;
+}
+
+async function devtoolsOperationTimeoutMs() {
+  const manager = await getBrowserManager();
+  return Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 }
 
 function recordConsoleMessage(state, entry) {
@@ -398,30 +513,38 @@ async function refreshTitle(state) {
 
 let inactivityInterval = null;
 
+export function runInactivityTick(now = Date.now()) {
+  for (const [targetId, state] of [...targetsById.entries()]) {
+    if (state.page.isClosed()) {
+      targetsById.delete(targetId);
+      clearTab(state.backend, targetId);
+      continue;
+    }
+    const lastActive = new Date(state.lastActiveAt).getTime();
+    if (now - lastActive >= INACTIVITY_TIMEOUT_MS) {
+      devtoolsCounters.targetsInactivityClosed += 1;
+      targetsById.delete(targetId);
+      clearTab(state.backend, targetId);
+      if (state.adopted) {
+        // Adopted targets are handles to the user's real browser tab. Releasing
+        // our handle must never send Target.closeTarget or close the user's tab.
+      } else {
+        closedTargets.set(targetId, { closedAt: new Date().toISOString() });
+        state.page.close?.()?.catch(() => {});
+      }
+    }
+  }
+  for (const [targetId, entry] of [...closedTargets.entries()]) {
+    if (now - new Date(entry.closedAt).getTime() >= CLOSED_TARGET_RETENTION_MS) {
+      closedTargets.delete(targetId);
+    }
+  }
+}
+
 function startInactivityCleanup() {
   if (inactivityInterval) return;
   inactivityInterval = setInterval(() => {
-    const now = Date.now();
-    for (const [targetId, state] of [...targetsById.entries()]) {
-      if (state.page.isClosed()) {
-        targetsById.delete(targetId);
-        clearTab(state.backend, targetId);
-        continue;
-      }
-      const lastActive = new Date(state.lastActiveAt).getTime();
-      if (now - lastActive >= INACTIVITY_TIMEOUT_MS) {
-        closedTargets.set(targetId, { closedAt: new Date().toISOString() });
-        devtoolsCounters.targetsInactivityClosed += 1;
-        targetsById.delete(targetId);
-        clearTab(state.backend, targetId);
-        state.page.close().catch(() => {});
-      }
-    }
-    for (const [targetId, entry] of [...closedTargets.entries()]) {
-      if (now - new Date(entry.closedAt).getTime() >= CLOSED_TARGET_RETENTION_MS) {
-        closedTargets.delete(targetId);
-      }
-    }
+    runInactivityTick();
   }, INACTIVITY_CHECK_INTERVAL_MS);
   inactivityInterval.unref();
 }
@@ -641,26 +764,22 @@ async function listTargets() {
   const results = [];
   const seen = new Set();
 
-  // Adopted devtools targets — these have live handles and are directly drivable.
+  // Target.getTargets is a snapshot for an LLM to choose a target. Never make it
+  // wait on a page or extension: titles and relay tabs are maintained elsewhere.
   for (const state of targetsById.values()) {
     if (!state.page || state.page.isClosed()) continue;
-    await refreshTitle(state);
     seen.add(state.targetId);
     results.push({ ...buildTargetSummary(state), origin: state.adopted ? "browser" : "agent" });
   }
 
-  // Fresh open tabs from connected relay (user) browsers so Target.getTargets
-  // never reports empty after a restart before anything is adopted.
+  // Relay tab lists are pushed on connection and refreshed by the browser
+  // manager's background/status paths. Use that cache here rather than making
+  // Target.getTargets depend on a round-trip to the user's browser.
   const relayEntries = manager
     ._effectiveAddOns()
     .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)));
   for (const entry of relayEntries) {
-    let tabs;
-    try {
-      tabs = await relayServer.refreshTabList(entry.name);
-    } catch {
-      tabs = [];
-    }
+    const tabs = relayServer.getEntry(entry.name)?.tabs || [];
     for (const t of tabs) {
       if (!t || !t.targetId || seen.has(t.targetId)) continue;
       if (t.type && t.type !== "page") continue;
@@ -693,24 +812,46 @@ async function closeTarget(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const state = await getTargetState(args.targetId);
+  if (state.adopted) {
+    // Adopted states are handles to a user's existing tab. Releasing ours must
+    // never send Target.closeTarget or close the real browser tab.
+    targetsById.delete(state.targetId);
+    clearTab(state.backend, state.targetId);
+    devtoolsCounters.targetsClosed += 1;
+    return { targetId: state.targetId, closed: false, released: true };
+  }
   // page.close() on a relay browser waits for the extension round-trip, which
   // can be dropped silently when the extension's socket flaps or a response
   // arrives after the pending command was evicted. Bound the wait so the tool
   // never hangs forever, then release our handle either way.
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   let timedOut = false;
+  let closeError = null;
+  let timer = null;
   try {
     await Promise.race([
       state.page.close(),
-      new Promise((resolve) => setTimeout(() => {
-        timedOut = true;
-        resolve();
-      }, timeoutMs))
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, timeoutMs);
+      })
     ]);
   } catch (error) {
-    // For relay (user-owned) tabs the extension may already be gone; still
-    // release our handle so the target never leaks in targetsById.
+    closeError = String(error?.message || error);
     console.error(`⚠️  closeTarget page.close failed (${state.backend} ${state.targetId}): ${String(error?.message || error)}`);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (timedOut || closeError) {
+    return {
+      targetId: state.targetId,
+      closed: false,
+      outcome: "unknown_after_dispatch",
+      ...(timedOut ? { timedOut: true } : { error: closeError }),
+      retrySafe: false
+    };
   }
   targetsById.delete(state.targetId);
   closedTargets.set(state.targetId, { closedAt: new Date().toISOString() });
@@ -867,7 +1008,7 @@ async function navigatePage(args = {}) {
     });
     await refreshTitle(liveState);
     return { ...buildTargetSummary(liveState), created: false };
-  });
+  }, { retryable: false, operation: "Page.navigate" });
 }
 
 async function reloadPage(args = {}) {
@@ -905,7 +1046,7 @@ async function reloadPage(args = {}) {
   await refreshTitle(state);
   return { ...buildTargetSummary(state), reloaded: true, ignoreCache: cacheToggled };
 
-  });}
+  }, { retryable: false, operation: "Page.reload" });}
 
 async function goHistory(args = {}, direction) {
   assertString(args.targetId, "targetId");
@@ -924,7 +1065,7 @@ async function goHistory(args = {}, direction) {
   const navigated = Boolean(response) || state.page.url() !== before;
   return { ...buildTargetSummary(state), direction, navigated };
 
-  });}
+  }, { retryable: false, operation: "Page.goHistory" });}
 
 async function dispatchKeyEvent(args = {}) {
   assertString(args.targetId, "targetId");
@@ -944,13 +1085,34 @@ async function dispatchKeyEvent(args = {}) {
   await new Promise((resolve) => setTimeout(resolve, manager.config.humanTypingDelay || 0));
   return { ...buildTargetSummary(state), pressed: args.key, modifiers };
 
-  });}
+  }, { retryable: false, operation: "Input.dispatchKeyEvent" });}
 
 async function getNetworkRequests(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  return withStaleRetry(args.targetId, async (state) => {
+  const tid = String(args.targetId || "").trim();
+  if (closedTargets.has(tid)) {
+    throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
+  }
+
+  // Pure in-memory buffer read — never block on the target or the relay. The
+  // buffer is only populated while a devtools handle is attached, so an
+  // un-observed target has nothing to show yet (the same "0 buffered" answer)
+  // without paying for an adoption round-trip that can hang.
+  const state = targetsById.get(tid);
+  if (!state || !state.page || state.page.isClosed()) {
+    return {
+      targetId: tid,
+      url: "",
+      total: 0,
+      shown: 0,
+      failed: 0,
+      observed: false,
+      requests: [],
+      note: `No request buffer for target ${tid}. The buffer fills while the tab is observed — run a devtools call that drives this target first, or create one with Target.createTarget.`
+    };
+  }
   const limit = Math.min(Math.max(1, Math.floor(Number(args.limit)) || 25), MAX_NETWORK_REQUESTS);
   const filter = typeof args.filter === "string" && args.filter.trim()
     ? args.filter.trim().toLowerCase()
@@ -969,10 +1131,10 @@ async function getNetworkRequests(args = {}) {
     total: state.networkRequests.length,
     shown: Math.min(entries.length, limit),
     failed: entries.filter((entry) => entry.failed).length,
+    observed: true,
     requests: entries.slice(-limit).reverse()
   };
-
-  });}
+}
 
 async function evaluateRuntime(args = {}) {
   assertString(args.targetId, "targetId");
@@ -1151,15 +1313,30 @@ async function getConsoleMessages(args = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  return withStaleRetry(args.targetId, async (state) => {
+  const tid = String(args.targetId || "").trim();
+  if (closedTargets.has(tid)) {
+    throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
+  }
+
+  // Pure in-memory buffer read — never block on the target or the relay.
+  const state = targetsById.get(tid);
+  if (!state || !state.page || state.page.isClosed()) {
+    return {
+      targetId: tid,
+      count: 0,
+      observed: false,
+      messages: [],
+      note: `No console buffer for target ${tid}. The buffer fills while the tab is observed — run a devtools call that drives this target first, or create one with Target.createTarget.`
+    };
+  }
   const limit = Math.max(1, Math.min(100, Number(args.limit) || 30));
   return {
     targetId: state.targetId,
     count: state.consoleMessages.length,
+    observed: true,
     messages: state.consoleMessages.slice(-limit)
   };
-
-  });}
+}
 
 async function getDocument(args = {}) {
   assertString(args.targetId, "targetId");
@@ -1946,7 +2123,7 @@ async function dispatchMouseEvent(args = {}) {
     title: state.lastTitle
   };
 
-  });}
+  }, { retryable: false, operation: "Input.dispatchMouseEvent" });}
 
 async function insertText(args = {}) {
   assertString(args.targetId, "targetId");
@@ -2078,7 +2255,7 @@ async function insertText(args = {}) {
     valueReadback: finalValue?.value !== undefined
   };
 
-  });}
+  }, { retryable: false, operation: "Input.insertText" });}
 
 // --------------------------------------------------------- window & focus CDP
 
@@ -2101,7 +2278,7 @@ async function activateTarget(args = {}) {
       activated: true,
       result
     };
-  });
+  }, { retryable: false, operation: "Target.activateTarget" });
 }
 
 async function getWindowForTarget(args = {}) {
@@ -2138,7 +2315,7 @@ async function setWindowBounds(args = {}) {
       ...(result.windowId !== undefined ? { windowId: result.windowId } : {}),
       bounds: result.bounds ?? bounds
     };
-  });
+  }, { retryable: false, operation: "Browser.setWindowBounds" });
 }
 
 async function focusWindow(args = {}) {
@@ -2166,7 +2343,7 @@ async function focusWindow(args = {}) {
       windowFocused,
       ...(boundsError ? { boundsError } : {})
     };
-  });
+  }, { retryable: false, operation: "Browser.focusWindow" });
 }
 
 /**
@@ -2197,7 +2374,7 @@ async function sendRawCommand(args = {}) {
       ownership: state.ownership || "agent",
       result
     };
-  });
+  }, { retryable: rawCommandIsReadOnly(args.method), operation: `Target.sendCommand ${args.method}` });
 }
 
 export const devtoolsToolDefinitions = [
@@ -2564,31 +2741,67 @@ export async function getPageContent(targetId) {
 }
 
 export async function handleDevtoolsToolCall(name, args = {}) {
-  if (name === "Target.createTarget") return createTarget(args);
-  if (name === "Target.getTargets") return listTargets(args);
-  if (name === "Target.closeTarget") return closeTarget(args);
-  if (name === "Page.navigate") return navigatePage(args);
-  if (name === "Page.reload") return reloadPage(args);
-  if (name === "Page.goBack") return goHistory(args, "back");
-  if (name === "Page.goForward") return goHistory(args, "forward");
-  if (name === "Runtime.evaluate") return evaluateRuntime(args);
-  if (name === "Runtime.getConsoleMessages") return getConsoleMessages(args);
-  if (name === "Network.getRequests") return getNetworkRequests(args);
-  if (name === "DOM.getDocument") return getDocument(args);
-  if (name === "DOM.querySelector") return querySelector(args, false);
-  if (name === "DOM.querySelectorAll") return querySelector(args, true);
-  if (name === "DOM.getOuterHTML") return getOuterHtml(args);
-  if (name === "DOM.getCompactHTML") return getCompactHtml(args);
-  if (name === "DOM.scrollIntoViewIfNeeded") return scrollIntoViewIfNeeded(args);
-  if (name === "Input.dispatchMouseEvent") return dispatchMouseEvent(args);
-  if (name === "Input.insertText") return insertText(args);
-  if (name === "Input.dispatchKeyEvent") return dispatchKeyEvent(args);
-  if (name === "Target.activateTarget") return activateTarget(args);
-  if (name === "Browser.getWindowForTarget") return getWindowForTarget(args);
-  if (name === "Browser.setWindowBounds") return setWindowBounds(args);
-  if (name === "Browser.focusWindow") return focusWindow(args);
-  if (name === "Target.sendCommand") return sendRawCommand(args);
-  throw new Error(`Unknown developer browser tool: ${name}`);
+  // Reject unknown tools synchronously before any manager/config await.
+  const KNOWN = new Set([
+    "Target.createTarget", "Target.getTargets", "Target.closeTarget",
+    "Page.navigate", "Page.reload", "Page.goBack", "Page.goForward",
+    "Runtime.evaluate", "Runtime.getConsoleMessages", "Network.getRequests",
+    "DOM.getDocument", "DOM.querySelector", "DOM.querySelectorAll",
+    "DOM.getOuterHTML", "DOM.getCompactHTML", "DOM.scrollIntoViewIfNeeded",
+    "Input.dispatchMouseEvent", "Input.insertText", "Input.dispatchKeyEvent",
+    "Target.activateTarget", "Browser.getWindowForTarget",
+    "Browser.setWindowBounds", "Browser.focusWindow", "Target.sendCommand"
+  ]);
+  if (!KNOWN.has(name)) throw new Error(`Unknown developer browser tool: ${name}`);
+
+  const run = () => {
+    if (name === "Target.createTarget") return createTarget(args);
+    if (name === "Target.getTargets") return listTargets(args);
+    if (name === "Target.closeTarget") return closeTarget(args);
+    if (name === "Page.navigate") return navigatePage(args);
+    if (name === "Page.reload") return reloadPage(args);
+    if (name === "Page.goBack") return goHistory(args, "back");
+    if (name === "Page.goForward") return goHistory(args, "forward");
+    if (name === "Runtime.evaluate") return evaluateRuntime(args);
+    if (name === "Runtime.getConsoleMessages") return getConsoleMessages(args);
+    if (name === "Network.getRequests") return getNetworkRequests(args);
+    if (name === "DOM.getDocument") return getDocument(args);
+    if (name === "DOM.querySelector") return querySelector(args, false);
+    if (name === "DOM.querySelectorAll") return querySelector(args, true);
+    if (name === "DOM.getOuterHTML") return getOuterHtml(args);
+    if (name === "DOM.getCompactHTML") return getCompactHtml(args);
+    if (name === "DOM.scrollIntoViewIfNeeded") return scrollIntoViewIfNeeded(args);
+    if (name === "Input.dispatchMouseEvent") return dispatchMouseEvent(args);
+    if (name === "Input.insertText") return insertText(args);
+    if (name === "Input.dispatchKeyEvent") return dispatchKeyEvent(args);
+    if (name === "Target.activateTarget") return activateTarget(args);
+    if (name === "Browser.getWindowForTarget") return getWindowForTarget(args);
+    if (name === "Browser.setWindowBounds") return setWindowBounds(args);
+    if (name === "Browser.focusWindow") return focusWindow(args);
+    return sendRawCommand(args);
+  };
+
+  const timeoutMs = await devtoolsOperationTimeoutMs();
+  const retrySafe = operationIsReadOnly(name, args);
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new DevtoolsOperationTimeoutError({
+        operation: name,
+        targetId: args.targetId,
+        backend: getLastUsedBackend(String(args.targetId || "")) || null,
+        timeoutMs,
+        retrySafe
+      })),
+      timeoutMs
+    );
+  });
+
+  try {
+    return await Promise.race([run(), timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export function formatDevtoolsToolResponse(name, payload) {
@@ -2621,11 +2834,16 @@ export function formatDevtoolsToolResponse(name, payload) {
   }
   const lines = [name];
   lines.push("", "```json", JSON.stringify(payload, null, 2), "```");
+  let text = lines.join("\n");
+  if (text.length > MAX_FORMAT_OUTPUT_CHARS) {
+    const note = `\n\n*(Response truncated — full output was ${text.length} chars, over the ${MAX_FORMAT_OUTPUT_CHARS}-char budget. Narrow the request (lower limit, more specific selector, smaller maxChars) to see more.)*`;
+    text = text.slice(0, Math.max(0, MAX_FORMAT_OUTPUT_CHARS - note.length)) + note;
+  }
   return {
     content: [
       {
         type: "text",
-        text: lines.join("\n")
+        text
       }
     ]
   };

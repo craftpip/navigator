@@ -6,6 +6,32 @@ export function normalizeBrowserType(e) {
   return e.name === "chromium" ? "inbuilt" : "cdp";
 }
 
+/**
+ * Append relay/detected browsers (health.browsers rows) that are not already
+ * present in the configured BROWSERS entries, so Status → Browser drivers and
+ * the Manage BROWSERS array show the same list. Idempotent — once persisted
+ * the merge is a no-op. Detected entries get a navigator-cdp default so they
+ * are editable and savable like any other entry.
+ */
+export function mergeDetectedIntoEntries(entries, detected) {
+  const byName = new Map(entries.map((e) => [String(e.name || "").toLowerCase(), e]));
+  const merged = [...entries];
+  for (const d of detected || []) {
+    if (!d || !d.name) continue;
+    const key = String(d.name).toLowerCase();
+    if (byName.has(key)) continue;
+    merged.push({
+      name: d.name,
+      role: Array.isArray(d.role) ? d.role : ["default"],
+      index: merged.length,
+      type: d.type || "navigator-cdp",
+      cdpUrl: d.cdpUrl || "",
+      plugin: d.plugin || "auto",
+    });
+  }
+  return merged;
+}
+
 export function parseBrowsersEntries(rawValue) {
   let parsed;
   try {

@@ -103,7 +103,7 @@ Returns:
 ```json
 {
   "ok": true,
-  "backend": "cloakbrowser",
+  "backend": "chromium",
   "browserConnected": true,
   "pageLimiter": { "maxConcurrentPageOps": 30, "inUse": 0 }
 }

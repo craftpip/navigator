@@ -4,23 +4,23 @@
 
 `BrowserManager` in `src/browser.js` owns all browser instances and page lifetime. `getBrowserManager()` returns the process singleton.
 
-It supports three backends:
+Browser instances come from the `BROWSERS` array — the built-in Chromium plus optional add-ons:
 
-| Backend | Implementation | Typical use |
+| Entry `type` | Implementation | Typical use |
 |---|---|---|
-| `chromium` | locally launched Puppeteer Chromium | compatible rendering and screenshots |
-| `cloakbrowser` | `cloakbrowser/puppeteer` | default browser-backed route with anti-bot profile behavior |
-| `lightpanda` | CDP connection to `lightpanda serve` / StealthPanda | lightweight route backend and shared search pool |
+| `inbuilt` | locally launched Puppeteer Chromium | always present; full rendering for search, fetch, screenshots, devtools |
+| `cdp` | connect to a user-provided CDP endpoint (`ws://…` browser WS or `http://…` multiplexer like CloakBrowser's `cloakserve`) | anti-bot / lightweight add-on browsers |
+| `navigator-cdp` | the relay extensions — a real user browser (Chrome/Firefox) dials into `/relay` and navigator drives it | user's own visible browser, `ownership: "user"` |
 
-The direct-page backend comes from `BROWSER_BACKEND`. A known search route overrides this with its registry backend. DevTools uses `DEVTOOLS_BROWSER_BACKEND`, which defaults to the direct-page backend.
+`resolveBrowserParam()` (src/browser.js) picks the browser for a page call: an explicit `browser` param is strict (errors if that browser is down), otherwise add-ons are tried in `BROWSERS` array order (first connected one serving, each down add-on reported in `rollbackNotes`), falling back to Chromium. Search engines always run on the built-in Chromium — engines never use add-on browsers.
 
 ## Browser Lifetime
 
-- Chromium launches with the configured profile directory and a keep-alive page so it can recover from an idle page close.
-- CloakBrowser is located through its configured/downloader path and launched through its Puppeteer interface.
-- Lightpanda is connected by CDP when available or started as a server. New documents receive fingerprint patches.
-- `prelaunchIfConfigured()` starts the default backend and warms browser-only routes. API drivers are never warmed.
-- Backend instance health includes connection state, PID, spawned-process count, and tabs.
+- The built-in Chromium launches with the configured profile directory and a keep-alive page so it can recover from an idle page close. It is self-healing.
+- Add-on `cdp` browsers are connected lazily and reused; a `disconnected` event clears the cached connection so the next call reconnects. Navigator never launches or closes add-ons — the user owns that external CDP process.
+- Relay (`navigator-cdp`) connections come from the extensions themselves over `/relay`; pairing is token-based and persists across navigator restarts.
+- `prelaunchBrowser` starts the default browser on server start and warms browser engines. API engines are never warmed.
+- Browser instance health includes connection state, PID, spawned-process count, and tabs.
 
 ## Page Slots and Search Windows
 
@@ -28,13 +28,12 @@ Search, fetch, screenshot, and ASCII operations pass through `withPageSlot()`, a
 
 Search pages use a separate reusable window pool:
 
-- `engine` routes get a pool keyed by their route ID.
-- `shared` routes use `_shared`; this is used by all Lightpanda search routes and remains capped at one window.
+- Each browser engine gets a pool keyed by its engine id.
 - `acquireSearchWindow()` obtains or opens a suitable page.
 - `releaseSearchWindow()` keeps configured warm windows and closes surplus nonpersistent pages.
 - A failed browser search page is closed before release, preventing reuse of broken page state.
 
-Fetches, screenshots, and ASCII renderings open short-lived direct-backend pages rather than borrowing search windows.
+Fetches, screenshots, and ASCII renderings open short-lived pages through `resolveBrowserParam()` rather than borrowing search windows.
 
 ## Screenshots
 

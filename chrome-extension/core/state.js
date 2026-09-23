@@ -18,6 +18,7 @@ var State = (function() {
     cdpClients: [],
     activeTargetId: null,
     currentTabId: null,
+    cdpWindows: new Map(),
     connectedAt: null
   };
 
@@ -163,6 +164,34 @@ var State = (function() {
     return Array.from(_state.cdpCreatedTabIds);
   }
 
+  function addCDPCreatedWindow(windowId) {
+    _state.cdpWindows.set('window-' + windowId, { windowId: windowId, targetCount: 0 });
+  }
+
+  function getCDPCreatedWindow(windowId) {
+    return _state.cdpWindows.get('window-' + windowId) || null;
+  }
+
+  function bumpCDPCreatedWindow(windowId) {
+    var reg = _state.cdpWindows.get('window-' + windowId);
+    if (reg) {
+      reg.targetCount += 1;
+      _state.cdpWindows.set('window-' + windowId, reg);
+    }
+  }
+
+  function removeCDPCreatedWindow(windowId) {
+    _state.cdpWindows.delete('window-' + windowId);
+  }
+
+  function getCDPCreatedWindows() {
+    return Array.from(_state.cdpWindows.values());
+  }
+
+  function isCDPCreatedWindow(windowId) {
+    return _state.cdpWindows.has('window-' + windowId);
+  }
+
   function setCurrentTabId(tabId) {
     _state.currentTabId = tabId;
   }
@@ -242,6 +271,12 @@ var State = (function() {
     removeCDPCreatedTab: removeCDPCreatedTab,
     isCDPCreatedTab: isCDPCreatedTab,
     getCDPCreatedTabIds: getCDPCreatedTabIds,
+    addCDPCreatedWindow: addCDPCreatedWindow,
+    getCDPCreatedWindow: getCDPCreatedWindow,
+    bumpCDPCreatedWindow: bumpCDPCreatedWindow,
+    removeCDPCreatedWindow: removeCDPCreatedWindow,
+    getCDPCreatedWindows: getCDPCreatedWindows,
+    isCDPCreatedWindow: isCDPCreatedWindow,
     setCurrentTabId: setCurrentTabId,
     getCurrentTabId: getCurrentTabId,
     addCDPClient: addCDPClient,

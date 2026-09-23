@@ -11,6 +11,7 @@ Test the browser automation tools — open a live page, inspect it, click things
 {
   "targetId": "5f2c9a1e",
   "backend": "cloakbrowser",
+  "ownership": "agent",
   "url": "https://example.com",
   "title": "Example Domain"
 }
@@ -28,6 +29,7 @@ Test the browser automation tools — open a live page, inspect it, click things
     "url": "https://example.com",
     "title": "Example Domain",
     "backend": "cloakbrowser",
+    "ownership": "agent",
     "lastActiveAt": "2026-08-20T23:05:29.910Z",
     "closesInMs": 298000
   }

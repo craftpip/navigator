@@ -8,6 +8,7 @@
 - [Code References](#code-references)
 - [Search Engine Drivers](#search-engine-drivers)
 - [Agent Flow](#agent-flow)
+- [Chat Testing Protocol](#chat-testing-protocol)
 - [Configuration](#configuration)
 - [Development](#development)
 - [Navigator CLI and Stats](#navigator-cli-and-stats)
@@ -246,6 +247,26 @@ mcp-server --> engines
 4. Synthesize the answer from extracted text.
 
 For visual verification, call `web_page_screenshot` with the same `ref_ids`.
+
+---
+
+## Chat Testing Protocol
+
+**Purpose:** The only valid way to validate how this MCP server will actually be used is to use it the way a consumer LLM does — through nothing but the exposed tool surface. A real LLM customer has no shell, no `curl`, and no source access. All they get is the tool schema (`tools/list`), the documented contracts in this file, and whatever the tool calls return. So when testing a feature, a tool change, or extraction behavior, this mode is mandatory.
+
+**Mode rules:**
+1. Drive **everything** through the harness tools only — `web_search`, `web_fetch`, `web_page_links`, `web_page_screenshot`, `web_page_ascii`, `web_page_svg`, and the devtools tools. Never read source to answer the task, never call endpoints via curl, never run repo harness scripts for the task itself.
+2. Act as a first-time consumer. The only knowledge you carry is the Tool Contract in this file — no internal implementation details, no assumptions about internals.
+3. Run a real end-to-end task (search → pick refs → fetch → synthesize → visual check). Walk through it as the user would phrase it, facing the problems yourself instead of reasoning around them.
+
+**Report — conclude every run with a findings list, one item per friction point, tagged by layer:**
+- `request:` — the schema/docs misled or forced awkward choices (ambiguous param names, missing params, unclear descriptions, ref vs url confusion, wrong defaults).
+- `response:` — the output was hard to consume (ambiguous ref formats, truncation without clear markers, noise, wrong shape, confusing error messages).
+- `tool:` — the tool itself needs a capability or behavior change (new param, better error, different default, missing mode).
+
+Check the documented Tool Contract against observed behavior first — if they disagree, that IS a finding (docs drift). Do not fix anything silently and do not absorb friction; every `request`/`response`/`tool` complaint from this mode is a filed bug report or feature request.
+
+**Why:** Reasoning over the source cannot predict how the tool surface reads to a model that only sees schemas and replies. Going through the tools yourself surfaces exactly what needs improving so the code gets written against real consumer experience, not guesses.
 
 ---
 
@@ -1144,6 +1165,7 @@ For each site:
 - **`isConnected()` = AUTH, not socket-open:** `State.isConnected()` returns a flag set only on the server's `connected` message. Before the auth round-trip the UI must show Connecting, not Connected. `connectedAt` is stamped at auth too, so the "Connected 0s/1s/0s" flicker during churn is gone. A separate `connecting` flag drives the popup's "Connecting…" state (button disabled, fields locked).
 - **Explicit PIN feedback:** on close 4000 the extension sets lastError `PIN rejected — wrong or expired. A fresh PIN is shown in the navigator console.` and re-dials in ~300ms for a new PIN. The benign `'PIN required from navigator console'` lastError was removed (the card explains itself); rejections are the only red-box message. `send-pin` with a dead socket stashes the PIN (`State.setPendingPin`) and submits it on the next `pin_required`.
 - **Auto-connect only after a real pairing:** `maybeAutoConnect()` requires BOTH a saved server URL AND a saved session token. Fresh install / cleared URL → stays Off.
+- **Forget ≠ Remove (2026-09-18):** `relayServer.forget(name)` clears ONLY the pairing (token map, DB session, live ws + teardown) — the browser's known-registry row (`_knownBrowsers`, persisted in `known_relay_browsers`) is KEPT, so the dashboard row stays as "disconnected — not paired" for re-pairing or explicit removal. `relayServer.remove(name)` = forget + delete the known row entirely. The dashboard menu shows **Forget** only when `paired` (configured relays included) and **Remove** only for unconfigured (dynamic) relays; the Manage-page × button and BROWSERS config reconciliation (`reconcileRemovedRelayBrowsers` / `reconcileBrowserChanges`) call `remove` so a config-removed browser cannot linger as a dynamic driver. New `POST /console/relay/remove`; `/console/relay/forget` keeps the row. A browser becomes known the first time it sends `navigator-hello` (`_rememberKnown`), so a stale `_statusFor` expired-PIN cleanup no longer makes a dialed-in browser vanish — it stays listed until removed. Without this, Forget on a dynamic browser deleted the only registry references (`_entries` + `_tokenToName`) and the row disappeared.
 - **Popup field ownership:** `popup.js` prefills `serverUrl`/`browserName` only until the user types (`_urlDirty`/`_browserNameDirty` guards). The 3s `loadState` refresh must NEVER clobber a field being edited.
 - **MV3 gotcha:** any background `onMessage` branch that calls `sendResponse` asynchronously must `return true` or the popup's callback never fires and Connect looks dead.
 
@@ -1191,6 +1213,22 @@ For each site:
 **Verify with a page-context smoke test** (not just `node --check`): load the modules + background.js into a shared `vm` sandbox where `window === globalThis` (a document context) and confirm `init()` runs without throwing. Verified: all 19 files load and `init()` runs, onMessage registered.
 
 **Note (Local Network Access):** Chrome/Firefox LNA (private-network protection) gates requests from *public web pages* to LAN IPs behind a permission prompt, but does **not** gate **extension-origin** requests - so extension to `http://10.69.1.164:1994` fetch/WebSocket are not blocked by LNA. Firefox also can't reach localhost from extension pages at all (known Bugzilla); port 1994 is not in the banned-ports list. So the LAN-blocking angle does NOT explain the messaging error - the background load crash does.
+
+### "Open Windows Instead of Tabs" — Both Extensions (Plan 56), 2026-09-12
+
+**What:** A per-extension `openInWindow` config checkbox ("Open new windows instead of tabs"). When ON, `Target.createTarget` opens a **new native OS window** (page included) and `Target.createBrowserContext` backs a real window-scoped context; `closeTarget` closes the window when it's the last CDP-created tab on it; `tab_list` emits real `windowId` + a `window-<id>` `browserContextId`. When OFF, byte-for-byte old behavior (tabs + mock contexts). Verified end-to-end on Chromium 152: `createTarget` bumped the X window count 1→2 (xdotool `search --name "Example Domain"`), `getWindowForTarget` returned a new windowId, `setWindowBounds` moved it, `closeTarget` dropped the OS window and emptied `State.cdpWindows`.
+
+**Key implementation facts:**
+- Chrome window mode = `chrome.windows.create({url:'about:blank', active:false, focused:false, state:'normal'})` → navigate via `tab.update`, skip `addTabToAutomationGroup`, `browserContextId = 'window-'+win.id`, `cdpWindows` Map registry in `state.js`. Close on last tab via `chrome.windows.remove`.
+- Firefox window mode = force `browsingContext.create({type:'window'})`; **window-created contexts are exempt from `TabIsolation.isolate`** (hiding the only tab of a fresh window = empty window); `createBrowserContext` returns a lazy `window-<ts>` id (the window only exists after the next `createTarget` with it — BiDi has no pre-created window handle).
+- Relay change is a thin pass-through: `Target.getBrowserContexts` forwarded (fallback `["default"]`), `browserContextId` threaded through `_onCdpResponse` → `_registerCreatedTarget` (no relay-side windows registry).
+- Deviation from plan §8 execution: server was NOT restarted after the relay change to avoid dropping the user's live relay browsers — the pass-through is covered by vitest (`tests/relay-server.test.js` 9/9 incl. the new context-threading test) and survives `docker restart navigator` when that's next done.
+
+**Failures/notes from verification:**
+- `unit-ff.mjs` 20d/20e fail **pre-existing**: `Probe.probe` collapses both-schemes-failed to `mode:'unknown'` (`utils/probe.js:84`) but those tests expect `'refused'`/`'dns'`. Unrelated to this work; left untouched.
+- `pack-firefox.sh` **host-python3 branch zipped nothing (22-byte empty zip)** until we added `cd "$EXT_DIR"` — it was zipping cwd-relative from wherever you ran it; the docker-python fallback (absolute `/app`) had been masking the bug whenever host python3 was absent. If Firefox packs ever come out empty again, check cwd.
+- Smoke recap (recipe suicides): pair headless via raw CDP on the SW (`smoke-cdp.mjs` worker in `testing/browsers/scripts/`; eval `Config.saveServerUrl/saveBrowserName/setOpenInWindow`, `ConnectionManager.connect()`), scrape `docker logs navigator` for `"test-chrome" wants to connect` block → `PIN:`, `bin` via `ConnectionManager.send({type:'pin',...})`. OS-window assertion needs no WM: `xdotool search --onlyvisible --class chromium` counts root-level windows.
+- The running `navigator` container holds the old `src/relay-server.js` (11h uptime); the working-tree relay pass-through goes live on next `docker restart navigator`.
 
 ### Browser Ownership — Agent vs User (Plan 42), Adopted Tabs, defaultViewport
 

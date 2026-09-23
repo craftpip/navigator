@@ -26,7 +26,7 @@ var TabList = (function() {
           checked++;
           if (!chrome.runtime.lastError && tab) {
             target.openerId = tab.openerTabId != null ? String(tab.openerTabId) : undefined;
-            targetInfos.push(mapToTargetInfo(target));
+            targetInfos.push(mapToTargetInfo(target, tab));
           }
           if (checked === pageTargets.length) {
             callback(targetInfos);
@@ -49,14 +49,16 @@ var TabList = (function() {
         chrome.tabs.get(tabId, function(tab) {
           if (chrome.runtime.lastError || !tab) { resolve(mapToTargetInfo(match)); return; }
           match.openerId = tab.openerTabId != null ? String(tab.openerTabId) : undefined;
-          resolve(mapToTargetInfo(match));
+          resolve(mapToTargetInfo(match, tab));
         });
       });
     });
   }
 
-  function mapToTargetInfo(target) {
+  function mapToTargetInfo(target, tab) {
     if (!target) return null;
+    var windowId = tab ? tab.windowId : null;
+    var isWindowTarget = windowId != null && State.isCDPCreatedWindow(windowId);
     return {
       targetId: target.id || String(target.tabId),
       type: target.type || 'page',
@@ -65,7 +67,8 @@ var TabList = (function() {
       attached: !!target.attached,
       canAccessOpener: false,
       openerId: target.openerId,
-      browserContextId: 'default',
+      browserContextId: isWindowTarget ? 'window-' + windowId : 'default',
+      windowId: windowId,
       tabId: target.tabId || null
     };
   }

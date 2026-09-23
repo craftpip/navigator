@@ -21,6 +21,7 @@ Response:
 {
   "targetId": "abc123",
   "backend": "cloakbrowser",
+  "ownership": "agent",
   "url": "https://example.com/",
   "title": "Example Domain",
   "viewport": { "width": 390, "height": 844 },
@@ -48,6 +49,7 @@ Response:
       "url": "https://example.com/",
       "title": "Example Domain",
       "backend": "cloakbrowser",
+      "ownership": "agent",
       "lastActiveAt": "2026-08-21T20:00:00.000Z",
       "viewport": { "width": 1280, "height": 800 }
     }

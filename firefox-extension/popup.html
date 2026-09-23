@@ -73,6 +73,9 @@ body { width: 360px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
 .tab-item button:hover { background: #4a9eff; color: #fff; }
 .tab-item button.attached-btn { background: #4caf50; color: #fff; }
 .tab-empty { text-align: center; color: #666; padding: 10px 0; font-size: 12px; }
+.toggle-field { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 12px; }
+.toggle-field input[type="checkbox"] { width: auto; margin: 0; flex-shrink: 0; accent-color: #4a9eff; }
+.toggle-field span { color: #ccc; font-size: 12px; }
 
 .connected-time { text-align: center; color: #666; font-size: 11px; padding-top: 10px; }
 .footer { padding: 8px 16px; text-align: center; border-top: 1px solid #2a2a34; }
@@ -153,11 +156,16 @@ body { position: relative; }
         <div class="field-hint" id="serverHint">Just enter host:port — tries wss:// first, then ws://</div>
         <div class="field-error" id="serverUrlError" role="alert"></div>
       </div>
-      <div class="probe-row">
-        <button id="probeBtn" class="probe-btn" type="button">Test connection</button>
-        <div class="probe-result" id="probeResult"></div>
-      </div>
+<div class="probe-row">
+      <button id="probeBtn" class="probe-btn" type="button">Test connection</button>
+      <div class="probe-result" id="probeResult"></div>
     </div>
+    </div>
+
+    <label class="field toggle-field">
+      <input type="checkbox" id="openInWindow">
+      <span>Open new windows instead of tabs</span>
+    </label>
 
     <button class="btn-full" id="connectBtn"><span class="spinner" id="connectSpinner" style="display:none"></span><span id="connectBtnText">Connect</span></button>
 
@@ -187,6 +195,7 @@ body { position: relative; }
   <span>Navigator Browser Relay v<span id="version"></span></span>
 </div>
 
+<script src="utils/config.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

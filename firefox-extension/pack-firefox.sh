@@ -20,6 +20,7 @@ OUT="$ROOT_DIST/navigator-firefox-${VERSION}.zip"
 # Standardized root dist only — same ZIP format for Chrome and Firefox
 # Use python for reproducibility when available, else try zip/tar
 if command -v python3 >/dev/null 2>&1; then
+  cd "$EXT_DIR"
   python3 -c "
 import zipfile, pathlib
 p = pathlib.Path('.')

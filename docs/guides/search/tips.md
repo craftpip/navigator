@@ -88,7 +88,7 @@ If you know which engine works best for your query:
 ```json
 {
   "queries": ["academic paper search"],
-  "engine": "google_cb"
+  "engine": "google"
 }
 ```
 
@@ -104,7 +104,7 @@ Results:
   ...
 
 Errors:
-- mojeek_lp: "Mojeek blocked this request"
+- mojeek: "Mojeek blocked this request"
 ```
 
 Your agent can still use the successful results. Check the Errors section if results seem incomplete.

@@ -13,9 +13,14 @@ Returns:
 ```json
 {
   "ok": true,
-  "backend": "cloakbrowser",
+  "backend": "chromium",
   "browserConnected": true,
+  "searchWindows": { "total": 1, "byEngine": { "google": 1 } },
   "pageLimiter": { "maxConcurrentPageOps": 30, "inUse": 0, "queued": 0 },
+  "browsers": [
+    { "name": "chromium", "role": [], "type": "inbuilt", "status": "available", "connected": true },
+    { "name": "cloakbrowser", "role": ["default", "search", "fetch", "screenshot", "devtools"], "type": "cdp", "status": "available", "connected": true }
+  ],
   "searchRouteCircuitBreakers": [...]
 }
 ```
@@ -54,8 +59,8 @@ Host-side monitor for the live server:
 # Show engine routes
 ./navigator.js engines
 
-# Reset a specific route
-./navigator.js engines reset google_cb
+# Reset a specific engine
+./navigator.js engines reset google
 ```
 
 ### Output Examples
@@ -100,11 +105,11 @@ BROWSER INSTANCES
 ENGINE SCHEDULER
 ┌──────┬──────────────┬───────┬────────────────┬──────────────┐
 │ rank │ engine       │ score │ ok/fail/results│ min interval │
-│    1 │ bing_lp      │ 0.956 │ 6/0/60         │ 5m00s        │
+│    1 │ bing        │ 0.956 │ 6/0/60         │ 5m00s        │
 └──────┴──────────────┴───────┴────────────────┴──────────────┘
 ```
 
-**engines reset** — `Reset scheduler history for google_cb.` (or `for all.`)
+**engines reset** — `Reset scheduler history for google.` (or `for all.`)
 
 ### CLI Options
 

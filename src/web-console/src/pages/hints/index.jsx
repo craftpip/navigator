@@ -2,10 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import { editorFromPath } from "../../lib/routing.js";
 import { request } from "../../lib/request.js";
 import { Empty, Loading, Spinner } from "../../components/ui.jsx";
+import { usePopup } from "../../components/popup.jsx";
 import { emptyHint } from "./constants.js";
 import { HintEditorPane } from "./HintEditor.jsx";
 
 export function Hints() {
+  const { confirm } = usePopup();
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -24,7 +26,7 @@ export function Hints() {
   const removeHint = async (index) => {
     if (deleting !== null) return;
     const hint = state?.hints?.[index];
-    if (!window.confirm(`Delete hint #${index} (${hint?.domain || "?"} ${hint?.pathPattern || "/**"})?\nThis removes it from ${state?.hintsPath || "domain-hints.json"} (a .bak is kept).`)) return;
+    if (!(await confirm(`Delete hint #${index} (${hint?.domain || "?"} ${hint?.pathPattern || "/**"})?\nThis removes it from ${state?.hintsPath || "domain-hints.json"} (a .bak is kept).`, { okLabel: "Delete" }))) return;
     setDeleting(index);
     try {
       await request(`/console/api/hints/${index}`, { method: "DELETE" });

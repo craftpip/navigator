@@ -1,4 +1,14 @@
 var LocalHandler = (function() {
+  // Window-backed browser contexts (plan 56, "open new windows instead of
+  // tabs"). Firefox has no pre-creatable window handle to hold in a context id,
+  // so createBrowserContext returns a lazy `window-<ts>` id and the actual
+  // window is created by the NEXT createTarget that carries it (that is what
+  // forces type:'window'). This set keeps the ids listable/removable.
+  var _windowContextIds = new Set();
+
+  function isWindowContextId(id) {
+    return typeof id === 'string' && id.indexOf('window-') === 0;
+  }
   function browserGetVersion() {
     var userAgent = navigator.userAgent || '';
     var match = userAgent.match(/Firefox\/([0-9.]+)/);
@@ -50,19 +60,46 @@ var LocalHandler = (function() {
   }
 
   function targetCreateBrowserContext() {
-    var browserContextId = 'context-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
-    return {
-      browserContextId: browserContextId,
-      _mock: true,
-      _message: 'Navigator relay: all tabs share one context'
-    };
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      if (flag !== true) {
+        // Legacy mock — all tabs share one context.
+        var browserContextId = 'context-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+        return {
+          browserContextId: browserContextId,
+          _mock: true,
+          _message: 'Navigator relay: all tabs share one context'
+        };
+      }
+      // Window-backed context id. The window itself is created lazily by the
+      // next createTarget carrying this id (createTarget forces type:'window').
+      var windowContextId = 'window-' + Date.now();
+      _windowContextIds.add(windowContextId);
+      return {
+        browserContextId: windowContextId,
+        _lazyWindow: true,
+        _message: 'Navigator relay: window context — window opens on next createTarget with this id'
+      };
+    });
   }
 
   function targetGetBrowserContexts() {
-    return { browserContextIds: ['default'] };
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      var ids = ['default'];
+      if (flag === true) {
+        _windowContextIds.forEach(function(id) { ids.push(id); });
+      }
+      return { browserContextIds: ids };
+    });
   }
 
-  function targetDisposeBrowserContext() {
+  function targetDisposeBrowserContext(context) {
+    var params = context.params || {};
+    var ctxId = params.browserContextId;
+    if (isWindowContextId(ctxId)) {
+      // Best-effort: the context's window is closed via closeTarget on its
+      // tab; dropping the id from the registry is the durable action here.
+      _windowContextIds.delete(ctxId);
+    }
     return {};
   }
 

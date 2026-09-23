@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { request } from "../../lib/request.js";
 import { formatKeyDate } from "../../lib/format.js";
 import { Panel, Empty, Pill, Check, Loading, Spinner } from "../../components/ui.jsx";
+import { usePopup } from "../../components/popup.jsx";
 
 function sameTools(a, b) {
   const sa = [...new Set(a)].sort();
@@ -16,6 +17,7 @@ function sameBrowsers(a, b) {
 }
 
 export function Keys() {
+  const { confirm } = usePopup();
   const [state, setState] = useState(null);
   const [message, setMessage] = useState("");
   const [kind, setKind] = useState("");
@@ -55,7 +57,7 @@ export function Keys() {
   const openCreate = () => {
     setName("");
     setAllowedTools(allTools());
-    setAllowedBrowsers(allBrowsers());
+    setAllowedBrowsers([]);
     setSecret("");
     setCreatedBrowsers([]);
     setModal("create");
@@ -112,7 +114,7 @@ export function Keys() {
     }
   };
   const revokeKey = async (key) => {
-    if (!window.confirm("Revoke this API key? Clients using it will lose access immediately.")) return;
+    if (!(await confirm("Revoke this API key? Clients using it will lose access immediately.", { okLabel: "Revoke" }))) return;
     setRevoking(key.id);
     try {
       await postKeys({ action: "revoke", id: key.id });
@@ -177,11 +179,11 @@ export function Keys() {
               <button type="button" className="clear" onClick={closeModal}>Close</button>
             </div>
             <label className="api-key-name-field">
-              <span>MCP key name</span>
+              <span>API key name</span>
               <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. production deploy" maxLength={80} autoFocus />
             </label>
             <div className="api-key-permissions-field">
-              <span>Tool access</span>
+              <span>Access permissions</span>
               <details className="api-key-tools" open>
                 <summary>{allowedTools.length === allTools().length ? "All tools allowed" : `${allowedTools.length} of ${allTools().length} tools allowed`}</summary>
                 <div className="api-key-tool-groups">
@@ -206,7 +208,7 @@ export function Keys() {
                 </div>
               </details>
               <details className="api-key-browsers" open>
-                <summary>{allowedBrowsers.length === allBrowsers().length ? "All browsers allowed" : `${allowedBrowsers.length} of ${allBrowsers().length} browsers allowed`}</summary>
+                <summary>{allowedBrowsers.length === allBrowsers().length ? "All CDP browsers allowed" : `${allowedBrowsers.length} of ${allBrowsers().length} CDP browsers allowed`}</summary>
                 <div className="api-key-browser-groups">
                   <div className="api-key-tool-actions">
                     <button type="button" onClick={() => setAllowedBrowsers(allBrowsers())}>Allow all</button>
@@ -215,13 +217,19 @@ export function Keys() {
                   <div className="api-key-browser-items">
                     {(state?.browsers || []).map((browser) => (
                       <span className="api-key-browser-row" key={browser.name}>
-                        <Check label={browser.name} checked={allowedBrowsers.includes(browser.name)} onChange={() => toggleBrowser(browser.name)} />
-                        <span
-                          className={browser.connected ? "api-key-browser-on" : "api-key-browser-off"}
-                          title={`${browser.type} · ${browser.status}`}
-                        >
-                          {browser.connected ? "●" : "○"}
-                        </span>
+                        <Check
+                          label={browser.name}
+                          checked={allowedBrowsers.includes(browser.name)}
+                          onChange={() => toggleBrowser(browser.name)}
+                          trailing={
+                            <span
+                              className={browser.connected ? "api-key-browser-on" : "api-key-browser-off"}
+                              title={`${browser.type} · ${browser.status}`}
+                            >
+                              {browser.connected ? "●" : "○"}
+                            </span>
+                          }
+                        />
                       </span>
                     ))}
                   </div>

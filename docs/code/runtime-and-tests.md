@@ -23,7 +23,7 @@ The service has a 2 GB shared-memory allocation and 4 CPU / 4 GB resource limits
 
 ### Runtime Decisions
 
-- `BROWSER_BACKEND` controls direct fetch and screenshot pages. Search routes select their own browser backend from engine metadata.
+- The `BROWSERS` array controls which browsers are available for page operations. Page tools route through it via `resolveBrowserParam()` (explicit `browser` param, then array order, then Chromium); search engines always run on the built-in Chromium.
 - `OPEN_PAGE_MAX_PARALLEL` limits concurrent URL fetches/screenshots; `MAX_CONCURRENT_PAGE_OPS` is the global browser-operation ceiling. Increase either only after checking `/stats` memory and browser-tab growth.
 - `BROWSER_OP_TIMEOUT_MS` bounds browser operations. Compose uses 25 seconds; raise it for a known slow site rather than globally masking a broken route.
 - `SEARCH_ENABLED_ENGINES`, warmup settings, and circuit-breaker settings control automatic search. Explicit MCP engine selection may call a registered route that is not in the automatic list.

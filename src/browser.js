@@ -87,6 +87,21 @@ const CLONE_EXCLUDE_DIRS = new Set([
 const MONITOR_WIDTH = 1920;
 const MONITOR_HEIGHT = 1080;
 
+/**
+ * Race a task against a fail-fast deadline. The losing timeout rejects with a
+ * readable message instead of leaving the caller wedging on the task's own
+ * (often much longer, e.g. puppeteer's 180s default protocolTimeout) wait.
+ */
+function raceWithTimeout(task, timeoutMs, message) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(message || `Operation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([task, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
 const BROWSER_LOG_EMOJI = {
   "addon.connected": "🔌",
   "addon.disconnected": "🔌",
@@ -220,7 +235,7 @@ export class BrowserManager {
     return page;
   }
 
-  async acquirePageSlot({ signal } = {}) {
+  async acquirePageSlot({ signal, timeoutMs = null } = {}) {
     if (signal?.aborted) {
       throw signal.reason || new Error("Page slot acquisition aborted");
     }
@@ -229,12 +244,24 @@ export class BrowserManager {
       return;
     }
 
+    const bindTimeoutMs = Math.max(
+      1000,
+      Number(timeoutMs) || Number(this.config.browserOpTimeoutMs) || 60000
+    );
+
     await new Promise((resolve, reject) => {
+      let queueTimer = null;
+      const fail = (error) => {
+        clearTimeout(queueTimer);
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      };
       const waiter = {
         settled: false,
         grant: () => {
           if (waiter.settled || signal?.aborted) return false;
           waiter.settled = true;
+          clearTimeout(queueTimer);
           signal?.removeEventListener("abort", onAbort);
           this.pageSlotsInUse += 1;
           resolve();
@@ -246,12 +273,29 @@ export class BrowserManager {
         waiter.settled = true;
         const index = this.pageSlotWaiters.indexOf(waiter);
         if (index !== -1) this.pageSlotWaiters.splice(index, 1);
-        reject(signal.reason || new Error("Page slot acquisition aborted"));
+        fail(signal.reason || new Error("Page slot acquisition aborted"));
+      };
+      const onQueueTimeout = () => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        const index = this.pageSlotWaiters.indexOf(waiter);
+        if (index !== -1) this.pageSlotWaiters.splice(index, 1);
+        const err = new Error(
+          `Page slot acquisition timed out after ${bindTimeoutMs}ms — the operation NEVER STARTED. ` +
+          `The page-op queue is saturated (${this.pageSlotsInUse}/${this.config.maxConcurrentPageOps} slots in use, ` +
+          `${this.pageSlotWaiters.length} still queued). This is a recoverable, retry-safe condition: ` +
+          `wait a few seconds and re-run the same call.`
+        );
+        err.code = "PAGE_SLOT_ACQUISITION_TIMEOUT";
+        err.stage = "page_slot_acquisition";
+        err.retrySafe = true;
+        fail(err);
       };
 
       signal?.addEventListener("abort", onAbort, { once: true });
       this.pageSlotWaiters.push(waiter);
       if (signal?.aborted) onAbort();
+      else queueTimer = setTimeout(onQueueTimeout, bindTimeoutMs);
     });
   }
 
@@ -274,8 +318,8 @@ export class BrowserManager {
     this.grantPageSlotWaiters();
   }
 
-  async withPageSlot(task, { signal } = {}) {
-    await this.acquirePageSlot({ signal });
+  async withPageSlot(task, { signal, timeoutMs = null } = {}) {
+    await this.acquirePageSlot({ signal, timeoutMs });
     let onAbort;
     try {
       if (!signal) return await task();
@@ -712,14 +756,25 @@ export class BrowserManager {
     // device-metrics override). Connecting with defaultViewport:null lets real
     // tabs keep their natural window size. Navigator-owned browsers (chromium,
     // plain cdp like cloakbrowser/lightpanda) keep the fixed monitor viewport.
-    const browser = await puppeteer.connect({
-      defaultViewport: isRelay
-        ? null
-        : { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
-      ...(usesHttp
-        ? { browserURL: endpoint }
-        : { browserWSEndpoint: endpoint }),
-    });
+    // Bounded connect — the extension may be mid-reconnect (heartbeat timeout
+    // → close → reconnect), in which case the relay's gateway accepts the ws
+    // while the extension socket is still dead and the handshake stalls.
+    // Without a bound, puppeteer falls through to its default protocolTimeout
+    // (180s) and devtools calls wedge for minutes. Race the connect against a
+    // fail-fast deadline so the caller can error and retry instead.
+    const connectTimeoutMs = Math.max(1000, Math.min(Number(this.config?.browserOpTimeoutMs) || 60000, 5000));
+    const browser = await raceWithTimeout(
+      puppeteer.connect({
+        defaultViewport: isRelay
+          ? null
+          : { width: MONITOR_WIDTH, height: MONITOR_HEIGHT },
+        ...(usesHttp
+          ? { browserURL: endpoint }
+          : { browserWSEndpoint: endpoint }),
+      }),
+      connectTimeoutMs,
+      `Timed out connecting to add-on "${addOnEntry.name}" after ${connectTimeoutMs}ms (extension may be reconnecting)`
+    );
 
     // Store state (disconnect-only: never close a browser we don't own)
     this._addOnState.set(stateKey, { browser, owned: false, connected: true });
@@ -739,6 +794,42 @@ export class BrowserManager {
 
   _addOnConnection(name) {
     return this._addOnState.get(`addon_${name}`)?.browser || null;
+  }
+
+  /**
+   * Invalidate Navigator-owned state for a browser entry by its configured
+   * name. Called by the browser config lifecycle boundary when a browser has
+   * been removed or its identity changed (name, type, or cdpUrl) — any stale
+   * in-process handle must be dropped so the next use re-dials the CURRENT
+   * endpoint, never the old one. Never closes the external browser process or
+   * any user tab: only our puppeteer handle and probe cache entries.
+   */
+  invalidateAddOn(name) {
+    if (!name) return [];
+    const stateKey = `addon_${name}`;
+    const state = this._addOnState.get(stateKey);
+    const released = [];
+    if (state?.browser) {
+      try {
+        state.browser.disconnect();
+        released.push(`${name}: disconnected add-on handle`);
+      } catch (error) {
+        console.error(`⚠️  invalidateAddOn disconnect failed (${name}): ${String(error?.message || error)}`);
+      }
+      this._addOnState.delete(stateKey);
+    }
+    this._cdpProbeCache.delete(name);
+    for (const [browser, info] of [...this._sharedBrowsers.entries()]) {
+      if (String(info?.backend || "").toLowerCase() !== String(name).toLowerCase()) continue;
+      try {
+        browser.close();
+        released.push(`${name}: closed shared CDP browser`);
+      } catch {
+        // fall through — the shared browser may already be gone
+      }
+      this._sharedBrowsers.delete(browser);
+    }
+    return released;
   }
 
   _isAddOnConnected(name) {
@@ -848,7 +939,14 @@ export class BrowserManager {
     const tid = String(targetId || "").trim();
     if (!tid) return null;
 
-    const candidates = this._effectiveAddOns().filter((b) => b.connected || b.status === "connected");
+    const candidates = this._effectiveAddOns().filter((b) => {
+      if (b.type === "navigator-cdp") return b.connected || b.status === "connected";
+      // Plain CDP add-ons (cloakbrowser, lightpanda) have no relay "connected"
+      // status — include them when reachable (live puppeteer connection, or a
+      // recent /json/list probe from getInstanceStats) so their existing tabs
+      // can be adopted by raw CDP target id.
+      return Boolean(b.cdpUrl) && (typeof this._isAddOnConnected !== "function" || this._isAddOnConnected(b.name));
+    });
     for (const entry of candidates) {
       let browser;
       try {
@@ -858,14 +956,18 @@ export class BrowserManager {
       }
       if (!browser || !browser.connected) continue;
 
-      // Refresh the relay's tab list so the targetId is present, then make the
-      // relay synthesize an attachedToTarget -> puppeteer creates a Page.
       const gotBackend = typeof entry.name === "string" && entry.name;
-      const res = await relayServer.attachExistingTabToClients(
-        gotBackend,
-        tid
-      );
-      if (!res || !res.found || !res.attached) continue;
+
+      // Relay add-ons need the extension to synthesize an attachedToTarget so
+      // puppeteer creates a Page. Plain CDP add-ons auto-create Pages for their
+      // existing targets on connect — no relay attach step.
+      if (entry.type === "navigator-cdp") {
+        const res = await relayServer.attachExistingTabToClients(
+          gotBackend,
+          tid
+        );
+        if (!res || !res.found || !res.attached) continue;
+      }
 
       // There is no public `Target.id()` in puppeteer v24 — the target id lives
       // on the internal `_targetId` field of the underlying CdpTarget, which
@@ -1374,7 +1476,7 @@ export class BrowserManager {
           let pageUrl = "";
           try { pageUrl = page.url(); } catch {}
           let targetId = null;
-          try { targetId = page.target()?.id?.() || null; } catch {}
+          try { targetId = page.target()?._targetId || null; } catch {}
           const timing = targetId ? getTabTimings(backend, targetId) : null;
           return {
             title,

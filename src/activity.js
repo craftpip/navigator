@@ -133,9 +133,19 @@ export function recordEngineAttemptEnd(id, { status, resultCount = 0, error = ""
 
 export function recordPageOpStart({ tool, url, backend, source = "mcp" }) {
   return runExclusive(() => {
+    const keyInfo = mcpCallContext.getStore()?.keyInfo || {};
     const info = getDb()
-      .prepare("INSERT INTO page_ops (ts, tool, url, backend, duration_ms, response_chars, ok, status, error, source) VALUES (?, ?, ?, ?, NULL, 0, 0, 'running', '', ?)")
-      .run(Date.now(), String(tool), String(url || "").slice(0, 2000), backend || null, source);
+      .prepare("INSERT INTO page_ops (ts, tool, url, backend, duration_ms, response_chars, ok, status, error, source, api_key_id, api_key_name, api_key_preview) VALUES (?, ?, ?, ?, NULL, 0, 0, 'running', '', ?, ?, ?, ?)")
+      .run(
+        Date.now(),
+        String(tool),
+        String(url || "").slice(0, 2000),
+        backend || null,
+        source,
+        keyInfo.id ? Number(keyInfo.id) : null,
+        keyInfo.name ? String(keyInfo.name).slice(0, 100) : null,
+        keyInfo.preview ? String(keyInfo.preview).slice(0, 20) : null
+      );
     return Number(info.lastInsertRowid);
   });
 }
@@ -234,7 +244,9 @@ export function getRecentActivity({ sinceId = 0, sinceOpId = 0, limit = 100, inc
       .all(Number(sinceOpId) || 0, recentCutoff, Math.min(500, Math.max(1, Number(limit) || 100)));
     // Strip preview for polling — detail endpoint serves it on demand
     pageOps = pageOps.map(({ response_preview, ...rest }) => {
-      const keyInfo = keyInfoFromCall(findMcpCallForEntry({ ts: rest.ts, tool: rest.tool }));
+      const keyInfo = rest.api_key_id || rest.api_key_name || rest.api_key_preview
+        ? keyInfoFromCall(rest)
+        : keyInfoFromCall(findMcpCallForEntry({ ts: rest.ts, tool: rest.tool }));
       return { ...rest, ...keyInfo };
     });
   }

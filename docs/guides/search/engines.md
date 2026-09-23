@@ -1,53 +1,58 @@
 # Search Engines
 
-Navigator has 12 search routes across 7 engines and 3 browser backends. The automatic router picks the best one for each query.
+Navigator has 12 engines in two flavors: **browser engines** that drive the built-in Chromium, and **API engines** that call hosted search APIs (some gated behind API keys). The automatic router picks the best one for each query.
 
-## Available Engines
+## Engine Types
 
-| Engine | Type | Routes | Notes |
-|--------|------|--------|-------|
-| DuckDuckGo | API + Browser | `duckduckgo_api`, `duckduckgo_cb`, `duckduckgo_ch` | Fast, privacy-focused |
-| Google | Browser | `google_cb`, `google_ch`, `google_lp` | Best coverage, may block automation |
-| Bing | Browser | `bing_cb`, `bing_lp` | Good general coverage |
-| Brave | Browser | `brave_cb` | Privacy-focused, growing index |
-| Startpage | Browser | `startpage_cb` | Google results via privacy proxy |
-| Yahoo | Browser | `yahoo_cb` | General web search |
-| Mojeek | Browser | `mojeek_lp` | Independent, UK-based |
+| Type | How it works | Engines |
+|------|--------------|---------|
+| **Browser engines** | Drive a real browser tab (Chromium), submit the query, parse the rendered SERP | `duckduckgo`, `google`, `bing`, `brave`, `mojeek`, `startpage`, `yahoo` |
+| **API engines** | Direct HTTP call to a hosted search API — no browser needed | `duckduckgo_api`, `exa_api`, `linkup_api`, `tavily_api`, `firecrawl_api` |
 
-## Route Naming
+## Browser Engines
 
-Routes are named `{engine}_{backend}`:
+| Engine | Notes |
+|--------|-------|
+| `duckduckgo` | Fast, privacy-focused |
+| `google` | Best coverage, may block automation |
+| `bing` | Good general coverage |
+| `brave` | Privacy-focused, growing index |
+| `startpage` | Google results via privacy proxy |
+| `yahoo` | General web search |
+| `mojeek` | Independent, UK-based |
 
-- `_api` — Direct API call, no browser needed
-- `_cb` — CloakBrowser (anti-bot fingerprinting)
-- `_ch` — Chromium (standard headless)
-- `_lp` — Lightpanda (lightweight browser)
+All browser engines run on the built-in Chromium and pool tabs for reuse. Engine ids are the short names above — the old `{engine}_{backend}` route naming (`google_cb`, `bing_lp`, …) has been removed. Backend routing is internal and no longer part of the engine identity.
 
-## Backend Types
+## API Engines
 
-| Backend | What it is | Best for |
-|---------|-----------|----------|
-| `api` | Direct HTTP request | DuckDuckGo Instant Answers |
-| `cloakbrowser` | Browser with anti-bot profiles | Most search engines |
-| `chromium` | Standard headless Chromium | When CloakBrowser isn't available |
-| `lightpanda` | Lightweight CDP browser | Shared pool, low memory |
+| Engine | Requires | Notes |
+|--------|----------|-------|
+| `duckduckgo_api` | — | Free HTML endpoint, no key. Fast and reliable |
+| `exa_api` | `EXA_API_KEY` | [Exa](https://dashboard.exa.ai/api-keys) semantic search with highlights |
+| `linkup_api` | `LINKUP_API_KEY` | [Linkup](https://app.linkup.so/api-keys) grounded search |
+| `tavily_api` | `TAVILY_API_KEY` | [Tavily](https://app.tavily.com/) with answer mode |
+| `firecrawl_api` | `FIRECRAWL_API_KEY` | [Firecrawl](https://www.firecrawl.dev/app/api-keys) web search |
+
+An API engine is **enabled only when its key is set** — without the key it is never scheduled in `select_best` and returns a `not configured` error if requested explicitly. `duckduckgo_api` needs no key and is always available.
+
+> Set keys via `.env` or the **Configs → Search Engines** panel at `/console/manage`. Key changes hot-reload in the running server.
 
 ## Circuit Breakers
 
-When a search engine signals bot detection — captcha, blocked page, or timeout — Navigator detects it and puts that route on cooldown. During cooldown:
+When a search engine signals bot detection — captcha, blocked page, or timeout — Navigator detects it and puts that engine on cooldown. During cooldown:
 
-- The route is skipped for automatic selection
+- The engine is skipped for automatic selection
 - It can still be used if explicitly requested
 - After cooldown, it's tried again with a probe request
-- If the probe succeeds, the route rejoins the pool
+- If the probe succeeds, the engine rejoins the pool
 
 View circuit breaker status at `/console` or via the `/health` endpoint.
 
 ## Search Windows
 
-Navigator maintains "search windows" — pre-opened browser tabs ready for search. This makes subsequent searches faster because the browser doesn't need to open a new tab each time.
+Navigator maintains "search windows" — pre-opened Chromium tabs ready for search. This makes subsequent searches faster because the browser doesn't need to open a new tab each time.
 
-- Windows are pooled by engine backend
+- Windows are pooled per browser engine (whatever its configured pool policy)
 - Idle windows are cleaned up after a timeout
 
 The pool size is bounded by two settings:
@@ -62,7 +67,7 @@ Maximum pool size:
 
 ## Manual Engine Selection
 
-Force a specific route:
+Force a specific engine:
 
 ```json
 {
@@ -71,28 +76,31 @@ Force a specific route:
 }
 ```
 
-This runs the requested route even if it's not in the automatic pool.
+This runs the requested engine even if it's not in the automatic pool. A keyed API engine without its key configured returns a `not configured` error.
 
-Available route names: `duckduckgo_api`, `duckduckgo_cb`, `duckduckgo_ch`, `google_cb`, `google_ch`, `google_lp`, `bing_cb`, `bing_lp`, `brave_cb`, `mojeek_lp`, `startpage_cb`, `yahoo_cb`.
+All engine names: `duckduckgo`, `duckduckgo_api`, `google`, `bing`, `brave`, `mojeek`, `startpage`, `yahoo`, `exa_api`, `linkup_api`, `tavily_api`, `firecrawl_api`.
 
 ## Automatic Routing
 
 With `select_best` (default), Navigator:
 
-1. Checks which routes are healthy
+1. Checks which engines are healthy and enabled
 2. Ranks them by recent performance (success rate, speed, result count)
-3. Tries the best route first
-4. Falls back to the next route on failure
-5. Puts failed routes on cooldown (circuit breaker)
+3. Tries the best engine first
+4. Falls back to the next engine on failure
+5. Puts failed engines on cooldown (circuit breaker)
+
+By default the `select_best` pool is `duckduckgo_api`, `brave`, `google`, `duckduckgo`, `bing`, `mojeek`, `yahoo`, `startpage` — keyed API engines are added automatically when their keys are present. Control it with `SEARCH_ENABLED_ENGINES`.
 
 You almost never need to specify an engine manually.
 
 ## Tips
 
 - **Let the router work** — `select_best` is almost always the right choice
-- **Use DuckDuckGo API** for fast, reliable results without browser overhead
+- **Use `duckduckgo_api`** for fast, reliable results without browser overhead
+- **Add a keyed API engine** (`exa_api`, `linkup_api`, `tavily_api`, `firecrawl_api`) when the free engines aren't enough
 - **Try Google manually** if other engines don't have what you need
-- **Check `/console`** if searches are failing — it shows which routes are healthy
+- **Check `/console`** if searches are failing — it shows which engines are healthy
 
 ## Next Steps
 

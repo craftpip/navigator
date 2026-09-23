@@ -83,6 +83,7 @@ function makeChromeMock() {
     },
     windows: {
       getCurrent: cb => cb({ id: 1 }),
+      create: (opts, cb) => cb && cb({ id: 500, tabs: [{ id: 98, url: (opts && opts.url) || 'about:blank', active: false, windowId: 500 }] }),
       get: (id, cb) => cb({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }),
       update: (id, opts, cb) => {
         const merged = Object.assign({ id, left: 0, top: 0, width: 1920, height: 1080, state: 'normal', focused: false }, opts || {});
@@ -636,6 +637,252 @@ let env0;
   env.ConnectionManager.disconnect();
   const after = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
   test('19. disconnect clears the pending-connecting flag', () => after.pending === false);
+}
+
+// 20-24. "Open windows instead of tabs" (plan 56) — window-mode behavior.
+// Flag OFF: createTarget keeps today's tab path (tabs.create + grouping),
+// contexts stay mock. Flag ON: createTarget/createBrowserContext open real
+// windows, getBrowserContexts lists them, closeTarget removes the window.
+
+// 20. flag OFF -> createTarget uses the plain tab path (tabs.create + grouping)
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  // known target for the new tab so waitForTargetByTabId resolves fast
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-99', tabId: 99, type: 'page', title: 'T', url: 'https://example.com', attached: false },
+    { id: 'target-1', tabId: 1, type: 'page', title: 'Example', url: 'https://example.com', attached: false }
+  ]);
+  const rec = { tabsCreate: 0, windowsCreate: 0, groups: 0 };
+  const origTabsCreate = env.chrome.tabs.create;
+  env.chrome.tabs.create = (opts, cb) => { rec.tabsCreate++; return origTabsCreate(opts, cb); };
+  env.chrome.windows.create = (opts, cb) => { rec.windowsCreate++; cb({ id: 500, tabs: [{ id: 98 }] }); };
+  env.chrome.tabs.group = (opts, cb) => { rec.groups++; return Promise.resolve(10); };
+
+  const res = await env.routeCDPCommand({ id: 201, method: 'Target.createTarget', params: { url: 'https://example.com' }, sessionId: null });
+  const r = res && res.result;
+  test('20. flag OFF -> createTarget = tabs.create path + grouping', () =>
+    !!r && r.targetId === 'target-99' &&
+    rec.tabsCreate === 1 && rec.windowsCreate === 0 && rec.groups >= 1);
+}
+
+// 21. flag ON -> createTarget opens a real window, result carries the context
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-98', tabId: 98, type: 'page', title: 'T', url: 'https://example.com', attached: false },
+    { id: 'target-1', tabId: 1, type: 'page', title: 'Example', url: 'https://example.com', attached: false }
+  ]);
+  const rec = { windowsCreate: [], groups: 0, tabsUpdate: [] };
+  env.chrome.windows.create = (opts, cb) => {
+    rec.windowsCreate.push(opts);
+    cb({ id: 500, tabs: [{ id: 98, url: 'about:blank', active: false, windowId: 500 }] });
+  };
+  env.chrome.tabs.group = (opts, cb) => { rec.groups++; return Promise.resolve(10); };
+  env.chrome.tabs.update = (id, opts, cb) => { rec.tabsUpdate.push({ id, opts }); cb && cb(); };
+
+  const res = await env.routeCDPCommand({ id: 210, method: 'Target.createTarget', params: { url: 'https://example.com' }, sessionId: null });
+  const r = res && res.result;
+  const createOpts = rec.windowsCreate[0] || {};
+  test('21. flag ON -> createTarget opens a window with browserContextId', () =>
+    !!r && r.targetId === 'target-98' && r.browserContextId === 'window-500' && r.windowId === 500 &&
+    rec.windowsCreate.length === 1 && rec.groups === 0 &&
+    // windows.create rejects `active` (tabs.create-only); `focused:false` keeps it background.
+    !('active' in createOpts) && createOpts.focused === false &&
+    rec.tabsUpdate.length === 1 && rec.tabsUpdate[0].opts.url === 'https://example.com');
+}
+
+// 22. flag ON -> createBrowserContext lazy window-<ts>-<rand> id (no window
+//     opens); getBrowserContexts lists it; dispose drops it with no close
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  let createdWindows = 0;
+  const createOpts = [];
+  env.chrome.windows.create = (opts, cb) => {
+    createOpts.push(opts);
+    createdWindows++;
+    cb({ id: 600, tabs: [{ id: 97, url: 'about:blank', active: false, windowId: 600 }] });
+  };
+  const removed = [];
+  env.chrome.windows.remove = (id, cb) => { removed.push(id); cb && cb(); };
+
+  const r1 = await env.routeCDPCommand({ id: 221, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const r2 = await env.routeCDPCommand({ id: 222, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  const bctx = r1 && r1.result && r1.result.browserContextId;
+  const r3 = await env.routeCDPCommand({ id: 223, method: 'Target.disposeBrowserContext', params: { browserContextId: bctx }, sessionId: null });
+  const r4 = await env.routeCDPCommand({ id: 224, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  test('22. flag ON -> lazy window-<ts>-<rand> context; no window; dispose drops id', () =>
+    !!bctx && !r1.result._mock && r1.result._lazyWindow === true &&
+    /^window-\d+-[a-z0-9]+$/.test(bctx) &&
+    createdWindows === 0 && createOpts.length === 0 &&
+    Array.isArray(r2.result.browserContextIds) && r2.result.browserContextIds.join() === 'default,' + bctx &&
+    r3 && r3.result && removed.length === 0 &&
+    Array.isArray(r4.result.browserContextIds) && r4.result.browserContextIds.join() === 'default');
+}
+
+// 23. flag OFF -> contexts stay exactly today's mock
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  const removed = [];
+  env.chrome.windows.remove = (id, cb) => { removed.push(id); cb && cb(); };
+
+  const r1 = await env.routeCDPCommand({ id: 231, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const r2 = await env.routeCDPCommand({ id: 232, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  await env.routeCDPCommand({ id: 233, method: 'Target.disposeBrowserContext', params: { browserContextId: 'context-whatever' }, sessionId: null });
+  test('23. flag OFF -> contexts stay mock, dispose no window action', () =>
+    !!r1.result._mock && /^context-/.test(r1.result.browserContextId) &&
+    r2.result.browserContextIds.join() === 'default' && removed.length === 0);
+}
+
+// 24. closeTarget: last tab of a CDP-created window closes the window,
+//     otherwise it plain-removes the tab
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  const state = env.State;
+  state.addCDPCreatedTab(500);
+  state.addCDPCreatedWindow(77);          // 1-tab CDP window
+  state.addCDPCreatedTab(501);
+  state.addCDPCreatedWindow(78);          // 2-tab CDP window
+
+  const rec = { winRemove: [], tabRemove: [] };
+  env.chrome.windows.remove = (id, cb) => { rec.winRemove.push(id); cb && cb(); };
+  env.chrome.tabs.remove = (id, cb) => { rec.tabRemove.push(id); cb && cb(); };
+  env.chrome.tabs.get = (id, cb) => {
+    const map = { 500: 77, 501: 78, 502: 78 };
+    cb({ id, windowId: map[id] != null ? map[id] : 1, title: 'T', url: 'about:blank' });
+  };
+  env.chrome.windows.get = (id, opts, cb) => {
+    if (id === 77) cb({ id: 77, tabs: [{ id: 500 }] });
+    else if (id === 78) cb({ id: 78, tabs: [{ id: 501 }, { id: 502 }] });
+    else cb({ id, tabs: [] });
+  };
+
+  const o1 = await env.routeCDPCommand({ id: 241, method: 'Target.closeTarget', params: { targetId: '500' }, sessionId: null });
+  await sleep(40);
+  const okLast = o1 && o1.result && o1.result.success === true &&
+    rec.winRemove.join() === '77' && rec.tabRemove.length === 0 &&
+    !state.isCDPCreatedWindow(77);
+  const o2 = await env.routeCDPCommand({ id: 242, method: 'Target.closeTarget', params: { targetId: '501' }, sessionId: null });
+  await sleep(40);
+  const okOther = o2 && o2.result && o2.result.success === true &&
+    rec.winRemove.join() === '77' && rec.tabRemove.join() === '501' && state.isCDPCreatedWindow(78);
+  test('24. closeTarget closes a 1-tab CDP window, plain-removes otherwise', () => okLast && okOther);
+}
+
+// 25. flag OFF + explicit newWindow:true still opens a window (wantWindow
+//     override); a lone window tab is never grouped
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-98', tabId: 98, type: 'page', title: 'T', url: 'https://example.com', attached: false },
+    { id: 'target-1', tabId: 1, type: 'page', title: 'Example', url: 'https://example.com', attached: false }
+  ]);
+  const rec = { windowsCreate: 0, tabsCreate: 0, groups: 0 };
+  const origTabsCreate = env.chrome.tabs.create;
+  env.chrome.tabs.create = (opts, cb) => { rec.tabsCreate++; return origTabsCreate(opts, cb); };
+  env.chrome.windows.create = (opts, cb) => { rec.windowsCreate++; cb({ id: 501, tabs: [{ id: 98, windowId: 501 }] }); };
+  env.chrome.tabs.group = (_opts, _cb) => { rec.groups++; return Promise.resolve(10); };
+
+  const res = await env.routeCDPCommand({ id: 251, method: 'Target.createTarget', params: { url: 'https://example.com', newWindow: true }, sessionId: null });
+  const r = res && res.result;
+  test('25. flag OFF + newWindow -> still a window (tab path skipped, no grouping)', () =>
+    !!r && r.browserContextId === 'window-501' && r.windowId === 501 &&
+    rec.windowsCreate === 1 && rec.tabsCreate === 0 && rec.groups === 0);
+}
+
+// 26. flag OFF + non-default browserContextId still opens a window — this is
+//     exactly what puppeteer's context.newPage() sends through the relay
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-98', tabId: 98, type: 'page', title: 'T', url: 'https://example.com', attached: false },
+    { id: 'target-1', tabId: 1, type: 'page', title: 'Example', url: 'https://example.com', attached: false }
+  ]);
+  const rec = { windowsCreate: 0, tabsCreate: 0 };
+  const origTabsCreate = env.chrome.tabs.create;
+  env.chrome.tabs.create = (opts, cb) => { rec.tabsCreate++; return origTabsCreate(opts, cb); };
+  env.chrome.windows.create = (opts, cb) => { rec.windowsCreate++; cb({ id: 502, tabs: [{ id: 98, windowId: 502 }] }); };
+
+  const res = await env.routeCDPCommand({ id: 261, method: 'Target.createTarget', params: { url: 'https://example.com', browserContextId: 'window-42' }, sessionId: null });
+  const r = res && res.result;
+  test('26. flag OFF + browserContextId -> window path (puppeteer context.newPage)', () =>
+    !!r && r.browserContextId === 'window-502' && r.windowId === 502 &&
+    rec.windowsCreate === 1 && rec.tabsCreate === 0);
+}
+
+// 27. TabList: a window-created tab reports windowId + window-<id> context
+//     (this is what the relay's tab registry sees), plain tabs stay 'default'
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const state = env.State;
+  state.addCDPCreatedWindow(9);
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-40', tabId: 40, type: 'page', title: 'Win', url: 'https://win.test', attached: false },
+    { id: 'target-41', tabId: 41, type: 'page', title: 'Plain', url: 'https://plain.test', attached: false }
+  ]);
+  env.chrome.tabs.get = (id, cb) => cb({ id, title: 'T' + id, url: id === 40 ? 'https://win.test' : 'https://plain.test', windowId: id === 40 ? 9 : 1 });
+  const targets = await new Promise(res => env.TabList.getAllAsTargets(t => res(t)));
+  const win = targets.find(t => t.tabId === 40);
+  const plain = targets.find(t => t.tabId === 41);
+  test('27. TabList: window target emits windowId + window-<id> context', () =>
+    !!win && win.browserContextId === 'window-9' && win.windowId === 9 &&
+    !!plain && plain.browserContextId === 'default' && plain.windowId === 1);
+}
+
+// 28. Context lifecycle (lazy): createBrowserContext registers a lazy id;
+//     createTarget opens the real window+context; closing its last tab drops
+//     the real context; dispose drops the lazy id
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  env.chrome.debugger.getTargets = (cb) => cb([
+    { id: 'target-98', tabId: 98, type: 'page', title: 'T', url: 'https://example.com', attached: false },
+    { id: 'target-1', tabId: 1, type: 'page', title: 'Example', url: 'https://example.com', attached: false }
+  ]);
+  const winIds = [600, 500];
+  env.chrome.windows.create = (opts, cb) => {
+    const id = winIds.shift();
+    cb({ id, tabs: [{ id: 98, windowId: id }] });
+  };
+  const removedWin = [];
+  const removedTab = [];
+  env.chrome.windows.remove = (id, cb) => { removedWin.push(id); cb && cb(); };
+  env.chrome.tabs.remove = (id, cb) => { removedTab.push(id); cb && cb(); };
+  env.chrome.windows.get = (id, opts, cb) => cb({ id, tabs: [{ id: 98 }] });
+  env.chrome.tabs.get = (id, cb) => cb({ id, title: 'T', url: 'about:blank', windowId: id === 98 ? 600 : 1 });
+
+  const c1 = await env.routeCDPCommand({ id: 281, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const c2 = await env.routeCDPCommand({ id: 282, method: 'Target.createTarget', params: { url: 'https://example.com' }, sessionId: null });
+  const c3 = await env.routeCDPCommand({ id: 283, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  await env.routeCDPCommand({ id: 284, method: 'Target.closeTarget', params: { targetId: c2.result.targetId }, sessionId: null });
+  await sleep(40);
+  const c4 = await env.routeCDPCommand({ id: 285, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  await env.routeCDPCommand({ id: 286, method: 'Target.disposeBrowserContext', params: { browserContextId: c1.result.browserContextId }, sessionId: null });
+  const c5 = await env.routeCDPCommand({ id: 287, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+
+  const lazyId = c1 && c1.result && c1.result.browserContextId;
+  test('28. lazy context: createTarget opens the real window; closeTarget+dispose unregister all', () =>
+    /^window-\d+-[a-z0-9]+$/.test(lazyId) && c1.result._lazyWindow === true &&
+    c2.result.browserContextId === 'window-600' && c2.result.windowId === 600 &&
+    c3.result.browserContextIds.join() === 'default,window-600,' + lazyId &&
+    removedWin.join() === '600' && removedTab.length === 0 &&
+    c4.result.browserContextIds.join() === 'default,' + lazyId &&
+    c5.result.browserContextIds.join() === 'default');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

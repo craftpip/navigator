@@ -24,15 +24,15 @@ docker compose exec navigator npx vitest run
 
 | Area | Important settings |
 |---|---|
-| Browser | `BROWSER_BACKEND`, `DEVTOOLS_BROWSER_BACKEND`, `CHROME_PATH`, `CHROME_USER_DATA_DIR`, `CLOAKBROWSER_BINARY_PATH`, `LIGHTPANDA_PATH`, `HEADLESS`, `BROWSER_OP_TIMEOUT_MS`, `NAV_WAIT_UNTIL` |
+| Browser | `BROWSERS`, `CHROME_PATH`, `CHROME_USER_DATA_DIR`, `HEADLESS`, `BROWSER_OP_TIMEOUT_MS`, `NAV_WAIT_UNTIL` |
 | Transport | `ENABLE_HTTP_MCP`, `ENABLE_STDIO_MCP`, `MCP_API_PORT`, `MCP_ALLOW_UNAUTHENTICATED`, `MCP_API_KEYS`, `DISABLE_TOOLS` |
 | Search | `SEARCH_ENABLED_ENGINES`, `SEARCH_ROUTE_WARMUP_ENGINES`, `SEARCH_ROUTE_CIRCUIT_OPEN_MS`, `SEARCH_QUEUE_*`, `ENABLE_INSTANT_ANSWERS`, search-window limits |
 | Extraction | `DOMAIN_HINTS_PATH`, `WEB_FETCH_MAX_CHARS`, `POST_PROCESSOR_MODELS`, stabilization and non-content selector settings |
 | Capacity | `MAX_CONCURRENT_PAGE_OPS`, `OPEN_PAGE_MAX_PARALLEL`, `HUMAN_TYPING_DELAY` |
 | Screenshots | `ENABLE_SCREENSHOT_PATH`, `ENABLE_SCREENSHOT_DOWNLOAD_LINK` |
-| Operations | `ENABLE_WEB_CONSOLE`, `ENABLE_VNC`, `ENABLE_DEVTOOLS_MCP`, `ENABLE_HTTP_HEALTH`, ports (`MCP_API_PORT`, `HEALTH_PORT`, `LIGHTPANDA_PORT`, `VNC_PORT`, `NOVNC_PORT`), `DEBUG`, `LOG_TOOL_ERRORS`, `ENABLE_HANG_RESTART`, `HANG_RESTART_TIMEOUT_MS` |
+| Operations | `ENABLE_WEB_CONSOLE`, `ENABLE_VNC`, `ENABLE_DEVTOOLS_MCP`, `ENABLE_HTTP_HEALTH`, ports (`MCP_API_PORT`, `VNC_PORT`, `NOVNC_PORT`), `DEBUG`, `LOG_TOOL_ERRORS`, `ENABLE_HANG_RESTART`, `HANG_RESTART_TIMEOUT_MS` |
 
-`HEADLESS=false` is forced back to headless unless `ENABLE_VNC=1`, because a graphical display is required for headful operation. Search routes select their registered backend independently of `BROWSER_BACKEND`.
+`HEADLESS=false` is forced back to headless unless `ENABLE_VNC=1`, because a graphical display is required for headful operation. Page tools (`web_fetch`, screenshots, devtools) route to browsers from the `BROWSERS` array via `resolveBrowserParam()`. Search engines always run on the built-in Chromium, independent of the configured page browsers.
 
 ## SQLite State
 
@@ -61,7 +61,7 @@ Search IDs and page-operation IDs have independent sequences. Consumers of `/sta
 ./navigator.js statistics
 ./navigator.js monitoring --interval 2
 ./navigator.js engines
-./navigator.js engines reset google_cb
+./navigator.js engines reset google
 ```
 
 The base URL is resolved from `--url`, then `NAVIGATOR_URL`, then `.env` `MCP_API_HOST` and `MCP_API_PORT`, then `http://localhost:1994`.

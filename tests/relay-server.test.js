@@ -231,6 +231,37 @@ describe("relay registry + PIN pairing (/relay)", () => {
     entries = relay.getStatusEntries(configured);
     expect(entries.map((e) => e.name)).toEqual(["pre-declared", "plain-cdp", "dynamic-ff"]);
   });
+
+  it("forget clears pairing but keeps the row; remove deletes the row entirely", async () => {
+    const { relay } = await ephemeralRelay();
+    relay._rememberKnown("ghost", "chrome");
+
+    let entries = relay.getStatusEntries([]);
+    const ghost = entries.find((e) => e.name === "ghost");
+    expect(ghost).toBeTruthy();
+    expect(ghost.status).toBe("disconnected");
+    expect(ghost.paired).toBe(false);
+    expect(ghost.configured).toBe(false);
+
+    // Pair it the way the PIN flow does.
+    relay._tokenToName.set("tok", "ghost");
+    entries = relay.getStatusEntries([]);
+    expect(entries.find((e) => e.name === "ghost").paired).toBe(true);
+
+    // Forget: pairing cleared, token gone — but the row stays (disconnected, not paired).
+    expect(relay.forget("ghost")).toBe(true);
+    expect(relay.isPaired("ghost")).toBe(false);
+    entries = relay.getStatusEntries([]);
+    const afterForget = entries.find((e) => e.name === "ghost");
+    expect(afterForget).toBeTruthy();
+    expect(afterForget.status).toBe("disconnected");
+    expect(afterForget.paired).toBe(false);
+
+    // Remove: forget + drop the known-registry row entirely.
+    expect(relay.remove("ghost")).toBe(true);
+    expect(relay.getStatusEntries([]).map((e) => e.name)).not.toContain("ghost");
+    expect(relay._knownBrowsers.has("ghost")).toBe(false);
+  });
 });
 
 describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () => {
@@ -253,7 +284,9 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
         type: "page",
         title: t.title,
         url: t.url,
-        attached: this.attached.has(t.targetId)
+        attached: this.attached.has(t.targetId),
+        // Plan 56: real extension's tab_list emits the window context id too.
+        browserContextId: t.browserContextId || "default"
       }));
     }
 
@@ -285,11 +318,19 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
           return this.reply(id, { protocolVersion: "1.3", product: "Fake/0.1.0 (test)", revision: "1", userAgent: "fake-agent/0.1", jsVersion: "1.8" });
         case "Target.createTarget": {
           const targetId = `tab-${this.next++}`;
-          this.tabs.set(targetId, { targetId, type: "page", title: "New Tab", url: String(params.url || "about:blank") });
-          this.reply(id, { targetId });
+          this.tabs.set(targetId, {
+            targetId, type: "page", title: "New Tab", url: String(params.url || "about:blank"),
+            browserContextId: params.browserContextId || "default"
+          });
+          // Window-mode (plan 56): echo the browserContextId like the real
+          // extension's createWindowTab does, so the relay can record it.
+          this.reply(id, params.browserContextId ? { targetId, browserContextId: params.browserContextId } : { targetId });
           this.send({ type: "tab_list", tabs: this.tabList() });
           return;
         }
+        case "Target.getBrowserContexts":
+          // Plan 56 pass-through: the contexts live on the extension side.
+          return this.reply(id, { browserContextIds: ["default", "window-42"] });
         case "Target.attachToTarget": {
           const tab = this.tabs.get(params.targetId);
           if (!tab) return this.fail(id, `No target: ${params.targetId}`);
@@ -438,6 +479,34 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
     const ack = await nextMessage(gw, (m) => m.id === 2, 8000);
     expect(ack.result.targetId).toBe(attached.params.targetInfo.targetId);
     expect(ack.error).toBeUndefined();
+    gw.close();
+  });
+
+  it("forwards Target.getBrowserContexts and threads browserContextId through created targets", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "ctx-browser");
+    const fake = new FakeExtension(ws);
+    const gw = await open(`${wsBase}/browser/ctx-browser`);
+    flushAll(gw);
+
+    // 1. getBrowserContexts — the relay returns the extension's list, not the
+    //    hardcoded ["default"] (plan 56 pass-through).
+    gw.send(JSON.stringify({ id: 1, method: "Target.getBrowserContexts", params: {} }));
+    const ctxReply = await nextMessage(gw, (m) => m.id === 1, 8000);
+    expect(ctxReply.error).toBeUndefined();
+    expect(ctxReply.result.browserContextIds).toEqual(["default", "window-42"]);
+
+    // 2. createTarget with a window context id — the browserContextId survives
+    //    _registerCreatedTarget into the synthesized attachedToTarget info and
+    //    the relay's own tab registry.
+    gw.send(JSON.stringify({ id: 2, method: "Target.createTarget", params: { url: "about:blank", browserContextId: "window-42" } }));
+    const attached = await nextMessage(gw, (m) => m.method === "Target.attachedToTarget", 8000);
+    const ack = await nextMessage(gw, (m) => m.id === 2, 8000);
+    expect(ack.result.targetId).toBe(attached.params.targetInfo.targetId);
+    expect(attached.params.targetInfo.browserContextId).toBe("window-42");
+    expect(fake.tabs.get(ack.result.targetId)).toEqual(expect.objectContaining({ browserContextId: "window-42" }));
+    expect(relay._entries.get("ctx-browser").tabs.find((t) => t.targetId === ack.result.targetId))
+      .toEqual(expect.objectContaining({ browserContextId: "window-42" }));
     gw.close();
   });
 

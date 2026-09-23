@@ -1,4 +1,16 @@
 var LocalHandler = (function() {
+  // Lazy window-backed browser contexts (plan 56). Chrome has no pre-creatable
+  // window handle to hold in a context id, so createBrowserContext returns a
+  // lazy `window-<ts>-<rand>` id and the real window is created by the NEXT
+  // createTarget carrying that id (which is what forces the window path).
+  // This set keeps the ids listable/disposable. The rand suffix guarantees
+  // parseInt on the id yields NaN, so window lookups never misfire on it.
+  var _cdpWindowContextIds = new Set();
+
+  function isWindowContextId(id) {
+    return typeof id === 'string' && id.indexOf('window-') === 0;
+  }
+
   function browserGetVersion() {
     var userAgent = navigator.userAgent || '';
     var match = userAgent.match(/Chrome\/([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/);
@@ -49,19 +61,59 @@ var LocalHandler = (function() {
   }
 
   function targetCreateBrowserContext() {
-    var browserContextId = 'context-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
-    return {
-      browserContextId: browserContextId,
-      _mock: true,
-      _message: 'Navigator relay: all tabs share one context'
-    };
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      if (flag !== true) {
+        // Legacy mock — all tabs share one context.
+        var browserContextId = 'context-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+        return {
+          browserContextId: browserContextId,
+          _mock: true,
+          _message: 'Navigator relay: all tabs share one context'
+        };
+      }
+      // Lazy window-backed context id. The window itself is created by the
+      // next createTarget carrying this id — eager window creation here meant
+      // puppeteer's context.newPage() opened TWO windows (one from the
+      // context, one from createTarget).
+      var windowContextId = 'window-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+      _cdpWindowContextIds.add(windowContextId);
+      return {
+        browserContextId: windowContextId,
+        _lazyWindow: true,
+        _message: 'Navigator relay: window context — window opens on next createTarget with this id'
+      };
+    });
   }
 
   function targetGetBrowserContexts() {
-    return { browserContextIds: ['default'] };
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      var ids = ['default'];
+      if (flag === true) {
+        State.getCDPCreatedWindows().forEach(function(reg) {
+          ids.push('window-' + reg.windowId);
+        });
+        _cdpWindowContextIds.forEach(function(id) { ids.push(id); });
+      }
+      return { browserContextIds: ids };
+    });
   }
 
-  function targetDisposeBrowserContext() {
+  function targetDisposeBrowserContext(context) {
+    var params = context.params || {};
+    var ctxId = params.browserContextId;
+    if (isWindowContextId(ctxId)) {
+      if (_cdpWindowContextIds.has(ctxId)) {
+        // Lazy id — no window exists yet; dropping the id is the durable action.
+        _cdpWindowContextIds.delete(ctxId);
+      } else {
+        var windowId = parseInt(ctxId.slice(7), 10);
+        if (!isNaN(windowId) && State.isCDPCreatedWindow(windowId)) {
+          chrome.windows.remove(windowId, function() {
+            if (!chrome.runtime.lastError) State.removeCDPCreatedWindow(windowId);
+          });
+        }
+      }
+    }
     return {};
   }
 

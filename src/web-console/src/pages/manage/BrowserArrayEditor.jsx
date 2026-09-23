@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { request } from "../../lib/request.js";
 import { BROWSER_ROLES, BROWSER_EMPTY_ENTRY, BROWSER_TYPE_LABEL } from "./constants.js";
 import { normalizeBrowserType, parseBrowsersEntries, serializeBrowsersEntries, builtinBrowserPrompt } from "./browser-utils.js";
 import { BrowserEditModal } from "./BrowserEditModal.jsx";
@@ -10,15 +11,30 @@ export function BrowserArrayEditor({ value, onChange, ok, message }) {
   const [jsonDraft, setJsonDraft] = useState(value || "[]");
   const [jsonError, setJsonError] = useState("");
   const [editIndex, setEditIndex] = useState(null);
+  // The draft (Manage) already merges detected dynamic drivers into `value`
+  // — this editor renders exactly that array, nothing more.
   const entries = parseBrowsersEntries(value || "[]");
+
+  useEffect(() => {
+    if (showJson) setJsonDraft(value || "[]");
+  }, [value, showJson]);
 
   const patch = (nextEntries) => {
     const serialized = serializeBrowsersEntries(nextEntries);
     setJsonDraft(serialized);
     onChange(serialized);
   };
-  const addEntry = () => patch([...entries, { ...BROWSER_EMPTY_ENTRY }]);
-  const removeEntry = (index) => patch(entries.filter((_, i) => i !== index));
+  const removeEntry = (index) => {
+    const entry = entries[index];
+    patch(entries.filter((_, i) => i !== index));
+    if (entry && entry.type === "navigator-cdp" && entry.name) {
+      request("/console/relay/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: entry.name }),
+      }).catch(() => {});
+    }
+  };
   const duplicateEntry = (index) => {
     const e = { ...entries[index], name: entries[index].name + "_copy" };
     const next = [...entries];
@@ -38,7 +54,7 @@ export function BrowserArrayEditor({ value, onChange, ok, message }) {
     patch(nextEntries);
   };
 
-  const switchToJson = () => { setJsonDraft(value || "[]"); setJsonError(""); setShowJson(true); };
+  const switchToJson = () => { setJsonDraft(serializeBrowsersEntries(entries)); setJsonError(""); setShowJson(true); };
   const switchToForm = () => {
     try { JSON.parse(jsonDraft); } catch (e) { setJsonError(`Invalid JSON: ${e.message}`); return; }
     setJsonError(""); setShowJson(false);
@@ -81,13 +97,8 @@ export function BrowserArrayEditor({ value, onChange, ok, message }) {
                   {!isBuiltIn && (
                     <button className="button small" onClick={() => setEditIndex(index)}>Edit</button>
                   )}
-                  <button className="button small" onClick={() => moveEntry(index, -1)} disabled={isBuiltIn || index === 0} title="Move up">↑</button>
-                  <button className="button small" onClick={() => moveEntry(index, 1)} disabled={isBuiltIn || index === entries.length - 1} title="Move down">↓</button>
                   {!isBuiltIn && (
-                    <>
-                      <button className="button small" onClick={() => duplicateEntry(index)} title="Duplicate">⧉</button>
-                      <button className="button small danger" onClick={() => removeEntry(index)} title="Remove">&times;</button>
-                    </>
+                    <button className="button small danger" onClick={() => removeEntry(index)} title={entry.type === "navigator-cdp" ? "Remove and forget pairing" : "Remove"}>&times;</button>
                   )}
                 </div>
               </div>

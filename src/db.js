@@ -52,7 +52,7 @@ const MIGRATIONS = [
   );
    CREATE INDEX IF NOT EXISTS idx_page_ops_ts ON page_ops(ts);
    CREATE INDEX IF NOT EXISTS idx_page_ops_tool ON page_ops(tool);`,
-   `ALTER TABLE page_ops ADD COLUMN response_chars INTEGER NOT NULL DEFAULT 0;`,
+    `ALTER TABLE page_ops ADD COLUMN response_chars INTEGER NOT NULL DEFAULT 0;`,
   `CREATE TABLE IF NOT EXISTS api_keys (
      id INTEGER PRIMARY KEY AUTOINCREMENT,
      name TEXT NOT NULL,
@@ -127,8 +127,27 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_tool ON mcp_calls(tool);
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_search_id ON mcp_calls(search_id);
     CREATE INDEX IF NOT EXISTS idx_mcp_calls_page_op_id ON mcp_calls(page_op_id);`,
-  `ALTER TABLE api_keys ADD COLUMN allowed_browsers TEXT;`
+  `ALTER TABLE api_keys ADD COLUMN allowed_browsers TEXT;`,
+  (db) => {
+    const cols = db.prepare("PRAGMA table_info(page_ops)").all().map((c) => c.name);
+    if (!cols.includes("api_key_id")) db.exec("ALTER TABLE page_ops ADD COLUMN api_key_id INTEGER;");
+    if (!cols.includes("api_key_name")) db.exec("ALTER TABLE page_ops ADD COLUMN api_key_name TEXT;");
+    if (!cols.includes("api_key_preview")) db.exec("ALTER TABLE page_ops ADD COLUMN api_key_preview TEXT;");
+  },
+  `CREATE TABLE IF NOT EXISTS known_relay_browsers (
+     name TEXT PRIMARY KEY,
+     plugin TEXT NOT NULL DEFAULT 'auto',
+     first_seen_at INTEGER NOT NULL
+   );`,
 ];
+
+function applyMigration(db, migration) {
+  if (typeof migration === "function") {
+    migration(db);
+    return;
+  }
+  db.exec(migration);
+}
 
 export function initDb(dataDir = process.env.NAVIGATOR_DATA_DIR || process.env.DATA_DIR || path.join(process.cwd(), "data")) {
   if (db) return db;
@@ -142,7 +161,7 @@ export function initDb(dataDir = process.env.NAVIGATOR_DATA_DIR || process.env.D
   const row = db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get();
   let version = row?.version ?? 0;
   for (let i = version; i < MIGRATIONS.length; i += 1) {
-    db.exec(MIGRATIONS[i]);
+    applyMigration(db, MIGRATIONS[i]);
     db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(i + 1);
   }
   pruneActivity(true);
@@ -173,6 +192,23 @@ export function loadRelaySessions() {
 export function deleteRelaySession(name) {
   if (!db) return false;
   return getDb().prepare("DELETE FROM relay_sessions WHERE name = ?").run(name).changes > 0;
+}
+
+export function saveKnownRelayBrowser(name, plugin) {
+  if (!db) return;
+  getDb()
+    .prepare("INSERT OR IGNORE INTO known_relay_browsers (name, plugin, first_seen_at) VALUES (?, ?, ?)")
+    .run(name, plugin || "auto", Date.now());
+}
+
+export function loadKnownRelayBrowsers() {
+  if (!db) return [];
+  return getDb().prepare("SELECT name, plugin, first_seen_at FROM known_relay_browsers").all();
+}
+
+export function deleteKnownRelayBrowser(name) {
+  if (!db) return false;
+  return getDb().prepare("DELETE FROM known_relay_browsers WHERE name = ?").run(name).changes > 0;
 }
 
 export function incrementUsageTotal(key, amount = 1) {
@@ -274,6 +310,8 @@ export function pruneActivity(force = false) {
   if (!db) return;
   try {
     const cutoff = now - RETENTION_DAYS * 86400_000;
+    db.prepare("UPDATE mcp_calls SET search_id = NULL WHERE search_id IS NOT NULL AND search_id IN (SELECT id FROM searches WHERE ts < ?)").run(cutoff);
+    db.prepare("UPDATE mcp_calls SET page_op_id = NULL WHERE page_op_id IS NOT NULL AND page_op_id IN (SELECT id FROM page_ops WHERE ts < ?)").run(cutoff);
     db.prepare("DELETE FROM searches WHERE ts < ?").run(cutoff);
     db.prepare("DELETE FROM page_ops WHERE ts < ?").run(cutoff);
     db.prepare("DELETE FROM activity_events WHERE ts < ?").run(cutoff);

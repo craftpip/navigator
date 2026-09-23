@@ -85,5 +85,21 @@ var Config = {
         });
       }
     );
+  },
+
+  getOpenInWindow: function(callback) {
+    chrome.storage.local.get(['openInWindow'], function(result) {
+      callback(result.openInWindow === true);
+    });
+  },
+
+  setOpenInWindow: function(enabled, callback) {
+    chrome.storage.local.set({ openInWindow: !!enabled }, callback || function() {});
+  },
+
+  promisifiedGetOpenInWindow: function() {
+    return new Promise(function(resolve) {
+      Config.getOpenInWindow(resolve);
+    });
   }
 };

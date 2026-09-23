@@ -18,7 +18,7 @@ var TabList = (function() {
           url: tab.url || 'about:blank',
           attached: CDPSessionManager.isTabAttached(tab.id),
           openerId: tab.openerTabId != null ? String(tab.openerTabId) : undefined
-        });
+        }, tab);
       });
 
       // BiDi contexts that don't map to a tab yet still appear as targets.
@@ -49,8 +49,12 @@ var TabList = (function() {
     });
   }
 
-  function mapToTargetInfo(target) {
+  function mapToTargetInfo(target, tab) {
     if (!target) return null;
+    var windowId = tab ? tab.windowId : null;
+    // Window-created contexts (plan 56) report their real window as the
+    // browser context ("window-<id>"); everything else stays 'default'.
+    var isWindowTarget = windowId != null && CDPSessionManager.isWindowContext(target.id);
     return {
       targetId: target.id || String(target.tabId),
       type: target.type || 'page',
@@ -59,7 +63,8 @@ var TabList = (function() {
       attached: !!target.attached,
       canAccessOpener: false,
       openerId: target.openerId,
-      browserContextId: 'default',
+      browserContextId: isWindowTarget ? 'window-' + windowId : 'default',
+      windowId: windowId,
       tabId: target.tabId || null
     };
   }

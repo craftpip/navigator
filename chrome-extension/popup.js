@@ -32,6 +32,7 @@
   var fieldServerUrl = $('field-serverUrl');
   var browserNameError = $('browserNameError');
   var serverUrlError = $('serverUrlError');
+  var openInWindowCheckbox = $('openInWindow');
 
   versionEl.textContent = chrome.runtime.getManifest().version;
 
@@ -39,6 +40,7 @@
   var _latestSnapshot = null;
   var _urlDirty = false;
   var _browserNameDirty = false;
+  var _openInWindowDirty = false;
   var _pinBusy = false;
 
   function setProgress(active) {
@@ -436,6 +438,11 @@
       if (!_urlDirty) {
         serverUrlInput.value = snapshot.serverUrl || '';
       }
+      if (!_openInWindowDirty && openInWindowCheckbox) {
+        Config.getOpenInWindow(function(flag) {
+          openInWindowCheckbox.checked = !!flag;
+        });
+      }
       if (snapshot.connected) updateConnectedSummary(snapshot);
 
       if (snapshot.connected && snapshot.connectedAt) {
@@ -499,6 +506,14 @@
       if (!stillError) setError(null);
     }
   });
+
+  if (openInWindowCheckbox) {
+    openInWindowCheckbox.addEventListener('change', function() {
+      _openInWindowDirty = true;
+      Config.setOpenInWindow(openInWindowCheckbox.checked);
+      chrome.runtime.sendMessage({ type: 'stateUpdate' });
+    });
+  }
 
   pinSubmitBtn.addEventListener('click', function() {
     var pin = pinInput.value.trim();

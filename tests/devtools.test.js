@@ -193,6 +193,24 @@ describe("formatDevtoolsToolResponse", () => {
     expect(result.content[0].text).toContain("Target.getTargets");
     expect(result.content[0].text).toContain("{}");
   });
+
+  it("truncates oversized JSON payloads with a bounded note", async () => {
+    const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
+    const big = { a: "x".repeat(250000), list: Array.from({ length: 2000 }, () => ({ i: "y".repeat(100) })) };
+    const result = formatDevtoolsToolResponse("Runtime.evaluate", big);
+    const text = result.content[0].text;
+    expect(text.length).toBeLessThanOrEqual(121000);
+    expect(text).toContain("Response truncated");
+    expect(text).toContain("over the 120000-char budget");
+    expect(text).toContain("Narrow the request");
+  });
+
+  it("does not touch payloads within budget", async () => {
+    const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
+    const result = formatDevtoolsToolResponse("Runtime.evaluate", { value: 42 });
+    expect(result.content[0].text).toContain('"value"');
+    expect(result.content[0].text).not.toContain("Response truncated");
+  });
 });
 
 describe("handleDevtoolsToolCall", () => {
@@ -244,6 +262,204 @@ describe("handleDevtoolsToolCall", () => {
     expect(result).toHaveProperty("count");
     expect(Array.isArray(result.targets)).toBe(true);
     expect(result.count).toBe(result.targets.length);
+  });
+
+  it("lists targets without waiting for a page title", async () => {
+    const title = vi.fn().mockReturnValue(new Promise(() => {}));
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "chromium",
+      },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue({
+        goto: vi.fn(),
+        url: vi.fn().mockReturnValue("about:blank"),
+        title,
+        isClosed: vi.fn().mockReturnValue(false),
+        on: vi.fn(),
+      }),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "non-blocking-target" });
+    const result = await Promise.race([
+      handleDevtoolsToolCall("Target.getTargets", {}),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Target.getTargets waited on page.title")), 50)),
+    ]);
+
+    expect(result.targets.some((target) => target.targetId === "non-blocking-target")).toBe(true);
+    expect(title).not.toHaveBeenCalled();
+  });
+
+  it("Network.getRequests never adopts an unobserved target", async () => {
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      attachToExistingTarget: vi.fn().mockImplementation(() => new Promise(() => {})),
+    });
+    // The whole call must resolve immediately from the in-memory buffer, even
+    // for a tab that has never been adopted — attachToExistingTarget hanging
+    // must NOT be awaited (it would block → the 50ms race rejects).
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const result = await Promise.race([
+      handleDevtoolsToolCall("Network.getRequests", { targetId: "never-observed-tab" }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Network.getRequests blocked on an unobserved target")), 50)),
+    ]);
+
+    expect(result.observed).toBe(false);
+    expect(result.total).toBe(0);
+    expect(Array.isArray(result.requests)).toBe(true);
+  });
+
+  it("Runtime.getConsoleMessages never adopts an unobserved target", async () => {
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      attachToExistingTarget: vi.fn().mockImplementation(() => new Promise(() => {})),
+    });
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const result = await Promise.race([
+      handleDevtoolsToolCall("Runtime.getConsoleMessages", { targetId: "never-observed-console-tab" }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Runtime.getConsoleMessages blocked on an unobserved target")), 50)),
+    ]);
+
+    expect(result.observed).toBe(false);
+    expect(result.count).toBe(0);
+    expect(Array.isArray(result.messages)).toBe(true);
+  });
+
+  it("Page.reload throws UnknownDispatchError on mid-dispatch stale (no retry)", async () => {
+    const reloadCallCount = vi.fn(() => 0);
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      reload: vi.fn().mockImplementation(() => {
+        reloadCallCount();
+        throw new Error("Execution context was destroyed");
+      }),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chrome", navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 60000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "stale-mutation" });
+    await expect(
+      handleDevtoolsToolCall("Page.reload", { targetId: "stale-mutation" })
+    ).rejects.toThrow(/MAY have been applied|outcome unknown/i);
+  });
+
+  it("Runtime.evaluate retries once on mid-dispatch stale for read-only operations", async () => {
+    let evalCount = 0;
+    const successPage = {
+      on: vi.fn(),
+      url: vi.fn().mockReturnValue("about:blank"),
+      isClosed: vi.fn().mockReturnValue(false),
+      evaluate: vi.fn().mockImplementation(() => {
+        evalCount++;
+        if (evalCount === 1) throw new Error("Execution context was destroyed");
+        return Promise.resolve({ json: JSON.stringify({ answer: 42 }) });
+      }),
+    };
+    const reacquirePage = {
+      on: vi.fn(),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      evaluate: vi.fn().mockResolvedValue({ json: JSON.stringify({ answer: 42 }) }),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chrome", navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 60000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue(successPage),
+      attachToExistingTarget: vi.fn().mockResolvedValue({ page: reacquirePage, backend: "chrome" }),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "read-stale-retry" });
+    const result = await handleDevtoolsToolCall("Runtime.evaluate", {
+      targetId: "read-stale-retry",
+      expression: "40 + 2",
+    });
+    expect(evalCount).toBe(1);
+    expect(reacquirePage.evaluate).toHaveBeenCalledTimes(1);
+    expect(successPage.evaluate).toHaveBeenCalledTimes(1);
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId: "read-stale-retry" });
+  });
+
+  it("operation deadline: a hung read-only command rejects with a structured, retry-safe timeout", async () => {
+    const browserSession = {
+      send: vi.fn(() => new Promise(() => {})), // never settles
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chrome", navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 1000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "deadline-read" });
+    const error = await handleDevtoolsToolCall("Browser.getWindowForTarget", { targetId: "deadline-read" })
+      .then(() => null)
+      .catch((e) => e);
+
+    expect(error).not.toBeNull();
+    expect(error.code).toBe("DEVTOOLS_OPERATION_TIMEOUT");
+    expect(error.name).toBe("DevtoolsOperationTimeoutError");
+    expect(error.operation).toBe("Browser.getWindowForTarget");
+    expect(error.targetId).toBe("deadline-read");
+    expect(error.retrySafe).toBe(true);
+    expect(String(error.message)).toMatch(/re-running it is safe/);
+  });
+
+  it("operation deadline: a hung write command rejects with an unknown-outcome, non-retry-safe timeout", async () => {
+    const browserSession = {
+      send: vi.fn(() => new Promise(() => {})), // never settles
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chrome", navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 1000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "deadline-write" });
+    const error = await handleDevtoolsToolCall("Target.activateTarget", { targetId: "deadline-write" })
+      .then(() => null)
+      .catch((e) => e);
+
+    expect(error).not.toBeNull();
+    expect(error.code).toBe("DEVTOOLS_OPERATION_TIMEOUT");
+    expect(error.operation).toBe("Target.activateTarget");
+    expect(error.retrySafe).toBe(false);
+    expect(String(error.message)).toMatch(/outcome unknown\. Verify/);
   });
 
   it("Target.createTarget accepts ref_id and navigates to the resolved URL", async () => {
@@ -368,6 +584,154 @@ describe("handleDevtoolsToolCall", () => {
     expect(row.backend).toBe("mac laptop2");
     expect(row.origin).toBe("browser");
     expect(row.ownership).toBe("user");
+  });
+
+  it("releases an adopted user-browser target without closing its tab", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const adoptedPage = {
+      goto: vi.fn(),
+      url: vi.fn().mockReturnValue("https://example.com"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      close,
+    };
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "user-browser", type: "navigator-cdp", status: "connected" },
+      ]),
+      attachToExistingTarget: vi.fn().mockResolvedValue({ page: adoptedPage, backend: "user-browser" }),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const result = await handleDevtoolsToolCall("Target.closeTarget", { targetId: "user-browser-tab" });
+
+    expect(result).toEqual({ targetId: "user-browser-tab", closed: false, released: true });
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("inactivity cleanup releases adopted target without closing its tab", async () => {
+    const adoptedClose = vi.fn().mockResolvedValue(undefined);
+    const adoptedPage = {
+      goto: vi.fn(),
+      url: vi.fn().mockReturnValue("https://example.com"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      close: adoptedClose,
+    };
+    const agentClose = vi.fn().mockResolvedValue(undefined);
+    const agentPage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      close: agentClose,
+    };
+    const newPage = vi.fn().mockResolvedValue(agentPage);
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "chromium",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "user-browser", type: "navigator-cdp", status: "connected" },
+      ]),
+      newPage,
+      attachToExistingTarget: vi.fn().mockResolvedValue({ page: adoptedPage, backend: "user-browser" }),
+    });
+
+    const { handleDevtoolsToolCall, getTargetState, runInactivityTick } = await import("../src/devtools.js");
+
+    // Adopt a user-browser target (goes through attachToExistingTarget, which is
+    // the path that registers state with adopted: true).
+    await getTargetState("inactive-adopted-tab");
+
+    // Before the sweep the adopted target is listed.
+    let listing = await handleDevtoolsToolCall("Target.getTargets", {});
+    expect(listing.targets.some((t) => t.targetId === "inactive-adopted-tab")).toBe(true);
+
+    // Simulate an inactivity sweep past the 5-minute timeout.
+    runInactivityTick(Date.now() + 6 * 60 * 1000);
+
+    // The adopted handle was released: the target is gone and the user's tab
+    // was never closed.
+    listing = await handleDevtoolsToolCall("Target.getTargets", {});
+    expect(listing.targets.some((t) => t.targetId === "inactive-adopted-tab")).toBe(false);
+    expect(adoptedClose).not.toHaveBeenCalled();
+
+    // A Navigator-created agent target still closes normally on inactivity.
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "inactive-agent-tab" });
+    runInactivityTick(Date.now() + 6 * 60 * 1000);
+    expect(agentClose).toHaveBeenCalled();
+  });
+
+  it("releaseTargetsByBackend closes agent targets and releases adopted tabs, other backends untouched", async () => {
+    const agentPage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const adoptedPage = {
+      goto: vi.fn(),
+      url: vi.fn().mockReturnValue("https://example.com"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "cloakbrowser",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "user-browser", type: "navigator-cdp", status: "connected" },
+      ]),
+      newPage: vi.fn().mockImplementation(() => agentPage),
+      attachToExistingTarget: vi.fn().mockResolvedValue({ page: adoptedPage, backend: "user-browser" }),
+    });
+
+    const { handleDevtoolsToolCall, getTargetState, releaseTargetsByBackend } = await import("../src/devtools.js");
+
+    // Navigator-created agent targets on the doomed backend "cloakbrowser".
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "release-agent-1" });
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "release-agent-2" });
+
+    // Adopted user-browser (relay) target — released on relay sweep, never closed.
+    await getTargetState("release-adopted");
+
+    // A target on a third backend must survive every sweep.
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "release-other-backend", browser: "chromium" });
+
+    // Sweep the relay backend: only the adopted handle is released.
+    let released = releaseTargetsByBackend("user-browser");
+    expect(released.some((entry) => entry.startsWith("release-adopted"))).toBe(true);
+    expect(released.some((entry) => entry.includes("released adopted handle"))).toBe(true);
+    expect(adoptedPage.close).not.toHaveBeenCalled();
+
+    // Sweep the agent backend: agent pages close; adopted + other survive.
+    released = releaseTargetsByBackend("cloakbrowser");
+    expect(released.some((entry) => entry.startsWith("release-agent-1"))).toBe(true);
+    expect(released.some((entry) => entry.startsWith("release-agent-2"))).toBe(true);
+    expect(agentPage.close).toHaveBeenCalled();
+
+    const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+    expect(listing.targets.some((t) => t.targetId === "release-agent-1")).toBe(false);
+    expect(listing.targets.some((t) => t.targetId === "release-agent-2")).toBe(false);
+    expect(listing.targets.some((t) => t.targetId === "release-adopted")).toBe(false);
+    expect(listing.targets.some((t) => t.targetId === "release-other-backend")).toBe(true);
   });
 
   it("createTarget makes a fresh agent tab for an unknown id and getTargetState rejects it", async () => {

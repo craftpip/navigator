@@ -4,11 +4,11 @@
 
 ## Backend Dispatch
 
-Navigator supports Chromium, CloakBrowser, and Lightpanda. A direct page operation uses the requested backend or `BROWSER_BACKEND`; a search route always wins over that default and uses the backend declared in the engine registry. This means changing the default backend changes `web_fetch` and direct screenshots, but does not redirect a route such as `bing_lp` or `google_cb`.
+Navigator supports the built-in Chromium plus optional CDP add-ons (`BROWSERS`). A direct page operation uses the requested browser or the default; search engines always run on the built-in Chromium. This means changing the default page browser changes `web_fetch` and direct screenshots, but never which browser searches use.
 
-All new pages receive the configured user agent and navigation/default timeouts. Chromium pages are opened as real CDP windows rather than reusing a tab. Chromium maintains a keepalive page so the process does not exit after temporary pages close. CloakBrowser launches with its humanization and fingerprint configuration. Lightpanda first attempts to attach to an existing CDP endpoint, otherwise starts an owned server, waits up to 15 seconds for it, and adds navigator anti-automation patches before page scripts run.
+All new pages receive the configured user agent and navigation/default timeouts. Chromium pages are opened as real CDP windows rather than reusing a tab. Chromium maintains a keepalive page so the process does not exit after temporary pages close. Add-on `cdp` browsers (CloakBrowser, Lightpanda, …) are connected lazily over their configured `cdpUrl` and reused; a `disconnected` event clears the cached connection so the next call reconnects. Navigator never launches or closes add-ons — the user owns that external process.
 
-Backend disconnect events clear only the affected pooled search windows. This is intentional: a failed backend must not return detached pages to future requests, but working backends can continue.
+Browser disconnect events clear only the affected pooled search windows. This is intentional: a failed browser must not return detached pages to future requests, but working browsers can continue.
 
 ## Chromium Profile Recovery
 
@@ -20,19 +20,19 @@ Do not generalize this cleanup to arbitrary profile files. The recovery path is 
 
 Every temporary direct page and search route must run through the global page-operation limiter. It queues callers once `MAX_CONCURRENT_PAGE_OPS` is reached and releases exactly one waiter after a task finishes, including failures. This prevents parallel fetches, screenshots, and searches from exhausting browser resources.
 
-Search has a second level of reuse: browser routes acquire a working page from a pool, submit the search, extract results, and release it. Pools are per engine for CloakBrowser and Chromium routes. Lightpanda routes use one shared pool and are limited to one window because they share a backend. Startup warmup can keep a configured minimum number of persistent windows open; demand above that minimum creates temporary windows up to the configured maximum. On release, excess nonpersistent windows close, while remaining pages can be promoted to satisfy the minimum. Closed or detached pages are pruned before reuse and wake queued waiters.
+Search has a second level of reuse: browser engines acquire a working page from a pool, submit the search, extract results, and release it. Each engine gets its own pool, except `bing` and `mojeek` which share one pool. Startup warmup can keep a configured minimum number of persistent windows open; demand above that minimum creates temporary windows up to the configured maximum. On release, excess nonpersistent windows close, while remaining pages can be promoted to satisfy the minimum. Closed or detached pages are pruned before reuse and wake queued waiters.
 
-Source: backend and pool policy in `BrowserManager.newPage()`, `_poolEngine()`, and search-window acquire/release paths in `src/browser.js`.
+Source: browser dispatch and pool policy in `BrowserManager.newPage()`, `_poolEngine()`, and search-window acquire/release paths in `src/browser.js`.
 
 ## Lifecycle, Health, And VNC
 
-Browser instances are initialized lazily and concurrent callers share the same launch promise. Optional prelaunch starts the default backend and warms browser search routes; warmup failures are isolated so normal demand can retry later. Instance statistics are bounded to 750 ms per backend so `/stats` cannot hang on a broken CDP connection.
+Browser instances are initialized lazily and concurrent callers share the same launch promise. Optional prelaunch starts the default browser and warms browser search routes; warmup failures are isolated so normal demand can retry later. Instance statistics are bounded to 750 ms per browser so `/stats` cannot hang on a broken CDP connection.
 
-Changing headless/VNC mode restarts all active graphical backends, not only the configured default. Search and devtools can use a different graphical backend. Lightpanda is CDP-only, so a Lightpanda default may still restart a graphical route for VNC. Shutdown closes browser instances, disconnects rather than closes an externally owned Lightpanda server, terminates an owned one, clears pools, and removes any temporary Chromium profile.
+Changing headless/VNC mode relaunches the built-in Chromium only — add-ons have no launch lifecycle. Shutdown closes the owned Chromium (and any shared-session browsers), disconnects from external add-ons, clears pools, and removes any temporary Chromium profile.
 
 ## Persistent Devtools Targets
 
-Developer browser tools are disabled unless `ENABLE_DEVTOOLS_MCP=1`. A target is a persistent page identified by a caller-supplied or random ID. It may open a direct URL or a remembered link reference and uses the configured devtools backend. The manager allows at most 20 active targets; duplicate IDs are rejected.
+Developer browser tools are disabled unless `ENABLE_DEVTOOLS_MCP=1`. A target is a persistent page identified by a caller-supplied or random ID. It may open a direct URL or a remembered link reference and uses the browser with the devtools role (falling back to the built-in Chromium). The manager allows at most 20 active targets; duplicate IDs are rejected.
 
 Each target records its creation and last activity times, title, console messages, and network requests. Observers capture console output, page errors, failed requests, responses, main-frame navigation, and page close events. Console and network histories are each capped at 200 entries. Accessing a target refreshes its activity and tab timer.
 
@@ -56,9 +56,9 @@ All page evaluation, DOM inspection, and screenshot operations use the configure
 
 ## Safe Changes
 
-- Do not bypass `BrowserManager` to create a page: it would skip backend dispatch, timeouts, user-agent setup, and capacity accounting.
-- Preserve route-backend precedence over the default backend; changing it breaks the search-engine registry contract.
-- Keep Lightpanda search windows shared and serial. Treating them as independent engine pools permits unsafe concurrent use.
+- Do not bypass `BrowserManager` to create a page: it would skip browser dispatch, timeouts, user-agent setup, and capacity accounting.
+- Keep browser engines on the built-in Chromium: search always runs there, independent of which browsers serve page tools.
+- Keep shared-pool search windows serial-safe. `bing` and `mojeek` share one pool; treating them as independent pools permits unsafe concurrent use.
 - Do not make persistent devtools targets participate in temporary-page cleanup or extraction pools.
 - Keep target, console, network, DOM, and runtime response bounds. These tools are exposed to LLM clients and unbounded page state can consume the MCP response budget.
 - Keep inactivity cleanup and its closed-target retention message. It prevents leaked testing tabs while explaining why a formerly valid target ID no longer works.

@@ -183,19 +183,25 @@ export function ImmediateTooltip() {
       root.querySelectorAll?.("[title]").forEach(moveTitle);
     };
     const getTarget = (node) => node instanceof Element ? node.closest("[data-tooltip], [title]") : null;
+    // Position is snapshotted once at the pointer-entry point and then frozen for
+    // that element — pointer micro-jitter, clicks, and focus changes do not nudge it.
     const show = (event) => {
       const element = getTarget(event.target);
       if (!element) return setTooltip(null);
       if (element.hasAttribute("title")) moveTitle(element);
       const text = element.getAttribute("data-tooltip");
       if (!text) return setTooltip(null);
-      setTooltip({ text, x: event.clientX, y: event.clientY });
+      setTooltip((current) => {
+        if (current?.element === element) return current;
+        return { element, text, x: event.clientX, y: event.clientY };
+      });
     };
     const hide = (event) => {
       const element = getTarget(event.target);
       if (element?.contains(event.relatedTarget)) return;
       setTooltip(null);
     };
+    // Follow the cursor as it moves, but clicks/focus never re-position it.
     const move = (event) => {
       const element = getTarget(event.target);
       if (!element) return;
@@ -207,8 +213,11 @@ export function ImmediateTooltip() {
       if (element.hasAttribute("title")) moveTitle(element);
       const text = element.getAttribute("data-tooltip");
       if (!text) return;
-      const rect = element.getBoundingClientRect();
-      setTooltip({ text, x: rect.left + rect.width / 2, y: rect.bottom });
+      setTooltip((current) => {
+        if (current?.element === element) return current;
+        const rect = element.getBoundingClientRect();
+        return { element, text, x: rect.left + rect.width / 2, y: rect.bottom };
+      });
     };
     moveTitles(document);
     const observer = new MutationObserver((mutations) => mutations.forEach((mutation) => {

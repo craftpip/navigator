@@ -97,6 +97,22 @@ var Config = {
     chrome.storage.local.set({ bidiUrl: url }, callback || function() {});
   },
 
+  getOpenInWindow: function(callback) {
+    chrome.storage.local.get(['openInWindow'], function(result) {
+      callback(result.openInWindow === true);
+    });
+  },
+
+  setOpenInWindow: function(enabled, callback) {
+    chrome.storage.local.set({ openInWindow: !!enabled }, callback || function() {});
+  },
+
+  promisifiedGetOpenInWindow: function() {
+    return new Promise(function(resolve) {
+      Config.getOpenInWindow(resolve);
+    });
+  },
+
   defaultWsUrl: 'ws://localhost:1994/relay',
   defaultBidiUrl: 'ws://127.0.0.1:9222/session'
 };

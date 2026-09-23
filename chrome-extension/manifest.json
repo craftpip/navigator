@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Navigator Browser Relay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Bridge your Chrome to the Navigator MCP server via WebSocket — control this browser with navigator's web tools.",
   "permissions": [
     "debugger",

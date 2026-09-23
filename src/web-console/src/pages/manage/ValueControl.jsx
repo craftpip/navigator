@@ -4,8 +4,9 @@ import { DEFAULT_FORMATS } from "./constants.js";
 import { MultiSelect } from "./MultiSelect.jsx";
 import { PostProcessorModelsEditor } from "./PostProcessorEditor.jsx";
 import { BrowserArrayEditor } from "./BrowserArrayEditor.jsx";
+import { SearchEngineTableEditor } from "./SearchEngineTableEditor.jsx";
 
-export function ValueControl({ entry, value, changed, engines, tools, postProcessorModels, onChange }) {
+export function ValueControl({ entry, value, changed, engines, tools, postProcessorModels, onChange, searchEditor }) {
   const type = entry.type || "string";
   const engineIds = new Set((engines || []).map((engine) => engine.id));
   const { ok, message } = validateEntryValue(entry, value, engineIds);
@@ -16,6 +17,9 @@ export function ValueControl({ entry, value, changed, engines, tools, postProces
     value,
     onChange: (event) => onChange(event.target.value),
   };
+  if (entry.key === "SEARCH_ENABLED_ENGINES" && searchEditor) {
+    return <SearchEngineTableEditor engines={engines} ok={ok} message={message} {...searchEditor} />;
+  }
   if (entry.key === "DEFAULT_EXTRACT_FORMAT") {
     const formatOptions = [
       { value: "", label: "Readability → markdown (auto-strips nav/ads/sidebar)" },

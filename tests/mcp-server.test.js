@@ -40,6 +40,7 @@ vi.mock("../src/devtools.js", () => ({
   handleDevtoolsToolCall: vi.fn(),
   captureTargetScreenshot: vi.fn(),
   getDevtoolsCounters: vi.fn().mockReturnValue({ targetsCreated: 0, targetsClosed: 0, targetsInactivityClosed: 0 }),
+  releaseTargetsByBackend: vi.fn().mockReturnValue([]),
 }));
 vi.mock("cloakbrowser", () => ({}));
 vi.mock("cloakbrowser/puppeteer", () => ({ launch: vi.fn() }));
@@ -118,6 +119,7 @@ function makeMockManager(overrides = {}) {
     shutdown: vi.fn().mockResolvedValue(undefined),
     prelaunchIfConfigured: vi.fn().mockResolvedValue(undefined),
     relaunchDefaultBackend: vi.fn().mockImplementation(async (headless) => ({ ok: true, backend: "cloakbrowser", relaunched: true, headless: Boolean(headless) })),
+    invalidateAddOn: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -512,6 +514,229 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body.ok).toBe(true);
       expect(body.hotApplied).toContain("SEARCH_QUEUE_ESCALATION_FACTOR");
       expect(fs.readFileSync(envFile, "utf8")).toContain("SEARCH_QUEUE_ESCALATION_FACTOR=3");
+    });
+
+    it("forgets a removed configured relay browser so it does not return as a dynamic driver", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      manager.config.browsers = [
+        ...originalBrowsers,
+        { name: "removed-relay", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true },
+      ];
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify([{ name: "chromium", role: ["default"] }, { name: "cloakbrowser", role: ["default"], cdpUrl: "http://cloak:9222" }]) } }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.forgottenRelayBrowsers).toEqual(["removed-relay"]);
+        expect(forget).toHaveBeenCalledWith("removed-relay");
+      } finally {
+        manager.config.browsers = originalBrowsers;
+        forget.mockRestore();
+      }
+    });
+
+    it("forgets configured relay browsers when BROWSERS is reset to its default", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const originalEnvBrowsers = process.env.BROWSERS;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      const configured = [
+        ...originalBrowsers,
+        { name: "reset-relay", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true },
+      ];
+      manager.config.browsers = configured;
+      fs.writeFileSync(envFile, `BROWSERS=${JSON.stringify(configured)}\n`);
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reset: ["BROWSERS"] }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.forgottenRelayBrowsers).toEqual(["reset-relay"]);
+        expect(forget).toHaveBeenCalledWith("reset-relay");
+      } finally {
+        manager.config.browsers = originalBrowsers;
+        if (originalEnvBrowsers === undefined) delete process.env.BROWSERS;
+        else process.env.BROWSERS = originalEnvBrowsers;
+        forget.mockRestore();
+      }
+    });
+
+    it("reconciles relay browsers when reverting a BROWSERS change", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const originalEnvBrowsers = process.env.BROWSERS;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      const retained = originalBrowsers.filter((browser) => browser.name !== "cloakbrowser");
+      const relay = { name: "reverted-relay", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      const configured = [...retained, relay];
+      fs.writeFileSync(envFile, `BROWSERS=${JSON.stringify(retained)}\n`);
+      manager.config.browsers = configured;
+
+      try {
+        const update = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify(configured) } }),
+        });
+        expect((await update.json()).ok).toBe(true);
+
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ revert: true }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("BROWSERS→reverted");
+        expect(body.forgottenRelayBrowsers).toEqual(["reverted-relay"]);
+        expect(forget).toHaveBeenCalledWith("reverted-relay");
+      } finally {
+        manager.config.browsers = originalBrowsers;
+        if (originalEnvBrowsers === undefined) delete process.env.BROWSERS;
+        else process.env.BROWSERS = originalEnvBrowsers;
+        forget.mockRestore();
+      }
+    });
+
+    it("exposes /console/relay/remove — full removal, distinct from forget", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const remove = vi.spyOn(relayServer, "remove").mockReturnValue(true);
+      try {
+        const res = await fetch(`${MCP_BASE}/console/relay/remove`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "ghost-browser" }),
+        });
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.name).toBe("ghost-browser");
+        expect(body.removed).toBe(true);
+        expect(remove).toHaveBeenCalledWith("ghost-browser");
+      } finally {
+        remove.mockRestore();
+      }
+    });
+
+    it("reconciles relay browsers after an external BROWSERS file edit", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const originalEnvBrowsers = process.env.BROWSERS;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      const relay = { name: "external-relay", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      const configured = [...originalBrowsers, relay];
+      const retained = originalBrowsers;
+      manager.config.browsers = configured;
+      fs.writeFileSync(envFile, `BROWSERS=${JSON.stringify(configured)}\n`);
+
+      try {
+        // Establish the file timestamp baseline before the external edit.
+        await fetch(`${MCP_BASE}/console/config`);
+        fs.writeFileSync(envFile, `BROWSERS=${JSON.stringify(retained)}\n`);
+
+        const res = await fetch(`${MCP_BASE}/console/config`);
+        const body = await res.json();
+
+        expect(body.config.browsers.map((browser) => browser.name)).not.toContain("external-relay");
+        expect(body.envFile.externalBrowsersApplied).toEqual(["external-relay"]);
+        expect(forget).toHaveBeenCalledWith("external-relay");
+      } finally {
+        manager.config.browsers = originalBrowsers;
+        if (originalEnvBrowsers === undefined) delete process.env.BROWSERS;
+        else process.env.BROWSERS = originalEnvBrowsers;
+        forget.mockRestore();
+      }
+    });
+
+    it("invalidates the stale add-on connection when a browser changes type in place (plan 60 B3)", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const devtoolsMod = await import("../src/devtools.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      manager.invalidateAddOn.mockImplementation((name) => [`${name}: disconnected add-on handle`]);
+      devtoolsMod.releaseTargetsByBackend.mockImplementation((name) => [`${name}: released adopted handle`]);
+      const sameName = { name: "cloakbrowser", role: ["default"], type: "cdp", cdpUrl: "http://cloak:9222", addOn: true };
+      const changedIdentity = { name: "cloakbrowser", role: ["default"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      manager.config.browsers = [originalBrowsers[0], sameName];
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify([originalBrowsers[0], changedIdentity]) } }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.invalidatedBrowsers).toContain("cloakbrowser: disconnected add-on handle");
+        expect(body.invalidatedBrowsers).toContain("cloakbrowser: released adopted handle");
+        expect(manager.invalidateAddOn).toHaveBeenCalledWith("cloakbrowser");
+        expect(devtoolsMod.releaseTargetsByBackend).toHaveBeenCalledWith("cloakbrowser");
+        // A type change is NOT a removal — the relay pairing must survive.
+        expect(forget).not.toHaveBeenCalled();
+      } finally {
+        manager.invalidateAddOn.mockReset();
+        devtoolsMod.releaseTargetsByBackend.mockReset();
+        manager.config.browsers = originalBrowsers;
+        forget.mockRestore();
+      }
+    });
+
+    it("invalidates add-on state + devtools targets when a plain-cdp browser is removed (plan 60 B8/B9)", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const devtoolsMod = await import("../src/devtools.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      manager.invalidateAddOn.mockImplementation((name) => [`${name}: disconnected add-on handle`]);
+      devtoolsMod.releaseTargetsByBackend.mockImplementation((name) => [`${name}: closed navigator target`]);
+      const removedCdp = { name: "removed-cdp-addon", role: ["default"], type: "cdp", cdpUrl: "http://example:9222", addOn: true };
+      manager.config.browsers = [...originalBrowsers, removedCdp];
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify(originalBrowsers) } }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.invalidatedBrowsers).toContain("removed-cdp-addon: disconnected add-on handle");
+        expect(body.invalidatedBrowsers).toContain("removed-cdp-addon: closed navigator target");
+        expect(manager.invalidateAddOn).toHaveBeenCalledWith("removed-cdp-addon");
+        expect(devtoolsMod.releaseTargetsByBackend).toHaveBeenCalledWith("removed-cdp-addon");
+        // Plain cdp removal is not a relay pairing — nothing to forget.
+        expect(forget).not.toHaveBeenCalled();
+      } finally {
+        manager.invalidateAddOn.mockReset();
+        devtoolsMod.releaseTargetsByBackend.mockReset();
+        manager.config.browsers = originalBrowsers;
+        forget.mockRestore();
+      }
     });
 
     it("hot-applies recreate-apply keys — no restart required", async () => {
@@ -911,6 +1136,28 @@ describe("mcp-server HTTP endpoints", () => {
       expect(text).toContain("Multi Result");
     });
 
+    it("caps query count at 6", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query: "q1",
+        queries: Array.from({ length: 8 }, (_, i) => `query ${i + 1}`),
+        results: [],
+      }));
+
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 15, method: "tools/call",
+        params: {
+          name: "web_search",
+          arguments: { queries: Array.from({ length: 8 }, (_, i) => `query ${i + 1}`) },
+        },
+      });
+
+      expect(status).toBe(200);
+      const lastCall = searchMod.browserSearch.mock.calls.at(-1)[0];
+      expect(lastCall.queries.length).toBe(6);
+      expect(lastCall.queries).toEqual(["query 1", "query 2", "query 3", "query 4", "query 5", "query 6"]);
+    });
+
     it("renders per-query sections when multiple queries are searched", async () => {
       const searchMod = await import("../src/search.js");
       const makeResults = (prefix, count) =>
@@ -1231,6 +1478,20 @@ describe("mcp-server HTTP endpoints", () => {
       expect(text).toContain("Processed 2 page(s)");
       expect(text).toContain("Page A");
       expect(text).toContain("Page B");
+    });
+
+    it("rejects an oversized web_fetch batch with a clear message", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 170, method: "tools/call",
+        params: {
+          name: "web_fetch",
+          arguments: { urls: Array.from({ length: 11 }, (_, i) => `https://x${i}.example.com`) },
+        },
+      });
+      expect(status).toBe(200);
+      const message = body.result.isError ? body.result.content[0].text : JSON.stringify(body);
+      expect(message).toContain("Too many URLs");
+      expect(message).toContain("max 10");
     });
 
     it("handles web_fetch with extractLinks", async () => {

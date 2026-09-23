@@ -117,11 +117,12 @@ export function Field({ label, hint, children }) {
   );
 }
 
-export function Check({ label, checked, onChange }) {
+export function Check({ label, checked, onChange, trailing }) {
   return (
     <label className="check">
       <input type="checkbox" checked={checked} onChange={onChange} />
       {label}
+      {trailing}
     </label>
   );
 }

@@ -4,6 +4,7 @@ import { Panel, Dot, Pill, Countdown } from "../../components/ui.jsx";
 import { BrowserEditModal } from "../manage/BrowserEditModal.jsx";
 import { parseBrowsersEntries, serializeBrowsersEntries } from "../manage/browser-utils.js";
 import { BROWSER_TYPE_LABEL } from "../manage/constants.js";
+import { usePopup } from "../../components/popup.jsx";
 
 function copyText(text) {
   if (navigator.clipboard?.writeText) {
@@ -66,6 +67,7 @@ function RelayAuth({ browser }) {
 }
 
 export function Drivers({ health, instances, reload, height }) {
+  const { confirm } = usePopup();
   const byBackend = new Map(instances.map((item) => [item.backend, item]));
   const browsers = health.browsers || [];
   const [forgetting, setForgetting] = useState(null);
@@ -222,7 +224,7 @@ export function Drivers({ health, instances, reload, height }) {
                             className="menu-item"
                             disabled={forgetting === backend}
                             onClick={async () => {
-                              if (!confirm(`Forget browser "${backend}"? This clears the pairing — a new PIN will be required to reconnect.`)) {
+                              if (!(await confirm(`Forget browser "${backend}"? This clears the pairing — the browser stays listed and will require a new PIN to reconnect.`, { okLabel: "Forget" }))) {
                                 setMenuOpen(null);
                                 return;
                               }
@@ -238,7 +240,7 @@ export function Drivers({ health, instances, reload, height }) {
                               setForgetting(null);
                               setMenuOpen(null);
                             }}
-                            title={browser.paired ? "Clear pairing for this browser" : "Remove this entry"}
+                            title="Clear pairing for this browser — the browser stays listed until you remove it from the Manage page"
                           >
                             {forgetting === backend ? "…" : "Forget"}
                           </button>

@@ -22,28 +22,39 @@ var SpecialHandler = (function() {
   /**
    * Target.createTarget -> browsingContext.create (+ navigate).
    * Returns the BiDi context id as the CDP targetId.
+   *
+   * Window mode (plan 56): when the "open new windows instead of tabs" flag is
+   * on (or newWindow is set / a non-default browserContextId is passed), the
+   * BiDi context is created as type:'window' — a fresh OS window. Window
+   * contexts must never be tab-hidden (a hidden lone tab leaves an empty
+   * window), so the createdAsWindow flag is threaded through
+   * noteContextCreated to the pairing step.
    */
   function targetCreateTarget(context) {
     var params = context.params || {};
     var url = params.url || 'about:blank';
     var needsNavigate = url !== 'about:blank' && url !== '';
-
-    return BidiClient.send('browsingContext.create', {
-      type: params.newWindow ? 'window' : 'tab'
-    }).then(function(res) {
-      var contextId = res.context;
-      if (!contextId) throw new Error('Failed to create context');
-      CDPSessionManager.noteContextCreated(contextId);
-      if (needsNavigate) {
-        return BidiClient.send('browsingContext.navigate', {
-          context: contextId,
-          url: url,
-          wait: 'interactive'
-        }).then(function() {
-          return { targetId: contextId };
-        });
-      }
-      return { targetId: contextId };
+    var wantWindow = !!(params.newWindow ||
+      (params.browserContextId && params.browserContextId !== 'default'));
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      var type = (wantWindow || flag === true) ? 'window' : 'tab';
+      return BidiClient.send('browsingContext.create', {
+        type: type
+      }).then(function(res) {
+        var contextId = res.context;
+        if (!contextId) throw new Error('Failed to create context');
+        CDPSessionManager.noteContextCreated(contextId, { window: type === 'window' });
+        if (needsNavigate) {
+          return BidiClient.send('browsingContext.navigate', {
+            context: contextId,
+            url: url,
+            wait: 'interactive'
+          }).then(function() {
+            return { targetId: contextId };
+          });
+        }
+        return { targetId: contextId };
+      });
     });
   }
 

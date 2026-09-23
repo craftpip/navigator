@@ -762,5 +762,192 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   test('21. Firefox window commands resolve real window geometry', () => okGet && okSet && okBounds);
 }
 
+// 22-27. "Open windows instead of tabs" (plan 56) — Firefox window mode.
+// Flag ON forces browsingContext.create type:'window'; window-created
+// contexts are never tab-hidden. Context handlers return real window-<ts>
+// ids under the flag, mock otherwise.
+
+// 22. flag ON -> browsingContext.create gets type:'window'
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  const serverWs = new env.WebSocket('relay://');
+  serverWs.readyState = env.WebSocket.OPEN;
+  env.State.setWs(serverWs);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80);
+  await env.routeCDPCommand({ id: 22, method: 'Target.createTarget', params: { url: 'https://example.com' }, sessionId: null });
+  await sleep(120);
+  const creates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.create');
+  test('22. flag ON -> createTarget creates a window context', () =>
+    !!creates.length && creates[0].params.type === 'window');
+}
+
+// 23. flag OFF -> tab (today's behavior); newWindow still forces a window
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  const serverWs = new env.WebSocket('relay://');
+  serverWs.readyState = env.WebSocket.OPEN;
+  env.State.setWs(serverWs);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80);
+  await env.routeCDPCommand({ id: 23, method: 'Target.createTarget', params: { url: 'https://example.com' }, sessionId: null });
+  await sleep(120);
+  const tabCreates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.create');
+  await env.routeCDPCommand({ id: 231, method: 'Target.createTarget', params: { url: 'https://example.com', newWindow: true }, sessionId: null });
+  await sleep(120);
+  const winCreates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.create');
+  test('23. flag OFF -> tab; explicit newWindow still -> window', () =>
+    tabCreates.length === 1 && tabCreates[0].params.type === 'tab' &&
+    winCreates.length === 2 && winCreates[1].params.type === 'window');
+}
+
+// 24. A non-default browserContextId on createTarget forces a window too
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  const serverWs = new env.WebSocket('relay://');
+  serverWs.readyState = env.WebSocket.OPEN;
+  env.State.setWs(serverWs);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80);
+  await env.routeCDPCommand({ id: 24, method: 'Target.createTarget', params: { url: 'https://example.com', browserContextId: 'window-lazy-1' }, sessionId: null });
+  await sleep(120);
+  const creates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.create');
+  test('24. non-default browserContextId -> window context', () =>
+    creates.length === 1 && creates[0].params.type === 'window');
+}
+
+// 25. Window-created contexts are never tab-hidden; plain ones still are
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const hidden = [];
+  env.chrome.tabs.hide = (ids, cb) => { hidden.push(ids); cb && cb(); };
+  env.CDPSessionManager.noteContextCreated('ctx-win-1', { window: true });
+  env.CDPSessionManager.noteContextCreated('ctx-tab-1');
+  env.CDPSessionManager.handleTabCreated({ id: 30 }); // pairs ctx-win-1
+  env.CDPSessionManager.handleTabCreated({ id: 31 }); // pairs ctx-tab-1
+  test('25. window contexts skip TabIsolation.isolate', () =>
+    hidden.length === 1 && JSON.stringify(hidden[0]) === '[31]' &&
+    env.CDPSessionManager.isWindowContext('ctx-win-1') === true &&
+    env.CDPSessionManager.isWindowContext('ctx-tab-1') === false);
+}
+
+// 26. Context handlers: flag ON real window-<ts> contexts, flag OFF mock
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  const r1 = await env.routeCDPCommand({ id: 26, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const r2 = await env.routeCDPCommand({ id: 261, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  const ctx1 = r1 && r1.result && r1.result.browserContextId;
+  const okOn = !!ctx1 && /^window-/.test(ctx1) && !r1.result._mock &&
+    r2.result.browserContextIds.join() === 'default,' + ctx1;
+  await env.routeCDPCommand({ id: 262, method: 'Target.disposeBrowserContext', params: { browserContextId: ctx1 }, sessionId: null });
+  const r4 = await env.routeCDPCommand({ id: 263, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  test('26. flag ON -> window context listed; dispose drops it', () =>
+    okOn && r4.result.browserContextIds.join() === 'default');
+}
+
+// 27. Context handlers: flag OFF keeps exactly today's mock
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(false, () => {});
+  const r1 = await env.routeCDPCommand({ id: 27, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const r2 = await env.routeCDPCommand({ id: 271, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  test('27. flag OFF -> contexts stay mock', () =>
+    !!r1.result.browserContextId && /^context-/.test(r1.result.browserContextId) &&
+    !!r1.result._mock && r2.result.browserContextIds.join() === 'default');
+}
+
+// 28. TabList reports the real windowId + window-<id> context for a
+//     window-created tab, 'default' otherwise (tab-list threads the tab).
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.CDPSessionManager.noteContextCreated('ctx-win-real', { window: true });
+  env.CDPSessionManager.addContextMapping('ctx-win-real', 40);
+  env.CDPSessionManager.addContextMapping('ctx-plain-real', 41);
+  env.chrome.tabs.query = (opts, cb) => cb([
+    { id: 40, title: 'Win', url: 'https://win.test', active: false, windowId: 9, index: 0 },
+    { id: 41, title: 'Plain', url: 'https://plain.test', active: false, windowId: 1, index: 1 }
+  ]);
+  const targets = await new Promise(res => env.TabList.getAllAsTargets(t => res(t)));
+  const win = targets.find(t => t.tabId === 40);
+  const plain = targets.find(t => t.tabId === 41);
+  test('28. TabList: window target emits windowId + window-<id> context', () =>
+    !!win && win.browserContextId === 'window-9' && win.windowId === 9 &&
+    !!plain && plain.browserContextId === 'default' && plain.windowId === 1);
+}
+
+// 29. The real puppeteer multi-context flow: createBrowserContext returns a
+//     lazy window-<ts> id, the next createTarget carrying it opens that window
+//     (browsingContext.create type:'window' + navigate), the context stays
+//     listed until disposeBrowserContext drops it.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  const serverWs = new env.WebSocket('relay://');
+  serverWs.readyState = env.WebSocket.OPEN;
+  env.State.setWs(serverWs);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80);
+
+  const r1 = await env.routeCDPCommand({ id: 29, method: 'Target.createBrowserContext', params: {}, sessionId: null });
+  const ctx = r1 && r1.result && r1.result.browserContextId;
+  await env.routeCDPCommand({ id: 291, method: 'Target.createTarget', params: { url: 'https://example.com', browserContextId: ctx }, sessionId: null });
+  await sleep(120);
+  const creates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.create');
+  const navigates = bidiCommands(env.BidiClient.getSocket(), 'browsingContext.navigate');
+  const r2 = await env.routeCDPCommand({ id: 292, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  await env.routeCDPCommand({ id: 293, method: 'Target.disposeBrowserContext', params: { browserContextId: ctx }, sessionId: null });
+  const r3 = await env.routeCDPCommand({ id: 294, method: 'Target.getBrowserContexts', params: {}, sessionId: null });
+  test('29. context.newPage flow: window-<id> forces type:window, listed until dispose', () =>
+    !!ctx && /^window-/.test(ctx) && !r1.result._mock &&
+    creates.length === 1 && creates[0].params.type === 'window' &&
+    navigates.length === 1 &&
+    r2.result.browserContextIds.join() === 'default,' + ctx &&
+    r3.result.browserContextIds.join() === 'default');
+}
+
+// 30. A window-mode-created target activates (browsingContext.activate) and
+//     closes (browsingContext.close) via its own BiDi window context.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setOpenInWindow(true, () => {});
+  const serverWs = new env.WebSocket('relay://');
+  serverWs.readyState = env.WebSocket.OPEN;
+  env.State.setWs(serverWs);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80);
+
+  const c1 = await env.routeCDPCommand({ id: 30, method: 'Target.createTarget', params: { url: 'about:blank' }, sessionId: null });
+  await sleep(100);
+  const targetId = c1 && c1.result && c1.result.targetId;
+  await env.routeCDPCommand({ id: 301, method: 'Target.activateTarget', params: { targetId }, sessionId: null });
+  await sleep(60);
+  await env.routeCDPCommand({ id: 302, method: 'Target.closeTarget', params: { targetId }, sessionId: null });
+  await sleep(60);
+  const socket = env.BidiClient.getSocket();
+  const activates = bidiCommands(socket, 'browsingContext.activate');
+  const closes = bidiCommands(socket, 'browsingContext.close');
+  test('30. activate/close on a window target hit browsingContext.activate/close', () =>
+    !!targetId && activates.length === 1 && activates[0].params.context === targetId &&
+    closes.length === 1 && closes[0].params.context === targetId && closes[0].params.promptUnload === false);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

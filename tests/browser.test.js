@@ -365,6 +365,31 @@ describe("BrowserManager", () => {
       manager.releasePageSlot();
       expect(manager.pageSlotsInUse).toBe(0);
     });
+
+    it("withPageSlot rejects with a retry-safe PAGE_SLOT_ACQUISITION_TIMEOUT when the queue is full", async () => {
+      const manager = new BrowserManager(makeConfig({ browsers: [] }));
+      manager.pageSlotsInUse = manager.config.maxConcurrentPageOps;
+      const timeoutMs = 80;
+      const err = await manager.withPageSlot(() => "never runs", { timeoutMs }).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.code).toBe("PAGE_SLOT_ACQUISITION_TIMEOUT");
+      expect(err.stage).toBe("page_slot_acquisition");
+      expect(err.retrySafe).toBe(true);
+      expect(err.message).toMatch(/timed out after/);
+      expect(manager.pageSlotWaiters.length).toBe(0);
+    });
+
+    it("acquirePageSlot honors abort signal even while queued", async () => {
+      const manager = new BrowserManager(makeConfig({ browsers: [] }));
+      manager.pageSlotsInUse = manager.config.maxConcurrentPageOps;
+      const controller = new AbortController();
+      const p = manager.acquirePageSlot({ signal: controller.signal, timeoutMs: 5000 }).catch((e) => e);
+      controller.abort(new Error("cancelled"));
+      const err = await p;
+      expect(err.message).toMatch(/cancelled/);
+      expect(manager.pageSlotWaiters.length).toBe(0);
+      manager.pageSlotsInUse -= 1;
+    });
   });
 
   describe("getHealth", () => {

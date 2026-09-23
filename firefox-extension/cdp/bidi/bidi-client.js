@@ -186,11 +186,12 @@ var BidiClient = (function() {
           reject(new Error('BiDi not connected'));
           return;
         }
+        var id = _nextId++;
         var timer = setTimeout(function() {
-          if (_pending.has(_nextId)) { _pending.delete(_nextId); reject(new Error('BiDi timeout: ' + method)); }
+          if (_pending.has(id)) { _pending.delete(id); reject(new Error('BiDi timeout: ' + method)); }
         }, timeoutMs || SEND_TIMEOUT_MS);
 
-        _sendRaw({ method: method, params: params || {} }, {
+        _sendRaw({ id: id, method: method, params: params || {} }, {
           resolve: function(r) { clearTimeout(timer); resolve(r); },
           reject: function(e) { clearTimeout(timer); reject(e); }
         });

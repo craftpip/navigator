@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { renderMarkdown } from "../../markdown.js";
 
 export function ResponsePanel({ response, toolName }) {
-  const [viewMode, setViewMode] = useState("markdown");
+  const [viewMode, setViewMode] = useState("html");
 
   const renderedHtml = useMemo(() => renderMarkdown(response.output), [response.output]);
   const htmlProps = useMemo(() => ({ __html: renderedHtml }), [renderedHtml]);

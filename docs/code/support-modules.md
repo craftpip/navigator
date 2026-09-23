@@ -8,12 +8,13 @@ These modules hold configuration, durable state, extraction-rule management, and
 
 `loadConfig()` is the process-start boundary between environment text and the normalized configuration consumed by the server. Invalid, missing, or out-of-range values fall back to safe defaults rather than leaking unchecked strings into browser and scheduler code. Lists are normalized, de-duplicated, and, for engine lists, limited to IDs registered in `src/engines/index.js`.
 
-Browser discovery is intentionally conditional. Chromium is required and startup fails with an actionable `CHROME_PATH` error if it cannot be found. Cloakbrowser and Lightpanda are optional: Cloakbrowser checks its explicit environment path and known installation locations, then its downloader; Lightpanda also checks `PATH`. Do not make an optional backend fatal unless every configured runtime path requires it.
+Browser discovery works through the `BROWSERS` JSON array. Chromium is always present and built-in; if it's missing from the config, the parser adds it at the end of the array. All other browsers are add-ons: `cdp`-type entries connect to a user-provided CDP endpoint; `navigator-cdp` entries come from relay extensions that dial in over `/relay`.
 
 Important routing rules:
 
-- `BROWSER_BACKEND` selects direct fetch and screenshot work. `DEVTOOLS_BROWSER_BACKEND` defaults to it but may differ.
-- Search routes do not use that default. Their registry metadata selects `cloakbrowser`, `chromium`, `lightpanda`, or API transport.
+- The `BROWSERS` array is the single source of truth for available browsers, their roles, and the rollback order. An empty `role` array makes a browser a fallback/backup only.
+- Page tools (`web_fetch`, screenshots, devtools) use `resolveBrowserParam()`: an explicit `browser` param is strict; otherwise add-ons are tried in array order; Chromium is the always-present fallback.
+- Search engines always run on the built-in Chromium — engines never use add-ons.
 - `HEADLESS=false` without `ENABLE_VNC=1` is forced back to headless mode so the server does not start a browser without a display.
 - `SEARCH_ROUTE_WARMUP_ENGINES` defaults to a small set only when unset. An explicitly empty value disables warmup. `SEARCH_ENABLED_ENGINES` controls automatic route selection.
 

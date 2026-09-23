@@ -17,11 +17,14 @@
 // (same trust boundary as /extract). PINs are in-memory, per-connection-attempt,
 // expire after PIN_EXPIRY_MS, and are printed to the navigator console. Session
 // tokens ARE durable — persisted in SQLite (relay_sessions) and restored in
-// init(), so a navigator restart never forces a re-PIN.
+// init(), so a navigator restart never forces a re-PIN. Known relay browsers
+// (any extension that dials in, regardless of pairing) are ALSO persisted
+// (known_relay_browsers) so forget() — which clears ONLY the pairing — keeps the
+// dashboard row visible until remove() (or a BROWSERS config removal) exists.
 
 import { WebSocketServer } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
-import { deleteRelaySession, loadRelaySessions, saveRelaySession } from "./db.js";
+import { deleteKnownRelayBrowser, deleteRelaySession, loadKnownRelayBrowsers, loadRelaySessions, saveKnownRelayBrowser, saveRelaySession } from "./db.js";
 import { PLUGIN_PLATFORMS } from "./config.js";
 
 const PIN_EXPIRY_MS = 60_000;
@@ -76,6 +79,7 @@ export class RelayServer {
   constructor() {
     this._entries = new Map(); // name -> entry
     this._tokenToName = new Map(); // sessionToken -> name
+    this._knownBrowsers = new Map(); // name -> { plugin, firstSeenAt } — durable "has dialed in" registry, survives forget()
     this._wss = null;
     this._server = null;
     this._host = "127.0.0.1";
@@ -102,6 +106,16 @@ export class RelayServer {
       if (sessions.length) log(`restored ${sessions.length} persisted relay session(s)`);
     } catch (e) {
       log(`restore relay sessions skipped: ${String(e && e.message)}`);
+    }
+
+    try {
+      const known = loadKnownRelayBrowsers();
+      for (const k of known) {
+        this._knownBrowsers.set(k.name, { plugin: k.plugin || "auto", firstSeenAt: k.first_seen_at || Date.now() });
+      }
+      if (known.length) log(`restored ${known.length} known relay browser(s)`);
+    } catch (e) {
+      log(`restore known relay browsers skipped: ${String(e && e.message)}`);
     }
 
     server.on("upgrade", (req, socket, head) => {
@@ -143,6 +157,13 @@ export class RelayServer {
     return false;
   }
 
+  /**
+   * Clear a pairing only — session token, live connection, and pending-command
+   * state. The browser's known-registry row (set the first time it dials in)
+   * is KEPT, so the dashboard entry stays visible as "disconnected — not
+   * paired" until the browser itself is removed (remove() or a BROWSERS config
+   * removal). Forget and Remove are different actions.
+   */
   forget(name) {
     if (!name) return false;
     const trimmed = String(name).trim();
@@ -171,6 +192,39 @@ export class RelayServer {
       if (deleteRelaySession(trimmed)) found = true;
     } catch {}
     return found;
+  }
+
+  /**
+   * Full removal — forget() the pairing and drop the browser from the known
+   * registry so its dashboard row disappears entirely. Used for dynamic
+   * (unconfigured) browsers the user explicitly removes, and by BROWSERS
+   * config reconciliation when an entry is deleted (so it cannot linger as a
+   * dynamic driver). Deleting a configured browser is always a config action;
+   * the reconciliation path calls this.
+   */
+  remove(name) {
+    if (!name) return false;
+    const trimmed = String(name).trim();
+    if (!trimmed) return false;
+    const hadKnown = this._knownBrowsers.delete(trimmed);
+    const found = this.forget(trimmed);
+    try {
+      deleteKnownRelayBrowser(trimmed);
+    } catch {}
+    return found || hadKnown;
+  }
+
+  /** Durable "this browser has dialed in" marker — feeds getStatusEntries so a
+   *  forgotten/unpaired browser stays listed until remove()d. */
+  _rememberKnown(name, plugin) {
+    if (!name || this._knownBrowsers.has(name)) return;
+    const meta = { plugin: plugin || "auto", firstSeenAt: Date.now() };
+    this._knownBrowsers.set(name, meta);
+    try {
+      saveKnownRelayBrowser(name, meta.plugin);
+    } catch (e) {
+      log(`persist known relay browser "${name}" failed`, String(e && e.message));
+    }
   }
 
   /**
@@ -250,6 +304,20 @@ export class RelayServer {
       if (configByRelayName.has(pairedName)) continue;
       if (this._entries.has(pairedName)) continue;
       out.push(this._statusFor({ name: pairedName, role: ["default"], type: "navigator-cdp", plugin: "auto", configured: false }));
+      seen.add(pairedName);
+    }
+
+    // Known but never-configured (dynamic) relay browsers that are not live
+    // and not paired — emitted as "disconnected — not paired". forget() clears
+    // only the pairing, so the row survives until remove() or a BROWSERS
+    // config removal deletes it from the known registry.
+    for (const knownName of new Set(this._knownBrowsers.keys())) {
+      if (seen.has(knownName)) continue;
+      if (configByRelayName.has(knownName)) continue;
+      if (this._entries.has(knownName)) continue;
+      const known = this._knownBrowsers.get(knownName);
+      out.push(this._statusFor({ name: knownName, role: ["default"], type: "navigator-cdp", plugin: known?.plugin || "auto", configured: false }));
+      seen.add(knownName);
     }
     return out;
   }
@@ -384,6 +452,7 @@ export class RelayServer {
         entry.ws = ws;
         if (PLUGIN_PLATFORMS.has(msg.platform)) entry.platform = msg.platform;
         if (typeof msg.extensionVersion === "string") entry.extensionVersion = msg.extensionVersion;
+        this._rememberKnown(name, entry.platform || msg.platform);
         // The extension reports the exact "moz-extension://<uuid>" origin its
         // BiDi WebSocket connects from — surfaced via status()/stats so the
         // Remote Agent allow-list (--remote-allow-origins) can be set correctly.
@@ -593,6 +662,10 @@ export class RelayServer {
       if (pending.timer) clearTimeout(pending.timer);
       if (pending.marker === "attach") {
         pending.resolve(null);
+        continue;
+      }
+      if (pending.reject) {
+        pending.reject(new Error(`browser "${entry.name}" disconnected`));
         continue;
       }
       if (pending.clientId != null) {
@@ -806,12 +879,11 @@ export class RelayServer {
         this._reply(client, id, { targetInfos: tabs.slice() });
         return;
       }
-      case "Target.getBrowserContexts": {
-        // The gateway models a single browser context ("default") — the
-        // extension's browser is one container; subsets are not exposed.
-        this._reply(client, id, { browserContextIds: ["default"] });
-        return;
-      }
+      // Target.getBrowserContexts intentionally falls through to `default` and
+      // is forwarded to the extension: when the "open new windows instead of
+      // tabs" flag is on, real window-scoped contexts live on the extension
+      // side and only it can enumerate them. The reply is sanitized in
+      // _onCdpResponse so missing browserContextIds fall back to ["default"].
       case "Target.attachToTarget": {
         await this._handleAttachToTarget(entry, client, id, params);
         return;
@@ -868,7 +940,7 @@ export class RelayServer {
    * Target.createTarget succeeds but the very next attach fails "Target not
    * found" — the created tab can never be driven (stuck at about:blank).
    */
-  _registerCreatedTarget(entry, { targetId, tabId = null, url = "about:blank" } = {}, creatorClientId = null) {
+  _registerCreatedTarget(entry, { targetId, tabId = null, url = "about:blank", browserContextId = "default" } = {}, creatorClientId = null) {
     if (!targetId) return null;
     const info = {
       targetId,
@@ -877,7 +949,7 @@ export class RelayServer {
       url,
       attached: false,
       canAccessOpener: false,
-      browserContextId: "default",
+      browserContextId,
       tabId
     };
     const existing = entry.tabs.find((t) => t.targetId === targetId);
@@ -1145,7 +1217,8 @@ export class RelayServer {
       const attach = this._registerCreatedTarget(entry, {
         targetId: msg.result.targetId,
         tabId: msg.result.tabId ?? null,
-        url: pending.params?.url || "about:blank"
+        url: pending.params?.url || "about:blank",
+        browserContextId: msg.result.browserContextId || pending.params?.browserContextId || "default"
       }, pending.clientId);
       if (attach) {
         const creator = entry.clients.get(pending.clientId);
@@ -1253,6 +1326,14 @@ export class RelayServer {
       reply.error = msg.error;
     } else {
       reply.result = msg.result || {};
+    }
+    // Forwarded Target.getBrowserContexts: a client that predates the window
+    // flag (or an extension reply without browserContextIds) must still see the
+    // historical single "default" context instead of an empty/absent list.
+    if (pending.method === "Target.getBrowserContexts" && !reply.error) {
+      if (!Array.isArray(reply.result.browserContextIds)) {
+        reply.result.browserContextIds = ["default"];
+      }
     }
     // Session-scoped replies must carry the sessionId the client used on the
     // command — the extension's echo wins; the gateway's record backstops it
@@ -1374,6 +1455,10 @@ export class RelayServer {
           clearTimeout(timer);
           if (msg && msg.error) resolve({ error: msg.error });
           else resolve({ result: (msg && msg.result) || {} });
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
         }
       });
       const msg = { id: globalId, method, params: params || {} };

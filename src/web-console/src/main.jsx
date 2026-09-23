@@ -4,6 +4,7 @@ import "./style.css";
 import { mergeErrorLogs, request } from "./lib/request.js";
 import { modeFromPath, pathForMode } from "./lib/routing.js";
 import { Layout, ImmediateTooltip } from "./components/Layout.jsx";
+import { PopupProvider } from "./components/popup.jsx";
 import { Keys } from "./pages/keys/index.jsx";
 import { Manage } from "./pages/manage/index.jsx";
 import { Hints } from "./pages/hints/index.jsx";
@@ -201,7 +202,7 @@ function App() {
           reload={load}
         />
       ) : mode === "manage" ? (
-        <Manage config={snapshot.config || {}} reload={load} />
+        <Manage config={snapshot.config || {}} health={snapshot.health || {}} reload={load} />
       ) : mode === "tools" ? (
         <Tools />
       ) : mode === "keys" ? (
@@ -230,6 +231,8 @@ function App() {
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-    <App />
+    <PopupProvider>
+      <App />
+    </PopupProvider>
   </StrictMode>,
 );

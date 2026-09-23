@@ -62,9 +62,20 @@ var SpecialHandler = (function() {
   function targetCreateTarget(context) {
     var params = context.params || {};
     var url = params.url || 'about:blank';
-    var browserContextId = (params && params.browserContextId) || 'default';
     var needsNavigate = url !== 'about:blank' && url !== '';
+    var wantWindow = !!(params.newWindow ||
+      (params.browserContextId && params.browserContextId !== 'default'));
+    return Config.promisifiedGetOpenInWindow().then(function(flag) {
+      var createInWindow = wantWindow || flag === true;
+      return createInWindow
+        ? createWindowTab(url, needsNavigate, context)
+        : createPlainTab(url, needsNavigate, context);
+    });
+  }
 
+  // Flag OFF — today's behavior: a tab in the current window, grouped.
+  function createPlainTab(url, needsNavigate, context) {
+    var state = context._state;
     return new Promise(function(resolve, reject) {
       chrome.tabs.create({ url: 'about:blank', active: false }, function(tab) {
         if (!tab || !tab.id) {
@@ -72,11 +83,9 @@ var SpecialHandler = (function() {
           return;
         }
         var tabId = tab.id;
-        var state = context._state;
         state.addCDPCreatedTab(tabId);
-        state.isCDPCreatedTab(tabId);
 
-        SpecialHandler.addTabToAutomationGroup(tabId, context._state);
+        SpecialHandler.addTabToAutomationGroup(tabId, state);
 
         // Chrome registers the new tab in chrome.debugger.getTargets a beat
         // after tabs.create; resolve once it does so the targetId we hand back
@@ -90,6 +99,48 @@ var SpecialHandler = (function() {
             });
           } else {
             resolve({ targetId: targetId, tabId: tabId, url: realUrl });
+          }
+        });
+      });
+    });
+  }
+
+  // Flag ON — a brand-new OS window (background, unfocused) holding one tab.
+  // Skips tab grouping: a lone tab in its own window needs no collapsed group.
+  function createWindowTab(url, needsNavigate, context) {
+    var state = context._state;
+    return new Promise(function(resolve, reject) {
+      // chrome.windows.create has no `active` property (tabs.create does) —
+      // `focused: false` is what keeps the new window off your screen.
+      chrome.windows.create({ url: 'about:blank', focused: false, state: 'normal' }, function(win) {
+        if (!win || !win.id || !win.tabs || !win.tabs[0] || !win.tabs[0].id) {
+          reject(new Error('Failed to create window'));
+          return;
+        }
+        var winId = win.id;
+        var tabId = win.tabs[0].id;
+        var browserContextId = 'window-' + winId;
+        state.addCDPCreatedTab(tabId);
+        state.addCDPCreatedWindow(winId);
+
+        waitForTargetByTabId(tabId, 2000).then(function(target) {
+          var targetId = target ? target.id : String(tabId);
+          var realUrl = target && target.url ? target.url : url;
+          state.bumpCDPCreatedWindow(winId);
+          var base = {
+            targetId: targetId,
+            tabId: tabId,
+            url: realUrl,
+            windowId: winId,
+            browserContextId: browserContextId
+          };
+          if (needsNavigate) {
+            chrome.tabs.update(tabId, { url: url }, function() {
+              base._sayGoodbye = true;
+              resolve(base);
+            });
+          } else {
+            resolve(base);
           }
         });
       });
@@ -118,10 +169,33 @@ var SpecialHandler = (function() {
     if (!targetId) return { success: true };
     return resolveTabId(targetId).then(function(tabId) {
       if (!tabId) return { success: true };
+      var state = context._state;
       return new Promise(function(resolve) {
-        chrome.tabs.remove(tabId, function() {
-          if (context._state) context._state.removeAttachedTab(tabId);
-          resolve({ success: true });
+        chrome.tabs.get(tabId, function(tab) {
+          var finish = function() {
+            if (state) state.removeAttachedTab(tabId);
+            resolve({ success: true });
+          };
+          if (chrome.runtime.lastError || !tab || !tab.windowId) { finish(); return; }
+          var windowId = tab.windowId;
+          if (!state.cdpWindows.has('window-' + windowId)) {
+            // Plain tab (or CDP tab in a shared window) — remove the tab
+            // (Chrome auto-closes the window when the last tab goes anyway).
+            chrome.tabs.remove(tabId, finish);
+            return;
+          }
+          // CDP-created window — close the whole window when this is its last tab.
+          chrome.windows.get(windowId, { populate: true }, function(win) {
+            if (chrome.runtime.lastError || !win) { finish(); return; }
+            if (win.tabs && win.tabs.length <= 1) {
+              chrome.windows.remove(windowId, function() {
+                if (!chrome.runtime.lastError) state.removeCDPCreatedWindow(windowId);
+                finish();
+              });
+            } else {
+              chrome.tabs.remove(tabId, finish);
+            }
+          });
         });
       });
     }).catch(function() {

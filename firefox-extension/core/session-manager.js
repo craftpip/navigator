@@ -19,6 +19,7 @@ var CDPSessionManager = (function() {
   var _contextTabs = new Map();   // contextId -> tabId
   var _tabContexts = new Map();   // tabId -> contextId
   var _knownContexts = new Set(); // every context id we've ever seen
+  var _windowContexts = new Set();// context ids created as type:'window' (plan 56)
   var _unpairedContexts = [];     // context ids awaiting a tabs.onCreated
   var _stashedTabIds = [];        // tab ids awaiting a browsingContext.create reply
 
@@ -39,8 +40,9 @@ var CDPSessionManager = (function() {
   function tabIdForContext(contextId) { return _contextTabs.get(contextId) || null; }
 
   /** Called when a browsingContext.create reply lands with a context id. */
-  function noteContextCreated(contextId) {
+  function noteContextCreated(contextId, opts) {
     _knownContexts.add(contextId);
+    if (opts && opts.window) _windowContexts.add(contextId);
     if (_stashedTabIds.length) {
       addContextMapping(contextId, _stashedTabIds.shift());
     } else {
@@ -53,11 +55,21 @@ var CDPSessionManager = (function() {
     var tabId = tab && tab.id;
     if (!tabId) return;
     if (_unpairedContexts.length) {
-      addContextMapping(_unpairedContexts.shift(), tabId);
-      TabIsolation.isolate(tabId);
+      var contextId = _unpairedContexts.shift();
+      addContextMapping(contextId, tabId);
+      // Window-created contexts (plan 56) must NOT be tab-hidden — hiding the
+      // only tab of a fresh window leaves the user staring at an empty window.
+      if (!_windowContexts.has(contextId)) {
+        TabIsolation.isolate(tabId);
+      }
     } else {
       _stashedTabIds.push(tabId);
     }
+  }
+
+  /** True when the context was created as a real window (plan 56). */
+  function isWindowContext(contextId) {
+    return _windowContexts.has(contextId);
   }
 
   // ------------------------------------------------------------ sessions
@@ -244,6 +256,7 @@ var CDPSessionManager = (function() {
     _contextTabs.clear();
     _tabContexts.clear();
     _knownContexts.clear();
+    _windowContexts.clear();
     _unpairedContexts = [];
     _stashedTabIds = [];
     State.getAttachedTabIds().forEach(function(t) { State.removeAttachedTab(t); });
@@ -256,6 +269,7 @@ var CDPSessionManager = (function() {
     tabIdForContext: tabIdForContext,
     noteContextCreated: noteContextCreated,
     handleTabCreated: handleTabCreated,
+    isWindowContext: isWindowContext,
     createSession: createSession,
     findBySession: findBySession,
     sessionForContext: sessionForContext,

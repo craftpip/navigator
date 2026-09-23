@@ -19,13 +19,13 @@ import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
-import { getEnvFilePath, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
+import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers } from "./db.js";
-import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend } from "./devtools.js";
+import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend, releaseTargetsByBackend } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
 import { svgExtractor, capturePageAsSvg } from "./svg.js";
@@ -78,13 +78,20 @@ const WEB_CONSOLE_CONTENT_TYPES = {
   ".woff2": "font/woff2"
 };
 
+const ENGINE_API_KEY_VAR = {
+  exa_api: "EXA_API_KEY",
+  linkup_api: "LINKUP_API_KEY",
+  tavily_api: "TAVILY_API_KEY",
+  firecrawl_api: "FIRECRAWL_API_KEY",
+};
 const CONSOLE_ENGINE_REGISTRY = SUPPORTED_ENGINES.map((id) => {
   const meta = getEngineMetadata(id);
   return {
     id,
     pool: meta.pool,
     homeUrl: meta.homeUrl,
-    isBrowser: meta.isBrowser
+    isBrowser: meta.isBrowser,
+    keyVar: ENGINE_API_KEY_VAR[id] || null
   };
 });
 const CONSOLE_ENGINE_BY_ID = new Map(
@@ -289,9 +296,21 @@ function normalizeSearchEngineSelection(engines, engine) {
 }
 
 function parseQueryList(value) {
-  if (typeof value === "string") return [String(value).trim()].filter(Boolean);
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => String(item).trim()).filter(Boolean);
+  const MAX_QUERIES = 6;
+  const MAX_QUERY_LENGTH = 500;
+  let raw;
+  if (typeof value === "string") {
+    raw = [String(value).trim()];
+  } else if (Array.isArray(value)) {
+    raw = value.map((item) => String(item).trim());
+  } else {
+    return [];
+  }
+  const trimmed = raw.filter(Boolean).map((q) => q.slice(0, MAX_QUERY_LENGTH));
+  if (trimmed.length > MAX_QUERIES) {
+    trimmed.splice(MAX_QUERIES);
+  }
+  return trimmed;
 }
 
 function parseSearchLimit(value, fallback) {
@@ -469,7 +488,7 @@ function envKeyToConfigKey(key) {
   return key.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
-const envFileState = { mtimeMs: null, size: null, changed: false };
+const envFileState = { mtimeMs: null, size: null, changed: false, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null };
 async function checkEnvFileChanged(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -501,7 +520,14 @@ async function getConsoleConfigPayload(manager) {
             : manager.config[envKeyToConfigKey(entry.key)]
       ])
     ),
-    envFile: { path: envPath, changedOnDisk: envFileState.changed, backup: backupPath },
+    envFile: {
+      path: envPath,
+      changedOnDisk: envFileState.changed,
+      backup: backupPath,
+      externalBrowsersApplied: envFileState.externalBrowsersApplied,
+      externalBrowsersInvalidated: envFileState.externalBrowsersInvalidated,
+      externalBrowsersError: envFileState.externalBrowsersError
+    },
     postProcessorModels: getPostProcessorModels(manager.config),
     engines: enabledEngines.map((id) => CONSOLE_ENGINE_BY_ID.get(id)).filter(Boolean),
     availableEngines: CONSOLE_ENGINE_REGISTRY,
@@ -694,12 +720,115 @@ function sendMcpUnauthorized(res) {
   });
 }
 
+function reconcileRemovedRelayBrowsers(previousBrowsers, nextBrowsers) {
+  const retained = new Set(
+    nextBrowsers
+      .filter((browser) => browser.type === "navigator-cdp")
+      .map((browser) => browser.name)
+  );
+  return previousBrowsers
+    .filter((browser) => browser.type === "navigator-cdp" && !retained.has(browser.name))
+    .map((browser) => browser.name)
+    .filter((name) => relayServer.remove(name));
+}
+
+/**
+ * Reconcile Navigator-owned runtime state against a BROWSERS change. Handles
+ * every lifecycle defect the config save alone cannot: removed browsers
+ * (relay sessions forgotten; add-on handles/probes invalidated for both cdp
+ * and navigator-cdp), and same-name identity changes (type or cdpUrl) so a
+ * stale connection to the OLD endpoint is never reused for the NEW identity.
+ * Never closes external browser processes or user tabs — only Navigator-owned
+ * handles and target state.
+ */
+function reconcileBrowserChanges(manager, previousBrowsers, nextBrowsers) {
+  const next = new Map(nextBrowsers.map((browser) => [String(browser.name).toLowerCase(), browser]));
+  const previous = new Map(previousBrowsers.map((browser) => [String(browser.name).toLowerCase(), browser]));
+  const invalidated = [];
+  const forgottenRelayBrowsers = [];
+
+  for (const [nameLower, prev] of previous) {
+    const nextEntry = next.get(nameLower);
+    if (!nextEntry) {
+      // Removed entirely. Remove the relay browser (forget the pairing AND drop
+      // the known-registry row — delegating via remove() so it cannot return as
+      // a dynamic driver), then drop any Navigator-owned add-on handle/probe so
+      // the removed browser cannot keep routing or be re-dialed.
+      if (prev.type === "navigator-cdp" && relayServer.remove(prev.name)) {
+        forgottenRelayBrowsers.push(prev.name);
+      }
+      const released = manager.invalidateAddOn?.(prev.name) || [];
+      invalidated.push(...released);
+      try {
+        const targetReleases = releaseTargetsByBackend(prev.name);
+        invalidated.push(...targetReleases);
+      } catch (error) {
+        console.error(`⚠️  reconcileBrowserChanges releaseTargetsByBackend (${prev.name}): ${String(error?.message || error)}`);
+      }
+      continue;
+    }
+    // Same name survives — but if its identity changed (type or endpoint), the
+    // cached connection dials the OLD endpoint. Naming alone is not identity.
+    const identityChanged =
+      prev.type !== nextEntry.type ||
+      String(String(prev.cdpUrl || "").toLowerCase()) !== String(String(nextEntry.cdpUrl || "").toLowerCase());
+    if (identityChanged) {
+      const released = manager.invalidateAddOn?.(prev.name) || [];
+      invalidated.push(...released);
+      try {
+        const targetReleases = releaseTargetsByBackend(prev.name);
+        invalidated.push(...targetReleases);
+      } catch (error) {
+        console.error(`⚠️  reconcileBrowserChanges releaseTargetsByBackend (${prev.name}): ${String(error?.message || error)}`);
+      }
+    }
+  }
+
+  return { forgottenRelayBrowsers, invalidated };
+}
+
+function applyBrowsersConfig(manager, value) {
+  const previousBrowsers = manager.config.browsers;
+  const applied = hotApplyConfig(manager.config, "BROWSERS", value);
+  if (!applied) {
+    return { applied, forgottenRelayBrowsers: [], invalidated: [] };
+  }
+  const reconciled = reconcileBrowserChanges(manager, previousBrowsers, manager.config.browsers);
+  return {
+    applied,
+    forgottenRelayBrowsers: reconciled.forgottenRelayBrowsers,
+    invalidated: reconciled.invalidated
+  };
+}
+
+async function reconcileExternalBrowsersConfig(manager, envPath) {
+  const browsersEntry = parseEnvFile(await readEnvFile(envPath)).keyToLine.get("BROWSERS");
+  const browsersValue = browsersEntry?.value ?? CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS")?.fallback;
+  const validation = validateConfigValue(
+    CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS"),
+    browsersValue
+  );
+  if (!validation.valid) {
+    envFileState.externalBrowsersApplied = [];
+    envFileState.externalBrowsersInvalidated = [];
+    envFileState.externalBrowsersError = validation.error || "invalid BROWSERS value";
+    return;
+  }
+
+  const result = applyBrowsersConfig(manager, validation.value);
+  envFileState.externalBrowsersApplied = result.forgottenRelayBrowsers;
+  envFileState.externalBrowsersInvalidated = result.invalidated;
+  envFileState.externalBrowsersError = null;
+  if (browsersEntry) process.env.BROWSERS = browsersEntry.value;
+  else delete process.env.BROWSERS;
+}
+
 async function applyConfigUpdates(manager, body) {
   const updates = body?.updates && typeof body.updates === "object" ? body.updates : null;
   const resets = Array.isArray(body?.reset) ? body.reset.map((key) => String(key).toUpperCase()) : [];
   const revert = body?.revert === true;
   const envPath = getEnvFilePath();
-  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], envWritten: false, backup: null, reverted: false };
+  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], envWritten: false, backup: null, reverted: false, forgottenRelayBrowsers: [], invalidatedBrowsers: [] };
 
   if (revert) {
     const backupPath = await revertEnvFile(envPath);
@@ -710,6 +839,25 @@ async function applyConfigUpdates(manager, body) {
     }
     payload.reverted = true;
     payload.backup = backupPath;
+    const browsersEntry = parseEnvFile(await readEnvFile(envPath)).keyToLine.get("BROWSERS");
+    const browsersValue = browsersEntry?.value ?? CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS")?.fallback;
+    const browsersValidation = validateConfigValue(
+      CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS"),
+      browsersValue
+    );
+    if (!browsersValidation.valid) {
+      payload.ok = false;
+      payload.error = `Reverted .env contains an invalid BROWSERS value: ${browsersValidation.error}`;
+      return payload;
+    }
+    const appliedBrowsers = applyBrowsersConfig(manager, browsersValidation.value);
+    if (appliedBrowsers.applied) {
+      payload.hotApplied.push("BROWSERS→reverted");
+      payload.forgottenRelayBrowsers.push(...appliedBrowsers.forgottenRelayBrowsers);
+      payload.invalidatedBrowsers.push(...appliedBrowsers.invalidated);
+    }
+    if (browsersEntry) process.env.BROWSERS = browsersEntry.value;
+    else delete process.env.BROWSERS;
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
@@ -744,8 +892,13 @@ async function applyConfigUpdates(manager, body) {
 
   for (const { key, entry, parsed } of validated) {
     if (entry.applies === "hot") {
-      const applied = hotApplyConfig(manager.config, key, parsed.value);
+      const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, parsed.value) : null;
+      const applied = browsersResult ? browsersResult.applied : hotApplyConfig(manager.config, key, parsed.value);
       if (applied) {
+        if (browsersResult) {
+          payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
+          payload.invalidatedBrowsers.push(...browsersResult.invalidated);
+        }
         payload.hotApplied.push(key);
         changedKeys.add(key);
       } else {
@@ -765,7 +918,12 @@ async function applyConfigUpdates(manager, body) {
         changedKeys.add(key);
         const entry = CONFIG_SCHEMA.find((item) => item.key === key);
         if (entry && entry.applies === "hot") {
-          hotApplyConfig(manager.config, key, entry.fallback);
+          const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, entry.fallback) : null;
+          if (browsersResult) {
+            payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
+            payload.invalidatedBrowsers.push(...browsersResult.invalidated);
+          }
+          else hotApplyConfig(manager.config, key, entry.fallback);
           payload.hotApplied.push(`${key}→default`);
           delete process.env[key];
         } else {
@@ -1640,6 +1798,7 @@ function formatScreenshotResponse(payload) {
 }
 
 function resolveOpenTarget(args) {
+  const MAX_BATCH_URLS = 10;
   const normalizedRef = args?.ref_id ?? args?.ref;
   const normalizedRefs = args?.ref_ids ?? args?.refs;
   const hasUrl = args && Object.prototype.hasOwnProperty.call(args, "url");
@@ -1655,6 +1814,9 @@ function resolveOpenTarget(args) {
       }).filter(Boolean);
 
       if (normalizedUrls.length) {
+        if (normalizedUrls.length > MAX_BATCH_URLS) {
+          throw new Error(`Too many URLs in a single web_fetch batch (max ${MAX_BATCH_URLS}, got ${normalizedUrls.length}). Fetch in smaller batches.`);
+        }
         return normalizedUrls;
       }
     }
@@ -1662,6 +1824,9 @@ function resolveOpenTarget(args) {
 
   if (hasRefs) {
     if (Array.isArray(normalizedRefs) && normalizedRefs.length) {
+      if (normalizedRefs.length > MAX_BATCH_URLS) {
+        throw new Error(`Too many ref_ids in a single web_fetch batch (max ${MAX_BATCH_URLS}, got ${normalizedRefs.length}). Fetch in smaller batches.`);
+      }
       return normalizedRefs.map((item) => {
         const ref = parsePositiveInt(item, "ref_ids[]");
         const remembered = getRememberedLinkRecord(ref);
@@ -1895,7 +2060,7 @@ function getToolsListResponse(allowedTools = null) {
             queries: {
               type: "array",
               items: { type: "string" },
-              description: "One or more search queries to run (query variations)"
+              description: "One or more search queries to run (query variations; max 6, each capped at 500 chars)"
             },
             limit: { type: "number", default: 5 },
             bypassCache: {
@@ -1941,7 +2106,7 @@ function getToolsListResponse(allowedTools = null) {
               description: "Browser to use (chromium default, or an add-on name from list_browsers). Defaults to the matching hint's browserEngine. NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
             }
           },
-          description: "Provide one of: urls (string[]) or ref_ids (number[]) from a previous web_search call. Prefer ref_ids when available.",
+          description: "Provide one of: urls (string[]) or ref_ids (number[]) from a previous web_search call. Prefer ref_ids when available. Batch size is capped at 10 URLs/ref_ids per call — fetch in smaller batches for more.",
           additionalProperties: false
         }
       },
@@ -3247,7 +3412,9 @@ async function maybeStartHttpServer(managerOverride) {
             }
           }
 
-          const response = await handleStatelessMcpPost(body, allowedTools);
+          const ip = getClientIp(req);
+          const keyInfo = getMcpCallKeyInfo(req.headers);
+          const response = await mcpCallContext.run({ ip, keyInfo }, () => handleStatelessMcpPost(body, allowedTools));
           const ms = Date.now() - t0;
 
           if (response === null) {
@@ -3475,6 +3642,23 @@ async function maybeStartHttpServer(managerOverride) {
         }
       }
 
+      if (url.pathname === "/console/relay/remove" && method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const name = String(body?.name || "").trim();
+          if (!name) {
+            sendJson(res, 400, { ok: false, error: "name required" });
+            return;
+          }
+          const ok = relayServer.remove(name);
+          sendJson(res, 200, { ok, name, removed: ok });
+          return;
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: String(error?.message || error) });
+          return;
+        }
+      }
+
       if (url.pathname === "/console/api-keys") {
         if (!manager.config.enableWebConsole) {
           sendJson(res, 404, { ok: false, error: "Web console not available" });
@@ -3515,7 +3699,9 @@ async function maybeStartHttpServer(managerOverride) {
         const body = await readJsonBody(req);
         const t0 = Date.now();
         const isToolCall = body?.method === "tools/call";
-        const response = await handleStatelessMcpPost(body);
+        const ip = getClientIp(req);
+        const keyInfo = getMcpCallKeyInfo(req.headers);
+        const response = await mcpCallContext.run({ ip, keyInfo }, () => handleStatelessMcpPost(body));
         if (response === null) {
           res.writeHead(204);
           res.end();
@@ -3560,7 +3746,9 @@ async function maybeStartHttpServer(managerOverride) {
         }
         if (method === "GET") {
           const envPath = getEnvFilePath();
-          await checkEnvFileChanged(envPath);
+          if (await checkEnvFileChanged(envPath)) {
+            await reconcileExternalBrowsersConfig(manager, envPath);
+          }
           const payload = await getConsoleConfigPayload(manager);
           logEvent("http.request", { method, path: url.pathname });
           sendJson(res, 200, payload);

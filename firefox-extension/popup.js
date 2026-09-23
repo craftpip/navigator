@@ -40,12 +40,14 @@
   var serverUrlError = $('serverUrlError');
   var probeBtn = $('probeBtn');
   var probeResult = $('probeResult');
+  var openInWindowCheckbox = $('openInWindow');
 
   versionEl.textContent = chrome.runtime.getManifest().version;
 
   var _latestSnapshot = null;
   var _urlDirty = false;
   var _browserNameDirty = false;
+  var _openInWindowDirty = false;
   var _pinBusy = false;
   var _bidiBusy = false;
 
@@ -436,6 +438,11 @@
       if (!_urlDirty) {
         serverUrlInput.value = snapshot.serverUrl || '';
       }
+      if (!_openInWindowDirty && openInWindowCheckbox) {
+        Config.getOpenInWindow(function(flag) {
+          openInWindowCheckbox.checked = !!flag;
+        });
+      }
       if (snapshot.connected) updateConnectedSummary(snapshot);
 
       setBidiStatus(snapshot.bidiConnected, snapshot.bidiError);
@@ -596,6 +603,14 @@
         _browserNameDirty = false;
         loadState();
       });
+    });
+  }
+
+  if (openInWindowCheckbox) {
+    openInWindowCheckbox.addEventListener('change', function() {
+      _openInWindowDirty = true;
+      Config.setOpenInWindow(openInWindowCheckbox.checked);
+      chrome.runtime.sendMessage({ type: 'stateUpdate' });
     });
   }
 

@@ -92,6 +92,9 @@ body { position: relative; }
 .pin-box button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .pin-box button:disabled { opacity: 0.7; cursor: wait; }
 .tab-item button:disabled { opacity: 0.6; cursor: wait; }
+.toggle-field { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 12px; }
+.toggle-field input[type="checkbox"] { width: auto; margin: 0; flex-shrink: 0; accent-color: #4a9eff; }
+.toggle-field span { color: #ccc; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -130,6 +133,11 @@ body { position: relative; }
       </div>
     </div>
 
+    <label class="field toggle-field">
+      <input type="checkbox" id="openInWindow">
+      <span>Open new windows instead of tabs</span>
+    </label>
+
     <button class="btn-full" id="connectBtn"><span class="spinner" id="connectSpinner" style="display:none"></span><span id="connectBtnText">Connect</span></button>
 
     <div class="pin-box" id="pinBox">
@@ -158,6 +166,7 @@ body { position: relative; }
   <span>Navigator Browser Relay v<span id="version"></span></span>
 </div>
 
+<script src="utils/config.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

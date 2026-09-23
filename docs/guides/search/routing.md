@@ -1,6 +1,6 @@
 # Search Queue
 
-Navigator keeps 12 routes across 7 engines and 3 backends. Requests go through a queue — matching is not random, it is a scored,
+Navigator keeps 12 engines across two flavors — browser engines and API engines. Requests go through a queue — matching is not random, it is a scored,
 stateful scheduler with backoff and sequential failover, so you still get results even when most routes are down.
 
 ## The Big Picture
@@ -94,12 +94,12 @@ Execution in `src/search.js`:
 
 The system returns results reliably because:
 
-- **No single point of failure** — there are 12 independent routes; `select_best` expands to the full fallback set.
+- **No single point of failure** — there are 12 independent engines; `select_best` expands to the full fallback set.
 - **Failures don't abort** — the loop continues to the next eligible route instead of throwing on first error.
 - **Unhealthy routes are excluded early** — backoff and circuit breakers keep the tried set small and fresh, so a request isn't stuck retrying a dead engine.
 - **One success is enough** — the first route that returns results resolves the query; the remaining routes are not tried.
 
-In practice a query like `who is Albert Einstein` will be served by whichever of `duckduckgo_api`, `brave_cb`, `bing_lp`, etc. is healthy right now — often the first in `ordered`, sometimes the second or third after a timeout, but rarely all 12.
+In practice a query like `who is Albert Einstein` will be served by whichever of `duckduckgo_api`, `brave`, `bing`, etc. is healthy right now — often the first in `ordered`, sometimes the second or third after a timeout, but rarely all 12.
 
 ## Observability
 
