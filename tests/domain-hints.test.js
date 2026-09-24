@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import { findDomainHint, findMatchingHints, getDomainHints, loadDomainHints, loadRawDomainHints, migrateHintShape, saveDomainHints, validateHintRule } from "../src/domain-hints.js";
+import { findDomainHint, findMatchingHints, getDomainHints, getExtractionMethod, loadDomainHints, loadRawDomainHints, migrateHintShape, saveDomainHints, validateHintRule, validateScript } from "../src/domain-hints.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hintsPath = path.join(projectRoot, "domain-hints.json");
@@ -849,5 +849,93 @@ describe("extractor formats and AI models", () => {
     });
     expect(result.hint.flow[0].content.blocks[0].format).toBe("readability_to_markdown");
     expect(result.warnings.join(" ")).toMatch(/legacy model id/);
+  });
+});
+
+describe("validateScript and script hints (plan 43)", () => {
+  it("accepts a valid script using return (wrapped async IIFE)", () => {
+    expect(validateScript('return { text: "hi" };')).toEqual([]);
+  });
+
+  it("rejects empty and non-string scripts", () => {
+    for (const bad of ["", "   ", null, 42, {}]) {
+      expect(validateScript(bad).map((e) => e.field)).toContain("script");
+    }
+  });
+
+  it("rejects syntax errors", () => {
+    const errors = validateScript("return {{{");
+    expect(errors.map((e) => e.field)).toContain("script");
+    expect(errors[0].message).toMatch(/syntax error/);
+  });
+
+  it("accepts a full script hint with scriptOptions", () => {
+    const { errors, warnings } = validateHintRule(
+      {
+        domain: "example.com",
+        pathPattern: "/*",
+        pageType: "chart",
+        comment: "reads series",
+        script: 'return { text: "hi" };',
+        scriptOptions: { timeoutMs: 15000 }
+      }
+    );
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("rejects script combined with default or flow", () => {
+    for (const hint of [
+      { domain: "example.com", pathPattern: "/*", default: {}, script: 'return { text: "x" };' },
+      { domain: "example.com", pathPattern: "/*", flow: [{ action: "extract", content: { blocks: [{ selector: "main", format: "text" }] } }], script: 'return { text: "x" };' }
+    ]) {
+      const { errors } = validateHintRule(hint);
+      expect(errors.map((e) => e.field)).toEqual(expect.arrayContaining(["script"]));
+      expect(errors.map((e) => e.message).join(" ")).toMatch(/exactly one extraction method/);
+    }
+  });
+
+  it("rejects script and scriptOptions on wildcard hints", () => {
+    const { errors } = validateHintRule({ domain: "*", script: 'return { text: "x" };' });
+    expect(errors.map((e) => e.field)).toContain("script");
+    const withOpts = validateHintRule({ domain: "*", default: { format: "readability_to_markdown" }, scriptOptions: { timeoutMs: 1000 } });
+    expect(withOpts.errors.map((e) => e.field)).toContain("scriptOptions");
+  });
+
+  it("bounds scriptOptions.timeoutMs and rejects unknown keys", () => {
+    for (const bad of [0, -1, 60001, 1.5, "15000"]) {
+      const { errors } = validateHintRule(
+        { domain: "example.com", pathPattern: "/*", script: 'return { text: "x" };', scriptOptions: { timeoutMs: bad } }
+      );
+      expect(errors.map((e) => e.field)).toContain("scriptOptions.timeoutMs");
+    }
+    const unknown = validateHintRule(
+      { domain: "example.com", pathPattern: "/*", script: 'return { text: "x" };', scriptOptions: { timeoutMs: 1000, retries: 2 } }
+    );
+    expect(unknown.errors.map((e) => e.field)).toContain("scriptOptions.retries");
+  });
+
+  it("requires script when scriptOptions is present", () => {
+    const { errors } = validateHintRule(
+      { domain: "example.com", pathPattern: "/*", scriptOptions: { timeoutMs: 1000 } }
+    );
+    expect(errors.map((e) => e.field)).toContain("scriptOptions");
+  });
+
+  it("getExtractionMethod prefers script over flow/default", () => {
+    expect(getExtractionMethod({ script: 'return { text: "x" };' })).toBe("script");
+    expect(getExtractionMethod({ script: 'return { text: "x" };', flow: [{ action: "extract" }] })).toBe("script");
+    expect(getExtractionMethod({ flow: [{ action: "extract" }] })).toBe("flow");
+    expect(getExtractionMethod({ default: {} })).toBe("default");
+    expect(getExtractionMethod({})).toBeNull();
+    expect(getExtractionMethod({ script: "   " })).not.toBe("script");
+  });
+
+  it("does not warn on known script keys", () => {
+    const { warnings } = validateHintRule(
+      { domain: "example.com", pathPattern: "/*", script: 'return { text: "x" };', scriptOptions: { timeoutMs: 1000 } }
+    );
+    expect(warnings.map((w) => w.field)).not.toContain("script");
+    expect(warnings.map((w) => w.field)).not.toContain("scriptOptions");
   });
 });

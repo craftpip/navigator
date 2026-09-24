@@ -3,6 +3,7 @@ import { DEFAULT_MAX_CHARS, DEFAULT_SEARCH_ENABLED_ENGINES } from "./config.js";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { performance } from "node:perf_hooks";
+import vm from "node:vm";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
@@ -15,7 +16,7 @@ import {
   recordSearchStart,
   searchContext
 } from "./activity.js";
-import { findMatchingHints, getDomainHints, getWildcardHint, FLOW_TOTAL_TIMEOUT_MAX } from "./domain-hints.js";
+import { findMatchingHints, getDomainHints, getWildcardHint, FLOW_TOTAL_TIMEOUT_MAX, SCRIPT_TIMEOUT_DEFAULT_MS, SCRIPT_TIMEOUT_MAX_MS } from "./domain-hints.js";
 import { htmlToMarkdown } from "./markdown.js";
 import { getEngineDriver, getEngineMetadata, SUPPORTED_ENGINES } from "./engines/index.js";
 import { fetchDuckDuckGoInstantAnswers } from "./engines/instant-answers.js";
@@ -2090,6 +2091,130 @@ async function runFlowExtraction({ page, hint, config, maxChars, debug, debugLog
   return result;
 }
 
+export async function runScriptExtraction({ page, hint, config, maxChars, debug, debugLog, withPageTimeout, withOperationDeadline, operationTimeoutMs, includeSeoAnalysis, hintNote, startTime, defaultExtractSkipSelectors, signal }) {
+  if (signal?.aborted) throw new Error("Script extraction aborted before execution");
+  const scriptSource = hint?.script;
+  if (typeof scriptSource !== "string" || !scriptSource.trim()) {
+    throw new Error("Script hint has no script to execute");
+  }
+  const timeoutMs = Math.min(
+    Number.isInteger(hint?.scriptOptions?.timeoutMs) ? hint.scriptOptions.timeoutMs : SCRIPT_TIMEOUT_DEFAULT_MS,
+    SCRIPT_TIMEOUT_MAX_MS
+  );
+
+  const sandbox = {
+    page,
+    capturePageState: () => capturePageState(page),
+    console,
+    setTimeout,
+    setInterval,
+    clearTimeout,
+    clearInterval,
+    URL,
+    URLSearchParams,
+    JSON,
+    Math,
+    Date,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    Promise,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Map,
+    Set,
+    RegExp,
+    Error,
+    TypeError,
+    RangeError,
+    undefined
+  };
+  const context = vm.createContext(sandbox, { name: "script-hint" });
+  const wrapped = `(async () => { ${scriptSource} })()`;
+  let rawResult;
+  try {
+    const script = new vm.Script(wrapped, { filename: `hint:${hint.domain || "unknown"}` });
+    rawResult = await withOperationDeadline("script_execution", () =>
+      script.runInContext(context, { timeout: timeoutMs })
+    );
+  } catch (error) {
+    if (String(error?.message || "").includes("Script execution timed out")) {
+      throw new Error(`Script hint timed out after ${timeoutMs}ms`);
+    }
+    throw new Error(`Script hint failed: ${String(error?.message || error)}`);
+  }
+  if (signal?.aborted) throw new Error("Script extraction aborted during execution");
+
+  let normalized = rawResult;
+  if (typeof normalized === "string") normalized = { text: normalized };
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
+    throw new Error("Script hint must return an object with text or a plain string");
+  }
+  if (typeof normalized.text !== "string") {
+    throw new Error("Script hint must return an object with text (string)");
+  }
+
+  const finalState = await withPageTimeout("script_final_state", () => capturePageState(page));
+  const seoSnapshot =
+    includeSeoAnalysis === false
+      ? null
+      : await withPageTimeout("seo_snapshot", () =>
+          captureSeoSnapshot(page, {
+            textLimit: Math.min(MAX_MAIN_TEXT_CHARS, Math.max(maxChars * 3, 4000)),
+            htmlLimit: Math.min(Math.max(MAX_MAIN_HTML_CHARS, maxChars * 6), 120000),
+            maxCandidates: MAX_SEO_CANDIDATES,
+            extraSelectors: hint?.default?.waitForContent
+          })
+        );
+  const seoAnalysis =
+    includeSeoAnalysis === false || normalized.seo !== undefined
+      ? (normalized.seo || null)
+      : buildSeoAnalysis({ snapshot: seoSnapshot, extracted: { text: normalized.text, title: finalState.title }, maxChars });
+
+  let finalText = normalized.text || "";
+  if (finalText.length > maxChars) {
+    const fullSize = finalText.length;
+    finalText = `${finalText.slice(0, maxChars).trimEnd()}\n\n*(Response truncated — full page is ${fullSize} chars, increase maxChars to see more)*`;
+  }
+  if (hintNote) {
+    finalText = `${hintNote}\n\n${finalText}`;
+  }
+
+  const links = Array.isArray(normalized.links)
+    ? normalized.links
+        .filter((l) => l && typeof l === "object" && (l.href || l.url) && l.text !== undefined)
+        .map((l) => ({ href: l.href || l.url, text: String(l.text || "").slice(0, 200) }))
+    : [];
+  const tables = Array.isArray(normalized.tables) ? normalized.tables : [];
+  const warnings = Array.isArray(normalized.warnings) ? normalized.warnings.filter((w) => typeof w === "string") : [];
+  const pageStateWarnings = await withPageTimeout("detect_page_state", () => detectPageState(page));
+  const allWarnings = [...warnings, ...pageStateWarnings];
+
+  const result = {
+    title: cleanWhitespace(normalized.title || finalState.title || ""),
+    url: normalized.url || finalState.url,
+    text: finalText,
+    textOriginalLength: normalized.text?.length || 0,
+    ...(tables.length ? { tables } : {}),
+    ...(links.length ? { links } : {}),
+    ...(allWarnings.length ? { warnings: allWarnings } : {}),
+    ...(seoAnalysis ? { seo: seoAnalysis } : {})
+  };
+
+  if (debug) {
+    const elapsed = Math.round(performance.now() - startTime);
+    console.log(
+      `[web_fetch] [${finalState.url}] TOTAL(script): ${elapsed}ms | text: ${finalText.length} chars | links: ${links.length} | tables: ${tables.length}`
+    );
+  }
+
+  return result;
+}
+
 export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "" }) {
   const tOverall = performance.now();
   activityCounters.fetches += 1;
@@ -2158,7 +2283,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       const requestedBrowser = browser || hintBrowserEngine;
 
       const cached = typeof cachedHtml === "string" && cachedHtml.length > 0 ? cachedHtml : null;
-      if (cached && hint?.flow?.length && isSnapshotReplayableFlow(hint.flow)) {
+      // Script hints always need a live browser page — never serve them from cached HTML.
+      const mayNeedScript = Boolean(hint?.script) || hintCandidates.some((h) => h?.script);
+      if (cached && !mayNeedScript && hint?.flow?.length && isSnapshotReplayableFlow(hint.flow)) {
         const tCache = performance.now();
         const replayed = await operation.wait("cached_flow_replay", () => replayFlowFromSnapshot({
           url,
@@ -2174,7 +2301,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
         if (debug) console.log(`[web_fetch] [${url}] cached flow replay: ${Math.round(performance.now() - tCache)}ms (browser skipped)`);
         return replayed;
       }
-      if (cached && !(hint?.flow?.length)) {
+      if (cached && !mayNeedScript && !(hint?.flow?.length)) {
         const tCache = performance.now();
         const extracted = await operation.wait("cached_html_extraction", () => extractTextFromHtml({
           html: cached,
@@ -2299,6 +2426,32 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
           if (!hint) {
             hint = getWildcardHint(hints);
             if (hint && debug) console.log(`[web_fetch] [${url}] hint=wildcard_default (candidates matched nothing)`);
+          }
+
+          if (hint?.script) {
+            const scriptHtml = captureHtml
+              ? await withPageTimeout("script_html", () => page.content())
+              : null;
+            const scriptResult = await withOperationDeadline("script_extraction", () => runScriptExtraction({
+              page,
+              hint,
+              config: manager.config,
+              maxChars,
+              debug,
+              debugLog,
+              withPageTimeout,
+              withOperationDeadline,
+              operationTimeoutMs,
+              includeSeoAnalysis,
+              hintNote,
+              startTime: tOverall,
+              defaultExtractSkipSelectors,
+              signal: operation.signal
+            }));
+            if (scriptHtml && !scriptResult.error) {
+              return { ...scriptResult, html: scriptHtml, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
+            }
+            return { ...scriptResult, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
           }
 
           if (hint?.flow?.length) {

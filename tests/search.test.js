@@ -1705,3 +1705,147 @@ describe("browserCaptureScreenshot", () => {
     await expect(browserCaptureScreenshot({ url: "https://example.com", fullPage: false })).rejects.toThrow();
   });
 });
+
+describe("runScriptExtraction (plan 43)", () => {
+  async function load() {
+    return import("../src/search.js");
+  }
+
+  function makeFakePage() {
+    return {
+      content: async () => "<html><body>hi</body></html>",
+      url: () => "https://example.com/page",
+      title: async () => "Example",
+      evaluate: async () => []
+    };
+  }
+
+  function makeHarness(overrides = {}) {
+    return {
+      page: makeFakePage(),
+      hint: { domain: "example.com", script: 'return { text: "hello" };' },
+      config: {},
+      maxChars: 90000,
+      debug: false,
+      debugLog: () => {},
+      withPageTimeout: (_label, task) => task(),
+      withOperationDeadline: (_label, task) => task(),
+      operationTimeoutMs: 60000,
+      includeSeoAnalysis: false,
+      hintNote: "",
+      startTime: performance.now(),
+      defaultExtractSkipSelectors: [],
+      signal: { aborted: false },
+      ...overrides
+    };
+  }
+
+  it("wraps a plain string return as { text }", async () => {
+    const { runScriptExtraction } = await load();
+    const result = await runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: 'return "just text";' }
+    }));
+    expect(result.text).toBe("just text");
+    expect(result.url).toBe("https://example.com/page");
+    expect(result.title).toBe("Example");
+    expect(result.textOriginalLength).toBe("just text".length);
+  });
+
+  it("honors title/url overrides and normalizes links/tables/warnings", async () => {
+    const { runScriptExtraction } = await load();
+    const result = await runScriptExtraction(makeHarness({
+      hint: {
+        domain: "example.com",
+        script: `return {
+          text: "body",
+          title: "Custom",
+          url: "https://example.com/other",
+          links: [{ url: "https://example.com/a", text: "A" }],
+          tables: [{ context: "t", headers: ["h"], rows: [["v"]] }],
+          warnings: ["note"]
+        };`
+      }
+    }));
+    expect(result.title).toBe("Custom");
+    expect(result.url).toBe("https://example.com/other");
+    expect(result.links).toEqual([{ href: "https://example.com/a", text: "A" }]);
+    expect(result.tables).toEqual([{ context: "t", headers: ["h"], rows: [["v"]] }]);
+    expect(result.warnings).toEqual(expect.arrayContaining(["note"]));
+  });
+
+  it("rejects results without text", async () => {
+    const { runScriptExtraction } = await load();
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return { title: 'no text' };" }
+    }))).rejects.toThrow(/must return an object with text/);
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return 42;" }
+    }))).rejects.toThrow(/must return an object with text|must return/);
+  });
+
+  it("rejects empty scripts before execution", async () => {
+    const { runScriptExtraction } = await load();
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "   " }
+    }))).rejects.toThrow(/no script/);
+  });
+
+  it("surfaces script exceptions with context", async () => {
+    const { runScriptExtraction } = await load();
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "throw new Error('boom');" }
+    }))).rejects.toThrow(/Script hint failed.*boom/);
+  });
+
+  it("surfaces syntax errors with context", async () => {
+    const { runScriptExtraction } = await load();
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return {{{" }
+    }))).rejects.toThrow(/Script hint failed/);
+  });
+
+  it("blocks sandbox escapes (no require/process)", async () => {
+    const { runScriptExtraction } = await load();
+    // Isolated globals resolve to undefined rather than the real Node objects.
+    const proc = await runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return typeof process;" }
+    }));
+    expect(proc.text).toBe("undefined");
+    const req = await runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return typeof require;" }
+    }));
+    expect(req.text).toBe("undefined");
+    // Dereferencing them throws (no real object behind the name).
+    await expect(runScriptExtraction(makeHarness({
+      hint: { domain: "example.com", script: "return process.env.HOME;" }
+    }))).rejects.toThrow(/Script hint failed/);
+  });
+
+  it("applies truncation note and hintNote", async () => {
+    const { runScriptExtraction } = await load();
+    const result = await runScriptExtraction(makeHarness({
+      maxChars: 5,
+      hintNote: "NOTE",
+      hint: { domain: "example.com", script: 'return { text: "0123456789" };' }
+    }));
+    expect(result.text.startsWith("NOTE\n\n")).toBe(true);
+    expect(result.text).toMatch(/Response truncated/);
+  });
+
+  it("aborts before execution when signal is aborted", async () => {
+    const { runScriptExtraction } = await load();
+    await expect(runScriptExtraction(makeHarness({ signal: { aborted: true } })))
+      .rejects.toThrow(/aborted/);
+  });
+
+  it("supports page.evaluate inside scripts", async () => {
+    const { runScriptExtraction } = await load();
+    const page = makeFakePage();
+    page.evaluate = async () => "from-dom";
+    const result = await runScriptExtraction(makeHarness({
+      page,
+      hint: { domain: "example.com", script: 'const v = await page.evaluate(() => "x"); return { text: v + "-done" };' }
+    }));
+    expect(result.text).toBe("from-dom-done");
+  });
+});

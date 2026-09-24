@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import { EXTRACTOR_FORMATS } from "./extractors/index.js";
 
@@ -191,9 +192,47 @@ export function clearDomainHintCache() {
 }
 
 export function getExtractionMethod(hint) {
+  if (typeof hint?.script === "string" && hint.script.trim()) return "script";
   if (Array.isArray(hint?.flow) && hint.flow.length > 0) return "flow";
   if (hint?.default !== undefined) return "default";
   return null;
+}
+
+export const SCRIPT_TIMEOUT_DEFAULT_MS = 30000;
+export const SCRIPT_TIMEOUT_MAX_MS = 60000;
+
+export function validateScript(script) {
+  const errors = [];
+  if (typeof script !== "string" || !script.trim()) {
+    errors.push({ field: "script", message: "script must be a non-empty string" });
+    return errors;
+  }
+  try {
+    // Scripts run wrapped as `(async () => { <script> })()` so `return` is legal —
+    // validate the wrapped form, not the bare body.
+    new vm.Script(`(async () => { ${script} })()`, { filename: "validate" });
+  } catch (e) {
+    errors.push({ field: "script", message: `script syntax error: ${e.message}` });
+  }
+  return errors;
+}
+
+function validateScriptOptions(scriptOptions, errors) {
+  if (scriptOptions === undefined) return;
+  if (!scriptOptions || typeof scriptOptions !== "object" || Array.isArray(scriptOptions)) {
+    errors.push({ field: "scriptOptions", message: "must be an object" });
+    return;
+  }
+  if (scriptOptions.timeoutMs !== undefined) {
+    if (!Number.isInteger(scriptOptions.timeoutMs) || scriptOptions.timeoutMs <= 0 || scriptOptions.timeoutMs > SCRIPT_TIMEOUT_MAX_MS) {
+      errors.push({ field: "scriptOptions.timeoutMs", message: `must be an integer between 1 and ${SCRIPT_TIMEOUT_MAX_MS}` });
+    }
+  }
+  for (const key of Object.keys(scriptOptions)) {
+    if (!["timeoutMs"].includes(key)) {
+      errors.push({ field: `scriptOptions.${key}`, message: "unknown field (must be timeoutMs only)" });
+    }
+  }
 }
 
 export function migrateHintShape(hint) {
@@ -666,7 +705,8 @@ const STABILIZE_STRATEGIES = ["none", "network_idle", "content_idle", "mutation"
 const STEP_STABILIZE_STRATEGIES = STABILIZE_STRATEGIES;
 const TOP_LEVEL_KEYS = [
   "domain", "pathPattern", "pageType", "comment", "testUrls",
-  "requireSelector", "browserEngine", "default", "flow", "flowOptions"
+  "requireSelector", "browserEngine", "default", "flow", "flowOptions",
+  "script", "scriptOptions"
 ];
 const LEGACY_TOP_LEVEL_KEYS = {
   waitForSelector: "moved into default.waitForSelector",
@@ -821,13 +861,28 @@ export function validateHintRule(hint, { scope = "static", aiModelIds = [], brow
     }
   }
 
-  const methodKeys = ["default", "flow"].filter((key) => hint[key] !== undefined);
-  if (isWildcard && hint.flow !== undefined) {
-    errors.push({ field: "flow", message: "wildcard hints only support default extraction (no flow)" });
+  const methodKeys = ["default", "flow", "script"].filter((key) => hint[key] !== undefined);
+  if (isWildcard && (hint.flow !== undefined || hint.script !== undefined)) {
+    if (hint.flow !== undefined) {
+      errors.push({ field: "flow", message: "wildcard hints only support default extraction (no flow)" });
+    }
+    if (hint.script !== undefined) {
+      errors.push({ field: "script", message: "wildcard hints only support default extraction (no script)" });
+    }
   } else if (methodKeys.length > 1) {
     for (const key of methodKeys) {
-      errors.push({ field: key, message: 'choose exactly one extraction method: "default" or "flow"' });
+      errors.push({ field: key, message: 'choose exactly one extraction method: "default", "flow", or "script"' });
     }
+  }
+
+  if (hint.script !== undefined) {
+    for (const e of validateScript(hint.script)) errors.push(e);
+  }
+  if (hint.scriptOptions !== undefined) {
+    validateScriptOptions(hint.scriptOptions, errors);
+  }
+  if (hint.scriptOptions !== undefined && hint.script === undefined) {
+    errors.push({ field: "scriptOptions", message: 'requires "script" to be set' });
   }
 
   if (hint.default !== undefined) {
