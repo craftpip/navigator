@@ -38,3 +38,26 @@ chrome-extension/chrome-extension-key.pem
 firefox-extension/dist/
 firefox-extension/dist-firefox/
 firefox-extension/firefox-profile/
+
+# Local test-bed (self-serve browser relay) — machine-specific, secrets, profiles, logs
+# All safe to ignore on fresh clone: docs-dist is rebuilt via docs:build (CI builds it too),
+# server returns 404 "Docs not available" when missing; profiles/logs/secrets are generated locally.
+docs-dist/
+testing/browsers/secrets/
+testing/browsers/chrome/profile/
+testing/browsers/chrome/smoke-profile/
+testing/browsers/chrome/logs/
+testing/browsers/firefox/profile/
+testing/browsers/firefox/logs/
+testing/browsers/firefox/screenshots/
+testing/browsers/logs/
+testing/browsers/vnc/
+testing/browsers/scripts/reg.txt
+
+# Ad-hoc debug helpers (duplicate pair, not used by src/)
+check_ops.js
+check_ops.cjs
+
+# Duplicate compose variants — tracked originals are docker-compose.cloak.yml / docker-compose.lightpanda.yml
+docker-compose.cloakbrowser.yml
+docker-compose.lightpanda-browser.yml
