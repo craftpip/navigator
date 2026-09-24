@@ -942,3 +942,135 @@ export async function loadRawDomainHints(hintsPath) {
   const entries = JSON.parse(raw);
   return Array.isArray(entries) ? entries : [];
 }
+
+// ── Managed script-hint store (plan 62) ─────────────────────────────────────
+// Runtime overlay for persisted *script* customizations, managed through the
+// `web_fetch_setup` tool. Declarative hints stay in domain-hints.json; this
+// store never touches the static file.
+
+export const MANAGED_HINT_ID_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const MANAGED_PRIORITY_DEFAULT = 50;
+const MANAGED_PRIORITY_MIN = 0;
+const MANAGED_PRIORITY_MAX = 100;
+
+let managedHintsCache = null; // { path, entries, revision }
+let managedWriteQueue = Promise.resolve();
+
+export function getManagedHintsPath(config) {
+  const custom = config?.domainHintsManagedPath || process.env.DOMAIN_HINTS_MANAGED_PATH;
+  if (custom) return path.resolve(custom);
+  return path.resolve(process.cwd(), "data", "domain-hints.managed.json");
+}
+
+export function clearManagedHintCache() {
+  managedHintsCache = null;
+}
+
+export function getManagedHintsRevision() {
+  return managedHintsCache?.revision || 0;
+}
+
+async function readManagedEntries(resolvedPath) {
+  try {
+    await fs.access(resolvedPath);
+  } catch {
+    return [];
+  }
+  const raw = await fs.readFile(resolvedPath, "utf8");
+  const entries = JSON.parse(raw);
+  return Array.isArray(entries) ? entries : [];
+}
+
+export async function loadManagedHints(hintsPath) {
+  const resolvedPath = path.resolve(hintsPath);
+  if (managedHintsCache && managedHintsCache.path === resolvedPath) return managedHintsCache;
+  const entries = await readManagedEntries(resolvedPath);
+  managedHintsCache = { path: resolvedPath, entries, revision: managedHintsCache?.revision || 0 };
+  return managedHintsCache;
+}
+
+export function validateManagedHint(hint) {
+  const errors = [];
+  const warnings = [];
+  if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
+    return { errors: [{ field: "", message: "hint must be an object" }], warnings };
+  }
+  if (typeof hint.id !== "string" || !MANAGED_HINT_ID_RE.test(hint.id)) {
+    errors.push({ field: "id", message: "required, must match /^[a-z0-9][a-z0-9-]{0,79}$/" });
+  }
+  if (hint.enabled !== undefined && typeof hint.enabled !== "boolean") {
+    errors.push({ field: "enabled", message: "must be a boolean" });
+  }
+  if (hint.priority !== undefined && (!Number.isInteger(hint.priority) || hint.priority < MANAGED_PRIORITY_MIN || hint.priority > MANAGED_PRIORITY_MAX)) {
+    errors.push({ field: "priority", message: `must be an integer between ${MANAGED_PRIORITY_MIN} and ${MANAGED_PRIORITY_MAX}` });
+  }
+  if (hint.script === undefined) {
+    errors.push({ field: "script", message: 'managed entries must carry "script" (this store holds script customizations only)' });
+  } else if (hint.default !== undefined || hint.flow !== undefined) {
+    errors.push({ field: "script", message: 'choose exactly one extraction method: managed entries support "script" only' });
+  }
+  const { errors: ruleErrors, warnings: ruleWarnings } = validateHintRule(hint, { scope: "static" });
+  errors.push(...ruleErrors);
+  warnings.push(...ruleWarnings);
+  return { errors, warnings };
+}
+
+function managedPathSpecificity(pattern) {
+  return String(pattern || "").replace(/\*/g, "").length;
+}
+
+export function sortManagedHints(entries) {
+  return [...entries]
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      const pa = Number.isInteger(a.entry?.priority) ? a.entry.priority : MANAGED_PRIORITY_DEFAULT;
+      const pb = Number.isInteger(b.entry?.priority) ? b.entry.priority : MANAGED_PRIORITY_DEFAULT;
+      if (pb !== pa) return pb - pa;
+      const sa = managedPathSpecificity(a.entry?.pathPattern);
+      const sb = managedPathSpecificity(b.entry?.pathPattern);
+      if (sb !== sa) return sb - sa;
+      return a.index - b.index;
+    })
+    .map(({ entry }) => entry);
+}
+
+export function findMatchingManagedHints(urlStr, entries) {
+  if (!urlStr || !Array.isArray(entries) || !entries.length) return [];
+  const enabled = entries.filter((e) => e && e.enabled !== false && typeof e.script === "string");
+  return sortManagedHints(findMatchingHints(urlStr, enabled));
+}
+
+export async function mutateManagedHints(hintsPath, mutator) {
+  const resolvedPath = path.resolve(hintsPath);
+  const run = async () => {
+    const before = await loadManagedHints(resolvedPath);
+    // JSON round-trip (not structuredClone): matching memoizes compiled
+    // RegExp functions (_pathMatcher) onto cached entries, which clone rejects.
+    const working = JSON.parse(JSON.stringify(before.entries));
+    const result = mutator(working) || {};
+    for (const entry of working) {
+      const { errors } = validateManagedHint(entry);
+      if (errors.length) {
+        throw new Error(`Invalid managed hint "${entry?.id || "?"}": ${errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`);
+      }
+    }
+    const dir = path.dirname(resolvedPath);
+    await fs.mkdir(dir, { recursive: true });
+    const tmpPath = path.join(dir, `.${path.basename(resolvedPath)}.tmp-${process.pid}-${Date.now()}`);
+    try {
+      await fs.writeFile(tmpPath, JSON.stringify(working, null, 2) + "\n", { mode: 0o600 });
+      await fs.rename(tmpPath, resolvedPath);
+    } catch (error) {
+      try {
+        await fs.unlink(tmpPath);
+      } catch {}
+      throw error;
+    }
+    managedHintsCache = { path: resolvedPath, entries: working, revision: (managedHintsCache?.revision || 0) + 1 };
+    clearDomainHintCache();
+    return { entries: working, revision: managedHintsCache.revision, ...result };
+  };
+  const queued = managedWriteQueue.then(run, run);
+  managedWriteQueue = queued.catch(() => {});
+  return queued;
+}

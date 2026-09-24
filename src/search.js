@@ -16,7 +16,7 @@ import {
   recordSearchStart,
   searchContext
 } from "./activity.js";
-import { findMatchingHints, getDomainHints, getWildcardHint, FLOW_TOTAL_TIMEOUT_MAX, SCRIPT_TIMEOUT_DEFAULT_MS, SCRIPT_TIMEOUT_MAX_MS } from "./domain-hints.js";
+import { findMatchingHints, findMatchingManagedHints, getDomainHints, getWildcardHint, loadManagedHints, getManagedHintsPath, FLOW_TOTAL_TIMEOUT_MAX, SCRIPT_TIMEOUT_DEFAULT_MS, SCRIPT_TIMEOUT_MAX_MS } from "./domain-hints.js";
 import { htmlToMarkdown } from "./markdown.js";
 import { getEngineDriver, getEngineMetadata, SUPPORTED_ENGINES } from "./engines/index.js";
 import { fetchDuckDuckGoInstantAnswers } from "./engines/instant-answers.js";
@@ -2215,7 +2215,7 @@ export async function runScriptExtraction({ page, hint, config, maxChars, debug,
   return result;
 }
 
-export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "" }) {
+export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "", requestScript = null, requestScriptOptions }) {
   const tOverall = performance.now();
   activityCounters.fetches += 1;
   incrementUsageTotal("fetches");
@@ -2253,6 +2253,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       let hintCandidates = [];
       let hintNote = "";
       let hints = [];
+      let managedEntries = [];
 
       if (hintOverride) {
         hint = hintOverride;
@@ -2260,6 +2261,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       } else {
         hints = await operation.step("load_domain_hints", () => getDomainHints(manager.config));
         hintCandidates = findMatchingHints(url, hints);
+        managedEntries = (await operation.step("load_managed_hints", () => loadManagedHints(getManagedHintsPath(manager.config)))).entries;
       }
       debugLog("load_domain_hints", t);
 
@@ -2283,8 +2285,11 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       const requestedBrowser = browser || hintBrowserEngine;
 
       const cached = typeof cachedHtml === "string" && cachedHtml.length > 0 ? cachedHtml : null;
-      // Script hints always need a live browser page — never serve them from cached HTML.
-      const mayNeedScript = Boolean(hint?.script) || hintCandidates.some((h) => h?.script);
+      // Script runs always need a live browser page — never serve them from cached HTML.
+      // (Request scripts bypass the cache entirely; stored script hints skip replay.)
+      const hasRequestScript = typeof requestScript === "string" && requestScript.trim().length > 0;
+      const managedCandidates = hintOverride ? [] : findMatchingManagedHints(url, managedEntries);
+      const mayNeedScript = hasRequestScript || managedCandidates.length > 0 || Boolean(hint?.script) || hintCandidates.some((h) => h?.script);
       if (cached && !mayNeedScript && hint?.flow?.length && isSnapshotReplayableFlow(hint.flow)) {
         const tCache = performance.now();
         const replayed = await operation.wait("cached_flow_replay", () => replayFlowFromSnapshot({
@@ -2428,13 +2433,55 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             if (hint && debug) console.log(`[web_fetch] [${url}] hint=wildcard_default (candidates matched nothing)`);
           }
 
-          if (hint?.script) {
+          if (hasRequestScript) {
+            if (debug) console.log(`[web_fetch] [${url}] hint=request_script (per-call, wins over stored hints)`);
+            let requestDomain = "";
+            try {
+              requestDomain = new URL(url).hostname.toLowerCase();
+            } catch {}
             const scriptHtml = captureHtml
               ? await withPageTimeout("script_html", () => page.content())
               : null;
             const scriptResult = await withOperationDeadline("script_extraction", () => runScriptExtraction({
               page,
-              hint,
+              hint: { domain: requestDomain, script: requestScript, scriptOptions: requestScriptOptions },
+              config: manager.config,
+              maxChars,
+              debug,
+              debugLog,
+              withPageTimeout,
+              withOperationDeadline,
+              operationTimeoutMs,
+              includeSeoAnalysis,
+              hintNote,
+              startTime: tOverall,
+              defaultExtractSkipSelectors,
+              signal: operation.signal
+            }));
+            if (scriptHtml && !scriptResult.error) {
+              return { ...scriptResult, html: scriptHtml, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
+            }
+            return { ...scriptResult, browser: usedBrowser, ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}) };
+          }
+
+          // Managed scripts overlay static hints: first DOM-matching managed
+          // entry wins over any static flow/default/script hint.
+          let managedHint = null;
+          if (!hasRequestScript && !hintOverride && managedCandidates.length) {
+            t = performance.now();
+            managedHint = await withPageTimeout("resolve_managed_hint", () => firstMatchingHint(page, managedCandidates));
+            debugLog("resolve_managed_hint", t);
+          }
+
+          const scriptHint = managedHint || (hint?.script ? hint : null);
+          if (debug && managedHint) console.log(`[web_fetch] [${url}] hint=managed_script (${managedHint.id})`);
+          if (scriptHint) {
+            const scriptHtml = captureHtml
+              ? await withPageTimeout("script_html", () => page.content())
+              : null;
+            const scriptResult = await withOperationDeadline("script_extraction", () => runScriptExtraction({
+              page,
+              hint: scriptHint,
               config: manager.config,
               maxChars,
               debug,

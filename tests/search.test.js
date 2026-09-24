@@ -1848,4 +1848,82 @@ describe("runScriptExtraction (plan 43)", () => {
     }));
     expect(result.text).toBe("from-dom-done");
   });
+
+  it("prefers the per-call request script over a stored script hint", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "reqscript-"));
+    const hintsPath = path.join(dir, "domain-hints.json");
+    await fs.writeFile(hintsPath, JSON.stringify([
+      { domain: "example.com", pathPattern: "/**", pageType: "p", comment: "stored", script: 'return { text: "STORED" };' }
+    ]));
+    const fakePage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: () => "https://example.com/page",
+      title: vi.fn().mockResolvedValue("Example"),
+      content: vi.fn().mockResolvedValue("<html><body>hi</body></html>"),
+      evaluate: vi.fn((fn) => Promise.resolve(String(fn).includes("warnings") ? [] : null)),
+      waitForNetworkIdle: vi.fn().mockResolvedValue(undefined),
+      isClosed: () => true,
+      close: vi.fn()
+    };
+    mockGetBrowserManager.mockResolvedValue({
+      config: makeMockConfig({ domainHintsPath: hintsPath }),
+      withPageSlot: (fn) => fn(),
+      newPage: async () => fakePage
+    });
+    const { browserOpenAndExtract } = await load();
+    const req = await browserOpenAndExtract({
+      url: "https://example.com/page", maxChars: 9000, includeSeoAnalysis: false,
+      requestScript: 'return { text: "REQUEST" };'
+    });
+    expect(req.text).toContain("REQUEST");
+    expect(req.text).not.toContain("STORED");
+    const stored = await browserOpenAndExtract({
+      url: "https://example.com/page", maxChars: 9000, includeSeoAnalysis: false
+    });
+    expect(stored.text).toContain("STORED");
+  });
+
+  it("prefers a managed script over a stored static script, and falls back on selector miss", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "managed-dispatch-"));
+    const hintsPath = path.join(dir, "domain-hints.json");
+    await fs.writeFile(hintsPath, JSON.stringify([
+      { domain: "example.com", pathPattern: "/**", pageType: "p", comment: "static", script: 'return { text: "STATIC" };' }
+    ]));
+    const managedPath = path.join(dir, "domain-hints.managed.json");
+    await fs.writeFile(managedPath, JSON.stringify([
+      { id: "ex-v1", domain: "example.com", pathPattern: "/**", pageType: "p", comment: "managed", script: 'return { text: "MANAGED" };' }
+    ]));
+    const fakePage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: () => "https://example.com/page",
+      title: vi.fn().mockResolvedValue("Example"),
+      content: vi.fn().mockResolvedValue("<html><body>hi</body></html>"),
+      evaluate: vi.fn((fn) => Promise.resolve(String(fn).includes("warnings") ? [] : null)),
+      waitForNetworkIdle: vi.fn().mockResolvedValue(undefined),
+      isClosed: () => true,
+      close: vi.fn()
+    };
+    mockGetBrowserManager.mockResolvedValue({
+      config: makeMockConfig({ domainHintsPath: hintsPath, domainHintsManagedPath: managedPath }),
+      withPageSlot: (fn) => fn(),
+      newPage: async () => fakePage
+    });
+    const { browserOpenAndExtract } = await load();
+    const managed = await browserOpenAndExtract({
+      url: "https://example.com/page", maxChars: 9000, includeSeoAnalysis: false
+    });
+    expect(managed.text).toContain("MANAGED");
+    expect(managed.text).not.toContain("STATIC");
+
+    await fs.writeFile(managedPath, JSON.stringify([
+      { id: "ex-gated", domain: "example.com", pathPattern: "/**", pageType: "p", comment: "gated", requireSelector: ".missing", script: 'return { text: "GATED" };' }
+    ]));
+    const { clearManagedHintCache } = await import("../src/domain-hints.js");
+    clearManagedHintCache();
+    const fallback = await browserOpenAndExtract({
+      url: "https://example.com/page", maxChars: 9000, includeSeoAnalysis: false
+    });
+    expect(fallback.text).toContain("STATIC");
+    expect(fallback.text).not.toContain("GATED");
+  });
 });

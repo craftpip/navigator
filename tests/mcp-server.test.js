@@ -1017,7 +1017,7 @@ describe("mcp-server HTTP endpoints", () => {
       const webFetch = body.result.tools.find((tool) => tool.name === "web_fetch");
       expect(webFetch.inputSchema.additionalProperties).toBe(false);
       expect(Object.keys(webFetch.inputSchema.properties).sort()).toEqual([
-        "browser", "bypassCache", "maxChars", "ref_ids", "urls"
+        "browser", "bypassCache", "maxChars", "ref_ids", "script", "scriptOptions", "urls"
       ]);
     });
 
@@ -1492,6 +1492,173 @@ describe("mcp-server HTTP endpoints", () => {
       const message = body.result.isError ? body.result.content[0].text : JSON.stringify(body);
       expect(message).toContain("Too many URLs");
       expect(message).toContain("max 10");
+    });
+
+    it("rejects a web_fetch script with a multi-URL batch", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 171, method: "tools/call",
+        params: {
+          name: "web_fetch",
+          arguments: { urls: ["https://a.example.com", "https://b.example.com"], script: 'return { text: "x" };' },
+        },
+      });
+      expect(status).toBe(200);
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toMatch(/single URL/);
+    });
+
+    it("rejects an invalid web_fetch script before opening a browser", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserOpenAndExtract.mockReset();
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 172, method: "tools/call",
+        params: {
+          name: "web_fetch",
+          arguments: { url: "https://example.com", script: "return {{{" },
+        },
+      });
+      expect(status).toBe(200);
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toMatch(/Invalid web_fetch script/);
+      expect(searchMod.browserOpenAndExtract).not.toHaveBeenCalled();
+    });
+
+    it("runs a per-call web_fetch script and never caches it", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserOpenAndExtract.mockReset();
+      searchMod.browserOpenAndExtract.mockResolvedValue({
+        text: "script output",
+        title: "Script Page",
+        url: "https://script.example.com"
+      });
+      const args = { url: "https://script.example.com", script: 'return { text: "script output" };', scriptOptions: { timeoutMs: 5000 } };
+      for (const id of [173, 174]) {
+        const { status, body } = await mcpPost({
+          jsonrpc: "2.0", id, method: "tools/call",
+          params: { name: "web_fetch", arguments: args },
+        });
+        expect(status).toBe(200);
+        expect(body.result.content[0].text).toContain("script output");
+      }
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(2);
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledWith(expect.objectContaining({
+        url: "https://script.example.com",
+        requestScript: 'return { text: "script output" };',
+        requestScriptOptions: { timeoutMs: 5000 }
+      }));
+    });
+
+    describe("web_fetch_setup (plan 62)", () => {
+      async function sharedManager() {
+        const browserMod = await import("../src/browser.js");
+        return browserMod.getBrowserManager.mock.results[0].value;
+      }
+
+      async function enableSetup() {
+        const manager = await sharedManager();
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "setup-unit-"));
+        manager.config.enableDomainHintManagement = true;
+        manager.config.domainHintsManagedPath = path.join(dir, "domain-hints.managed.json");
+        return manager;
+      }
+
+      async function disableSetup() {
+        const manager = await sharedManager();
+        manager.config.enableDomainHintManagement = false;
+        delete manager.config.domainHintsManagedPath;
+        const { clearManagedHintCache } = await import("../src/domain-hints.js");
+        clearManagedHintCache();
+      }
+
+      async function setupCall(args, id = 200) {
+        const { status, body } = await mcpPost({
+          jsonrpc: "2.0", id, method: "tools/call",
+          params: { name: "web_fetch_setup", arguments: args },
+        });
+        expect(status).toBe(200);
+        return body;
+      }
+
+      const setupHint = (overrides = {}) => ({
+        id: "ex-1h-v1",
+        domain: "example.com",
+        pathPattern: "/*",
+        pageType: "chart",
+        comment: "reads 1H series",
+        script: 'return { text: "hi" };',
+        ...overrides
+      });
+
+      it("is hidden from tools/list and rejected when disabled", async () => {
+        await disableSetup();
+        const { body } = await mcpPost({ jsonrpc: "2.0", id: 201, method: "tools/list" });
+        expect(body.result.tools.map((t) => t.name)).not.toContain("web_fetch_setup");
+        const direct = await setupCall({ operation: "list" }, 202);
+        expect(direct.result.isError).toBe(true);
+        expect(direct.result.content[0].text).toMatch(/disabled/);
+      });
+
+      it("appears in tools/list with a closed schema when enabled", async () => {
+        await enableSetup();
+        try {
+          const { body } = await mcpPost({ jsonrpc: "2.0", id: 203, method: "tools/list" });
+          const tool = body.result.tools.find((t) => t.name === "web_fetch_setup");
+          expect(tool).toBeDefined();
+          expect(tool.inputSchema.additionalProperties).toBe(false);
+          expect(tool.inputSchema.required).toEqual(["operation"]);
+        } finally {
+          await disableSetup();
+        }
+      });
+
+      it("runs validate → upsert → get → disable → remove", async () => {
+        await enableSetup();
+        try {
+          const bad = await setupCall({ operation: "validate", hint: setupHint({ id: "BAD!" }) }, 204);
+          expect(JSON.parse(bad.result.content[0].text).valid).toBe(false);
+
+          const upserted = await setupCall({ operation: "upsert", hint: setupHint() }, 205);
+          const saved = JSON.parse(upserted.result.content[0].text);
+          expect(saved.id).toBe("ex-1h-v1");
+          expect(saved.source).toBe("managed");
+
+          const listed = await setupCall({ operation: "list" }, 206);
+          const listBody = JSON.parse(listed.result.content[0].text);
+          expect(listBody.hints.map((h) => h.id)).toEqual(["ex-1h-v1"]);
+          expect(listBody.hints[0]).not.toHaveProperty("script");
+
+          const got = await setupCall({ operation: "get", url: "https://example.com/feat" }, 207);
+          expect(JSON.parse(got.result.content[0].text).source).toBe("managed");
+
+          const missing = await setupCall({ operation: "get", url: "https://other.com/x" }, 208);
+          expect(JSON.parse(missing.result.content[0].text).source).toBe("none");
+
+          const disabled = await setupCall({ operation: "disable", id: "ex-1h-v1" }, 209);
+          expect(JSON.parse(disabled.result.content[0].text).enabled).toBe(false);
+          const afterDisable = await setupCall({ operation: "get", url: "https://example.com/feat" }, 210);
+          expect(JSON.parse(afterDisable.result.content[0].text).source).toBe("none");
+
+          const removed = await setupCall({ operation: "remove", id: "ex-1h-v1" }, 211);
+          expect(JSON.parse(removed.result.content[0].text).removed).toBe(true);
+          const afterRemove = await setupCall({ operation: "list" }, 212);
+          expect(JSON.parse(afterRemove.result.content[0].text).hints).toEqual([]);
+        } finally {
+          await disableSetup();
+        }
+      });
+
+      it("rejects unknown ids and missing upsert fields", async () => {
+        await enableSetup();
+        try {
+          const noHint = await setupCall({ operation: "disable", id: "nope" }, 213);
+          expect(noHint.result.isError).toBe(true);
+          const missingField = await setupCall({ operation: "upsert", hint: { id: "x" } }, 214);
+          expect(missingField.result.isError).toBe(true);
+          expect(missingField.result.content[0].text).toMatch(/hint\.domain/);
+        } finally {
+          await disableSetup();
+        }
+      });
     });
 
     it("handles web_fetch with extractLinks", async () => {

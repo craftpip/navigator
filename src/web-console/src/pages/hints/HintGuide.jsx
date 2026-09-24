@@ -184,6 +184,8 @@ export function HintGuide() {
                 Replace default extraction with arbitrary JavaScript against the live
                 page — for SPAs, chart data, or aggregation the step vocabulary cannot
                 express. Returns <code>{`{ text, title?, url?, tables?, links?, warnings? }`}</code>.
+                One-offs go in <code>web_fetch</code>'s <code>script</code> param;
+                persists go in <code>web_fetch_setup</code>.
               </td>
               <td>
                 read KPI cards via <code>page.evaluate()</code>, return markdown

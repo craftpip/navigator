@@ -62,10 +62,20 @@ Opens pages and returns cleaned, readable text content.
 - `ref_ids: number[]` — Multiple references
 - `maxChars: number` (default `90000`) — Maximum characters per page
 - `bypassCache: boolean` (default `false`) — Skip cached data and refresh the response
+- `script: string` — Per-call extraction script (same sandbox + result schema as script hints). Single-target only (rejected with `urls`/`ref_ids` batches), never persisted, never cached. Wins over every stored hint method.
+- `scriptOptions: { timeoutMs }` (default `30000`, max `60000`)
 
 **Output:** Per-item success/error with readable text, tables, warnings, and a page reference. The page's extractor (set by the domain hint, see the Domain Hints workflow) decides how content is rendered — tables are that extractor's job, not a separate flag. Links are shown inline as `[text](ref_id)`; resolve them with `web_page_links(ref_ids: [link_ref_id])`, then fetch with `web_fetch(ref_ids: [link_ref_id])`.
 
+**Script precedence (first match wins):** request `script` → `web_fetch_setup` persisted script → static `script` hint → flow / default / generic.
+
 **Extractor formats** (`default.format`, or per-block `format` in flows) — the drop-downs are labeled **Extractor**: `text` (flat dump) · `html` (raw HTML in a ```html fence) · `html_to_markdown` (whole page → markdown) · `readability_to_markdown` (Readability strips nav/ads → markdown, default) · `table` / `table_json` / `table_csv` (tables-only output) · `list` (blocks only) · any configured **AI Model** id (page/element HTML sent to an AI model → markdown; falls back to `html_to_markdown` on failure or if the model isn't configured). Requests using an AI-model extractor bypass the web_fetch result cache (each call re-runs the model). Serving the model is a separate concern — navigator POSTs to either `<baseUrl>/chat/completions` (OpenAI-compatible, `kind: "chat"` — e.g. reader-lm) or `<baseUrl>/extract` (`kind: "mineru"` — the MinerU-HTML v1.1 GPU sidecar, see `docker/navigator-mineru/`). Note `jinaai/reader-lm-0.5b` is **CC-BY-NC-4.0** (non-commercial); the MinerU-HTML model carries the Tencent Hunyuan Community License.
+
+### `web_fetch_setup`
+
+Manage persisted page-extraction script customizations. Only advertised when `ENABLE_DOMAIN_HINT_MANAGEMENT=1` (default off); direct calls reject when disabled. Backed by the managed hint store (`DOMAIN_HINTS_MANAGED_PATH`, default `<cwd>/data/domain-hints.managed.json`) — declarative hints stay in `domain-hints.json`, which runtime never touches. Every mutation bumps a revision and clears the `web_fetch` cache. Script bodies are redacted in error telemetry.
+
+**Operations:** `list` (managed scripts only) · `get` (effective script for a URL + `managed`/`static`/`none` source) · `validate` (schema + syntax check, no change) · `upsert` (create/replace by `id`: `id`/`domain`/`pathPattern`/`pageType`/`comment`/`script` required) · `disable` (kept, stops matching) · `remove` (deleted).
 
 ---
 

@@ -504,6 +504,10 @@ export async function loadConfig() {
     enableLinkRefs: parseBoolean(process.env.LINK_REFS, true),
     disableTools: parseToolList(process.env.DISABLE_TOOLS),
     domainHintsPath,
+    enableDomainHintManagement: parseBoolean(process.env.ENABLE_DOMAIN_HINT_MANAGEMENT, false),
+    domainHintsManagedPath: process.env.DOMAIN_HINTS_MANAGED_PATH
+      ? path.resolve(process.env.DOMAIN_HINTS_MANAGED_PATH)
+      : path.resolve(process.cwd(), "data", "domain-hints.managed.json"),
     searchRouteWarmupEngines: process.env.SEARCH_ROUTE_WARMUP_ENGINES === undefined
       ? ["brave", "duckduckgo_api", "duckduckgo"]
       : parseEngines(process.env.SEARCH_ROUTE_WARMUP_ENGINES, []),

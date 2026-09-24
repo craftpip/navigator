@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import { findDomainHint, findMatchingHints, getDomainHints, getExtractionMethod, loadDomainHints, loadRawDomainHints, migrateHintShape, saveDomainHints, validateHintRule, validateScript } from "../src/domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript } from "../src/domain-hints.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hintsPath = path.join(projectRoot, "domain-hints.json");
@@ -937,5 +937,94 @@ describe("validateScript and script hints (plan 43)", () => {
     );
     expect(warnings.map((w) => w.field)).not.toContain("script");
     expect(warnings.map((w) => w.field)).not.toContain("scriptOptions");
+  });
+});
+
+describe("managed script-hint store (plan 62)", () => {
+  const managedHint = (overrides = {}) => ({
+    id: "ex-chart-v1",
+    domain: "example.com",
+    pathPattern: "/*",
+    pageType: "chart",
+    comment: "reads series",
+    script: 'return { text: "hi" };',
+    ...overrides
+  });
+
+  it("validateManagedHint accepts a full entry and rejects bad ids", () => {
+    expect(validateManagedHint(managedHint()).errors).toEqual([]);
+    for (const bad of ["BAD", "x!", "", 42]) {
+      const { errors } = validateManagedHint(managedHint({ id: bad }));
+      expect(errors.map((e) => e.field)).toContain("id");
+    }
+  });
+
+  it("validateManagedHint requires script and rejects default/flow entries", () => {
+    const noScript = validateManagedHint({ ...managedHint(), script: undefined });
+    expect(noScript.errors.map((e) => e.field)).toContain("script");
+    const withDefault = validateManagedHint({ ...managedHint(), default: {} });
+    expect(withDefault.errors.map((e) => e.field)).toContain("script");
+  });
+
+  it("validateManagedHint bounds priority and validates the script body", () => {
+    const badPriority = validateManagedHint(managedHint({ priority: 101 }));
+    expect(badPriority.errors.map((e) => e.field)).toContain("priority");
+    const badScript = validateManagedHint(managedHint({ script: "return {{{" }));
+    expect(badScript.errors.map((e) => e.field)).toContain("script");
+  });
+
+  it("sortManagedHints orders by priority, then specificity, then file order", () => {
+    const sorted = sortManagedHints([
+      managedHint({ id: "a-generic", pathPattern: "/**", priority: 50 }),
+      managedHint({ id: "b-specific", pathPattern: "/*/*", priority: 50 }),
+      managedHint({ id: "c-urgent", pathPattern: "/**", priority: 90 })
+    ]);
+    expect(sorted.map((h) => h.id)).toEqual(["c-urgent", "b-specific", "a-generic"]);
+  });
+
+  it("findMatchingManagedHints skips disabled entries and non-script rows", () => {
+    const entries = [
+      managedHint({ id: "off", enabled: false }),
+      { id: "decl", domain: "example.com", pathPattern: "/*", default: {} },
+      managedHint({ id: "on" })
+    ];
+    expect(findMatchingManagedHints("https://example.com/x", entries).map((h) => h.id)).toEqual(["on"]);
+    expect(findMatchingManagedHints("https://other.com/x", entries)).toEqual([]);
+  });
+
+  it("mutateManagedHints round-trips atomically with revision bumps", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "managed-unit-"));
+    const storePath = path.join(dir, "domain-hints.managed.json");
+    clearManagedHintCache();
+    const first = await mutateManagedHints(storePath, (working) => {
+      working.push(managedHint());
+      return { id: "ex-chart-v1" };
+    });
+    expect(first.revision).toBe(1);
+    expect(first.id).toBe("ex-chart-v1");
+    const loaded = await loadManagedHints(storePath);
+    expect(loaded.entries).toHaveLength(1);
+    expect(loaded.revision).toBe(1);
+    const second = await mutateManagedHints(storePath, (working) => {
+      working[0].priority = 80;
+    });
+    expect(second.revision).toBe(2);
+    expect((await loadManagedHints(storePath)).entries[0].priority).toBe(80);
+  });
+
+  it("mutateManagedHints rejects invalid mutations without touching disk", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "managed-unit-"));
+    const storePath = path.join(dir, "domain-hints.managed.json");
+    clearManagedHintCache();
+    await expect(mutateManagedHints(storePath, (working) => {
+      working.push(managedHint({ id: "BAD ID!" }));
+    })).rejects.toThrow(/Invalid managed hint/);
+    const { entries } = await loadManagedHints(storePath);
+    expect(entries).toEqual([]);
+  });
+
+  it("getManagedHintsPath prefers config, then env, then the data default", () => {
+    expect(getManagedHintsPath({ domainHintsManagedPath: "/tmp/custom.json" })).toBe("/tmp/custom.json");
+    expect(getManagedHintsPath({})).toMatch(/data[/\\]domain-hints\.managed\.json$/);
   });
 });

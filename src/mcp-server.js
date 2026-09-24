@@ -32,7 +32,7 @@ import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
-import { findDomainHint, getDomainHints, loadRawDomainHints, saveDomainHints, validateHintRule, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 
 const require = createRequire(import.meta.url);
@@ -1171,6 +1171,12 @@ export function redactArgs(args = {}) {
       out[key] = "[REDACTED]";
     } else if (key === "text" && typeof value === "string") {
       out[key] = `<${value.length} chars>`;
+    } else if (key === "script" && typeof value === "string") {
+      out[key] = `<${value.length} chars>`;
+    } else if (key === "hint" && value && typeof value === "object" && !Array.isArray(value)) {
+      out[key] = typeof value.script === "string"
+        ? { ...value, script: `<${value.script.length} chars>` }
+        : value;
     } else {
       out[key] = typeof value === "string" && value.length > 200 ? `${value.slice(0, 200)}...` : value;
     }
@@ -1903,7 +1909,8 @@ async function openTargetsParallel(targetUrls, maxParallel, includeSeoAnalysis =
           hintOverride: opts?.hintOverride || null,
           cachedHtml: opts?.cachedHtmlByUrl?.get(targetUrl) || null,
           captureHtml: opts?.captureHtml === true,
-          browser: opts?.browser || ""
+          browser: opts?.browser || "",
+          ...(opts?.requestScript != null ? { requestScript: opts.requestScript, requestScriptOptions: opts.requestScriptOptions } : {})
         });
         if (debug) console.log(`[web_fetch] [${targetUrl}] openTargetsParallel process (post-extract): ${Math.round(performance.now() - tUrl)}ms`);
         const result = {
@@ -2101,6 +2108,18 @@ function getToolsListResponse(allowedTools = null) {
               default: false,
               description: "Skip cached data and refresh the cached response"
             },
+            script: {
+              type: "string",
+              description: "Per-call extraction script (plan 62): arbitrary JavaScript run against the live page, same sandbox and result schema as script hints. Single-target only, never persisted, never cached. Mutually exclusive with stored hint methods — the request script wins."
+            },
+            scriptOptions: {
+              type: "object",
+              properties: {
+                timeoutMs: { type: "number", description: "Hard execution limit in ms, 1–60000. Default 30000." }
+              },
+              additionalProperties: false,
+              description: "Options for the per-call script (timeoutMs only)."
+            },
             browser: {
               type: "string",
               description: "Browser to use (chromium default, or an add-on name from list_browsers). Defaults to the matching hint's browserEngine. NOTE: a navigator-cdp browser (ownership \"user\") is the user's real, visible, non-headless window."
@@ -2287,6 +2306,39 @@ function getToolsListResponse(allowedTools = null) {
           additionalProperties: false
         }
       },
+      ...(manager?.config?.enableDomainHintManagement
+        ? [
+            {
+              name: "web_fetch_setup",
+              description:
+                "Manage persisted page-extraction script customizations (plan 62). Backed by the managed hint store; declarative hints stay in domain-hints.json. Operations: list (managed scripts only), get (effective script for a URL + source), validate (schema + syntax check, no change), upsert (create/replace by id), disable (keep rule, stop matching), remove (delete). Only advertised when ENABLE_DOMAIN_HINT_MANAGEMENT=1.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  operation: {
+                    type: "string",
+                    enum: ["list", "get", "validate", "upsert", "disable", "remove"],
+                    description: "Operation to perform"
+                  },
+                  id: {
+                    type: "string",
+                    description: "Managed hint id for disable/remove (upsert reads id from hint.id)"
+                  },
+                  url: {
+                    type: "string",
+                    description: "URL for the get operation (reports the effective script + source)"
+                  },
+                  hint: {
+                    type: "object",
+                    description: "Script hint for validate/upsert: { id, domain, pathPattern, pageType, comment, requireSelector?, browserEngine?, testUrls?, script, scriptOptions? }"
+                  }
+                },
+                required: ["operation"],
+                additionalProperties: false
+              }
+            }
+          ]
+        : []),
       {
         name: "list_browsers",
         description:
@@ -2386,7 +2438,27 @@ async function handleToolCallInner(name, args = {}) {
     }
     mark = timer.step("resolve_targets", mark);
 
-    const cached = bypassCache ? null : await getCachedToolResult(name, cacheKeyArgs);
+    // Per-call script (plan 62): single-target only, validated before any
+    // navigation, never served from or written to the tool-result cache.
+    const hasRequestScript = args.script !== undefined;
+    let requestScript = null;
+    let requestScriptOptions;
+    if (hasRequestScript) {
+      if (targetUrls.length !== 1) {
+        throw new Error("web_fetch script applies to a single URL only — retry with one url (or ref_id resolving to one URL), not a urls/ref_ids batch");
+      }
+      const scriptValidation = validateHintRule(
+        { script: args.script, ...(args.scriptOptions !== undefined ? { scriptOptions: args.scriptOptions } : {}) },
+        { scope: "test" }
+      );
+      if (scriptValidation.errors.length) {
+        throw new Error(`Invalid web_fetch script: ${scriptValidation.errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`);
+      }
+      requestScript = args.script;
+      requestScriptOptions = args.scriptOptions;
+    }
+
+    const cached = bypassCache || hasRequestScript ? null : await getCachedToolResult(name, cacheKeyArgs);
     if (cached) {
       const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
       const truncated = truncateResultsText(cached, maxChars);
@@ -2399,16 +2471,133 @@ async function handleToolCallInner(name, args = {}) {
     const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     mark = timer.step("prepare_execution", mark);
     const fullResult = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "" })
+      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "", ...(hasRequestScript ? { requestScript, requestScriptOptions } : {}) })
     );
     mark = timer.step("open_targets", mark);
-    await setCachedToolResult(name, cacheKeyArgs, fullResult);
-    timer.step("cache_store", mark);
+    if (!hasRequestScript) {
+      await setCachedToolResult(name, cacheKeyArgs, fullResult);
+      timer.step("cache_store", mark);
+    }
     const truncated = truncateResultsText(fullResult, maxChars);
     const response = formatOpenPageResponse(truncated);
     mark = timer.step("format_response", mark);
     timer.end({ cacheHit: false, status: "ok" });
     return response;
+  }
+
+  if (name === "web_fetch_setup") {
+    const setupManager = await getBrowserManager();
+    if (!setupManager?.config?.enableDomainHintManagement) {
+      throw new Error('Tool "web_fetch_setup" is disabled (set ENABLE_DOMAIN_HINT_MANAGEMENT=1 to enable it).');
+    }
+    const storePath = getManagedHintsPath(setupManager.config);
+    const operation = args.operation;
+    if (!["list", "get", "validate", "upsert", "disable", "remove"].includes(operation)) {
+      throw new Error('web_fetch_setup requires operation to be one of "list", "get", "validate", "upsert", "disable", "remove"');
+    }
+    const asJson = (value) => ({
+      content: [{ type: "text", text: JSON.stringify(value, null, 2) }]
+    });
+    const summarize = (entry) => ({
+      id: entry.id,
+      enabled: entry.enabled !== false,
+      priority: Number.isInteger(entry.priority) ? entry.priority : 50,
+      domain: entry.domain,
+      pathPattern: entry.pathPattern,
+      pageType: entry.pageType,
+      comment: entry.comment,
+      scriptChars: typeof entry.script === "string" ? entry.script.length : 0,
+      ...(entry.requireSelector ? { requireSelector: entry.requireSelector } : {}),
+      ...(entry.updatedAt ? { updatedAt: entry.updatedAt } : {})
+    });
+
+    if (operation === "list") {
+      const { entries, revision } = await loadManagedHints(storePath);
+      return asJson({ revision, hints: entries.map(summarize) });
+    }
+
+    if (operation === "get") {
+      if (typeof args.url !== "string" || !args.url.trim()) {
+        throw new Error('web_fetch_setup get requires "url"');
+      }
+      const { entries, revision } = await loadManagedHints(storePath);
+      const managed = findMatchingManagedHints(args.url, entries);
+      const statics = await getDomainHints(setupManager.config);
+      const staticMatch = findMatchingHints(args.url, statics)[0] || null;
+      if (managed.length) {
+        return asJson({ source: "managed", revision, hint: summarize(managed[0]) });
+      }
+      if (staticMatch?.script) {
+        return asJson({ source: "static", revision, hint: { domain: staticMatch.domain, pathPattern: staticMatch.pathPattern, pageType: staticMatch.pageType } });
+      }
+      return asJson({ source: staticMatch ? "static" : "none", revision, hint: null });
+    }
+
+    if (operation === "validate") {
+      if (!args.hint || typeof args.hint !== "object" || Array.isArray(args.hint)) {
+        throw new Error('web_fetch_setup validate requires "hint" (object)');
+      }
+      const { errors, warnings } = validateManagedHint(args.hint);
+      return asJson({ valid: errors.length === 0, errors, warnings });
+    }
+
+    if (operation === "upsert") {
+      const hint = args.hint;
+      if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
+        throw new Error('web_fetch_setup upsert requires "hint" (object with id, domain, pathPattern, pageType, comment, script)');
+      }
+      for (const field of ["id", "domain", "pathPattern", "pageType", "comment", "script"]) {
+        if (hint[field] === undefined) {
+          throw new Error(`web_fetch_setup upsert requires hint.${field}`);
+        }
+      }
+      const now = new Date().toISOString();
+      const { entries, revision } = await mutateManagedHints(storePath, (working) => {
+        const at = working.findIndex((e) => e?.id === hint.id);
+        const previous = at >= 0 ? working[at] : null;
+        const saved = {
+          ...hint,
+          enabled: hint.enabled !== false,
+          priority: Number.isInteger(hint.priority) ? hint.priority : 50,
+          createdAt: previous?.createdAt || now,
+          updatedAt: now
+        };
+        if (at >= 0) working[at] = saved;
+        else working.push(saved);
+        return { id: saved.id, created: !previous };
+      });
+      toolResultCache.web_fetch.clear();
+      const saved = entries.find((e) => e?.id === hint.id);
+      return asJson({ id: hint.id, source: "managed", revision, hint: summarize(saved) });
+    }
+
+    if (operation === "disable") {
+      if (typeof args.id !== "string" || !args.id) {
+        throw new Error('web_fetch_setup disable requires "id"');
+      }
+      const { revision } = await mutateManagedHints(storePath, (working) => {
+        const entry = working.find((e) => e?.id === args.id);
+        if (!entry) throw new Error(`No managed hint with id "${args.id}"`);
+        entry.enabled = false;
+        entry.updatedAt = new Date().toISOString();
+        return { id: args.id };
+      });
+      toolResultCache.web_fetch.clear();
+      return asJson({ id: args.id, source: "managed", revision, enabled: false });
+    }
+
+    // remove
+    if (typeof args.id !== "string" || !args.id) {
+      throw new Error('web_fetch_setup remove requires "id"');
+    }
+    const { revision: removeRevision } = await mutateManagedHints(storePath, (working) => {
+      const at = working.findIndex((e) => e?.id === args.id);
+      if (at < 0) throw new Error(`No managed hint with id "${args.id}"`);
+      working.splice(at, 1);
+      return { id: args.id };
+    });
+    toolResultCache.web_fetch.clear();
+    return asJson({ id: args.id, source: "managed", revision: removeRevision, removed: true });
   }
 
   if (name === "web_page_screenshot") {
