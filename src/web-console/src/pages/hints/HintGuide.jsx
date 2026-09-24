@@ -178,6 +178,17 @@ export function HintGuide() {
                 select a dropdown, wait, then extract the result container
               </td>
             </tr>
+            <tr>
+              <td>Script</td>
+              <td>
+                Replace default extraction with arbitrary JavaScript against the live
+                page — for SPAs, chart data, or aggregation the step vocabulary cannot
+                express. Returns <code>{`{ text, title?, url?, tables?, links?, warnings? }`}</code>.
+              </td>
+              <td>
+                read KPI cards via <code>page.evaluate()</code>, return markdown
+              </td>
+            </tr>
           </tbody>
         </table>
         <h4 className="hint-guide-subhead">A complete example — GitHub repo page</h4>

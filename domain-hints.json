@@ -1158,5 +1158,74 @@
       "skipSelectors": [],
       "format": "table"
     }
+  },
+  {
+    "domain": "amazon.in",
+    "pathPattern": "/*/dp/*",
+    "pageType": "product-offers",
+    "comment": "Click route: title+price, click opens drawer, then offer listing for sellers (drawer API is session-gated in automation).",
+    "requireSelector": "#productTitle",
+    "testUrls": [
+      "https://www.amazon.in/Logitech-H111-Stero-Headset-Black/dp/B00Y4ORQ46/"
+    ],
+    "flow": [
+      {
+        "action": "extract",
+        "label": "Product",
+        "content": {
+          "blocks": [
+            {
+              "selector": "#productTitle",
+              "label": "Product",
+              "priority": "high",
+              "format": "text"
+            },
+            {
+              "selector": "#corePrice_feature_div .a-price .a-offscreen:not(.aok-offscreen)",
+              "label": "Buy-box price",
+              "priority": "high",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      {
+        "action": "click",
+        "selector": "#itembox-InstantBankDiscount a.vsx-offers-count",
+        "waitForSelector": "#all-offers-display",
+        "timeoutMs": 20000
+      },
+      {
+        "action": "wait",
+        "selector": "#all-offers-display",
+        "state": "visible",
+        "timeoutMs": 10000
+      },
+      {
+        "action": "navigate",
+        "url": "https://www.amazon.in/gp/offer-listing/B00Y4ORQ46",
+        "waitForSelector": "#aod-offer-list .aod-information-block"
+      },
+      {
+        "action": "extract",
+        "label": "Other sellers",
+        "content": {
+          "blocks": [
+            {
+              "selector": "#aod-offer-list #aod-offer-soldBy a[href*=\"seller=\"]",
+              "label": "Sellers",
+              "priority": "high",
+              "format": "list"
+            },
+            {
+              "selector": "#aod-offer-list .a-price[data-a-color=\"secondary\"] .a-offscreen",
+              "label": "Prices",
+              "priority": "high",
+              "format": "list"
+            }
+          ]
+        }
+      }
+    ]
   }
 ]

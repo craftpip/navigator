@@ -27,11 +27,11 @@ export const HINT_BLOCK_FORMATS = [
 export const FLOW_ACTIONS = ["extract", "click", "wait", "type", "navigate"];
 export const FLOW_STATES = ["visible", "attached", "hidden"];
 export const FLOW_ACTION_LABELS = {
-  extract: "Extract (capture content)",
-  click: "Click (interact)",
-  wait: "Wait (gate)",
-  type: "Type (input)",
-  navigate: "Navigate (go to URL)",
+  extract: "Extract",
+  click: "Click",
+  wait: "Wait",
+  type: "Type",
+  navigate: "Navigate",
 };
 
 export function emptyHint() {
@@ -56,6 +56,7 @@ export function hintKey(hint) {
 }
 
 export function modeFromHint(hint) {
+  if (typeof hint?.script === "string") return "script";
   if (hint?.flow?.length) return "flow";
   return "default";
 }
@@ -64,7 +65,9 @@ export function hintMeta(hint) {
   const parts = [];
   if (hint?.pageType) parts.push(hint.pageType);
   if (hint?.requireSelector) parts.push(`require: ${hint.requireSelector}`);
-  if (hint?.flow?.length) {
+  if (typeof hint?.script === "string") {
+    parts.push(`script: ${hint.script.length} chars`);
+  } else if (hint?.flow?.length) {
     parts.push(`flow: ${hint.flow.length} step${hint.flow.length === 1 ? "" : "s"}`);
   } else {
     parts.push("default extraction");

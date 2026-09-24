@@ -80,7 +80,7 @@ export function StepEditor({ step, postProcessorModels = [], onChange, onRemove,
             <input className="mono" placeholder="button.next" value={step.selector || ""} onChange={(event) => set("selector", event.target.value)} />
           </div>
           <div className="hint-field">
-            <span>Wait for selector after click (optional — blank = click and move on)</span>
+            <span>Wait for selector (optional)</span>
             {waitForSelectorField}
           </div>
           <div className="hint-field">
@@ -96,11 +96,12 @@ export function StepEditor({ step, postProcessorModels = [], onChange, onRemove,
       {step.action === "wait" && (
         <div className="hint-step-grid">
           <div className="hint-field">
-            <span>Selector to wait for (optional — blank = wait for the page to stabilize)</span>
+            <span>Selector to wait for (optional)</span>
             <input className="mono" placeholder="optional — div.loaded" value={step.selector || ""} onChange={(event) => set("selector", event.target.value)} />
+            <em className="hint-field-help">Blank = wait for the page to stabilize.</em>
           </div>
           <div className="hint-field">
-            <span>State (with selector)</span>
+            <span>State</span>
             <select value={step.state || "visible"} onChange={(event) => set("state", event.target.value)}>
               {FLOW_STATES.map((state) => (
                 <option key={state} value={state}>
@@ -108,6 +109,7 @@ export function StepEditor({ step, postProcessorModels = [], onChange, onRemove,
                 </option>
               ))}
             </select>
+            <em className="hint-field-help">Only used with a selector.</em>
           </div>
           <div className="hint-field">
             <span>Timeout (ms)</span>
@@ -143,8 +145,9 @@ export function StepEditor({ step, postProcessorModels = [], onChange, onRemove,
           </div>
           {step.submit && (
             <div className="hint-field">
-              <span>Wait for selector after submit</span>
+              <span>Wait for selector</span>
               {waitForSelectorField}
+              <em className="hint-field-help">Checked after submit.</em>
             </div>
           )}
           {step.submit && (
@@ -158,12 +161,14 @@ export function StepEditor({ step, postProcessorModels = [], onChange, onRemove,
       {step.action === "navigate" && (
         <div className="hint-step-grid">
           <div className="hint-field">
-            <span>URL (absolute or relative to page)</span>
+            <span>URL</span>
             <input className="mono" placeholder="/results" value={step.url || ""} onChange={(event) => set("url", event.target.value)} />
+            <em className="hint-field-help">Absolute or relative to page.</em>
           </div>
           <div className="hint-field">
-            <span>Wait for selector after load</span>
+            <span>Wait for selector</span>
             {waitForSelectorField}
+            <em className="hint-field-help">Checked after load.</em>
           </div>
           <div className="hint-field">
             <span>Timeout (ms)</span>

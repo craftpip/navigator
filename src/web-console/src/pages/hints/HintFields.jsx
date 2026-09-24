@@ -179,6 +179,11 @@ export function BlockRowEditor({ block, postProcessorModels = [], onChange, onRe
   return (
     <div className="hint-section-row">
       <div className="hint-section-grid">
+        <span className="hint-grid-label" aria-hidden="true">Mode</span>
+        <span className="hint-grid-label" aria-hidden="true">Selector</span>
+        <span className="hint-grid-label" aria-hidden="true">Label</span>
+        <span className="hint-grid-label" aria-hidden="true">Priority</span>
+        <span aria-hidden="true" />
         <select
           className="block-mode"
           value={isLeaf ? "leaf" : "record"}

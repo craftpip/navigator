@@ -4,6 +4,7 @@ import { formatLabel, postProcessorOptionLabel } from "../../lib/format.js";
 import { request } from "../../lib/request.js";
 import { HintFieldGroup, HintField, LineListEditor, UrlListEditor } from "./HintFields.jsx";
 import { FlowEditor, FlowOptionsEditor } from "./FlowEditor.jsx";
+import { ScriptEditor } from "./ScriptEditor.jsx";
 import { HintGuide } from "./HintGuide.jsx";
 import { HintTestPanel } from "./HintTest.jsx";
 
@@ -33,10 +34,16 @@ export function HintEditorPane({ index, initial, postProcessorModels = [], onClo
     if (!hint.flow?.length) patch({ flow: [emptyFlowStep("extract")] });
     setMode("flow");
   };
+  const switchToScript = () => {
+    if (typeof hint.script !== "string") patch({ script: "" });
+    setMode("script");
+  };
   const cleanedHint =
-    mode === "flow"
-      ? { ...hint, default: undefined }
-      : { ...hint, flow: undefined, flowOptions: undefined };
+    mode === "script"
+      ? { ...hint, default: undefined, flow: undefined, flowOptions: undefined }
+      : mode === "flow"
+        ? { ...hint, default: undefined, script: undefined, scriptOptions: undefined }
+        : { ...hint, flow: undefined, flowOptions: undefined, script: undefined, scriptOptions: undefined };
   const applyJson = (text) => {
     setJson(text);
     setJsonError("");
@@ -201,6 +208,16 @@ export function HintEditorPane({ index, initial, postProcessorModels = [], onClo
                     Interactive flow
                     <em>scripted extract / click / type steps</em>
                   </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === "script"}
+                    className={mode === "script" ? "active" : ""}
+                    onClick={switchToScript}
+                  >
+                    Script
+                    <em>arbitrary JS — full page control</em>
+                  </button>
                 </div>
                 ) : (
                   <p className="hint hint-default">
@@ -304,6 +321,13 @@ export function HintEditorPane({ index, initial, postProcessorModels = [], onClo
                       </span>
                     </div>
                   </>
+                ) : mode === "script" ? (
+                  <ScriptEditor
+                    script={typeof hint.script === "string" ? hint.script : ""}
+                    timeoutMs={hint.scriptOptions?.timeoutMs ?? 30000}
+                    onChangeScript={(script) => patch({ script })}
+                    onChangeTimeoutMs={(timeoutMs) => patch({ scriptOptions: { ...(hint.scriptOptions || {}), timeoutMs } })}
+                  />
                 ) : (
                   <>
                     <FlowEditor

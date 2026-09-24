@@ -421,6 +421,8 @@ Default on; independent of `DEBUG` (error logs exist in production). Implementat
 
 Creating extraction hints for a website is an iterative process. One site at a time, one page type at a time.
 
+Each hint uses exactly one extraction method: **default** (single-shot navigate → stabilize → extract via a configured extractor), **flow** (scripted extract/click/type/navigate steps for interactive pages), or **script** (arbitrary JavaScript against the live page for SPAs, chart data, or aggregation — returns `{ text, title?, url?, tables?, links?, warnings? }`, sandboxed with no `require`/`process`/`fs`, timeout default 30s max 60s, never cached, never on the wildcard hint).
+
 ### Panel-first workflow (recommended)
 
 The web console **Domain hints** view (`/console/hints`, `enableWebConsole`) is the
