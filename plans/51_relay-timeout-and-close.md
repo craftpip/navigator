@@ -1,6 +1,10 @@
 # 51 — Relay (navigator-cdp / macbook chrome) Timeout & Close Failures
 
-**Status:** Planned
+**Status:** In progress 2026-09-29 — code complete + unit-tested (6 of 8
+checklist items). The two live items are blocked: `macbook chrome` is not
+paired/connected (`/stats` shows every `navigator-cdp` browser
+`connected: false`), so the symptom that motivated this plan cannot be
+reproduced on this machine yet.
 **Created:** 2026-09-08
 **Scope:** `navigator-cdp` (relay) browsers — the user's real browser window bridged over the
 extension WS gateway (`/relay`). Fixes the 25s timeouts seen on `web_fetch`,
@@ -186,11 +190,73 @@ minutes". DB audit of `data/navigator.db` `page_ops`:
 
 ## 6. Checklist
 
-- [ ] Relay timeout multiplier keyed off ownership (single source in `browser.js`)
-- [ ] `closeTarget` bounded close wait → no more `-32001` on relay close
-- [ ] fetch + screenshot use relay-aware timeout
-- [ ] Absolute op-cap (fix B) so a relay hang fails fast, not at 75s
-- [ ] Orphaned `running` reconciliation on startup (fix A) — searches, engine_attempts, page_ops
-- [ ] Headless regression green
-- [ ] Restart + verified live against `macbook chrome`
-- [ ] No `status='running'` row survives a crash/restart in `page_ops`
+- [x] Relay timeout multiplier keyed off ownership (single source in `browser.js`)
+- [x] `closeTarget` bounded close wait → no more `-32001` on relay close
+- [x] fetch + screenshot use relay-aware timeout
+- [x] Absolute op-cap (fix B) so a relay hang fails fast, not at 75s
+- [x] Orphaned `running` reconciliation on startup (fix A) — searches, engine_attempts, page_ops
+- [x] Headless regression green
+- [ ] Restart + verified live against `macbook chrome` — **blocked**: `macbook chrome` is not paired on this machine
+- [x] No `status='running'` row survives a crash/restart in `page_ops`
+
+---
+
+## 7. Implementation record (2026-09-29)
+
+### What shipped
+
+**Timeout primitive (`src/browser.js`)** — one source of truth next to
+`browserOwnership()`:
+
+| Export | Purpose |
+|---|---|
+| `RELAY_TIMEOUT_MULTIPLIER = 3` | user-owned budget multiplier |
+| `opTimeoutMsForOwnership(ownership, config)` | the primitive call sites use — takes an ownership they already hold |
+| `browserOpTimeoutMs(type, config)` | same, keyed off a browser `type` |
+| `extractionTimeoutsForOwnership(ownership, config)` / `extractionTimeouts(type, config)` | step + total budget, relay-capped |
+| `RELAY_ABSOLUTE_STEP_MS = 15000` / `RELAY_ABSOLUTE_TOTAL_MS = 30000` | fix B caps |
+| `RELAY_CLOSE_TIMEOUT_MS = 8000` | `closeTarget` grace |
+| `BrowserManager.opTimeoutMs(name)` / `ownershipOf(name)` | name → budget, for callers holding only a name |
+
+`resolveBrowserParam()` now also returns `ownership`, so every page-tool caller
+knows which budget applies without re-deriving it.
+
+**Call sites threaded:** `devtools` dispatcher deadline (all tools, incl.
+`captureTargetScreenshot`), `navigatePage`, `reloadPage`, `goBack`/`goForward`,
+`closeTarget`, `withExtractTimeout` (both `/extract` wrap sites),
+`browserOpenAndExtract` (re-configures the operation once `usedBrowser` is known,
+which is *after* the initial `operationTimeoutMs` — `configureTimeouts` is
+re-callable and just restarts the overall timer).
+
+**`closeTarget`** now uses `RELAY_CLOSE_TIMEOUT_MS` for `user` targets instead
+of the op timeout. The old bound *was* the ceiling (25s in Compose), so it never
+bounded anything — the client saw `-32001` first. Headless targets keep the op
+timeout.
+
+**Fix A (`src/db.js`)** — `reconcileOrphanedRunningRows()` runs from `initDb`
+(authoritative: no row outlives the process that owned it) and again at the end
+of `pruneActivity` (safety net for a long-lived process that orphans a row
+without a restart landing on it). Sweeps `searches`, `page_ops`,
+`engine_attempts`; a table missing the columns is skipped rather than aborting
+the rest. `page_ops.ok` is `NOT NULL`, so the sweep sets `ok = 0` (discovered
+by the integration test, not by reading the schema).
+
+### Tests
+
+- `tests/relay-timeouts.test.js` — 7 cases: multiplier applies only to
+  `navigator-cdp`; headless untouched; config fallback; relay caps are *lower*
+  than `25s*3`; step ≤ total across a range of bases; close grace is under the
+  MCP ceiling; the app-default (60s) path is multiplied too.
+- `tests/orphan-running-rows.test.js` — 6 SQL cases + 1 that drives the **real**
+  `initDb()` twice over the same file (a restart in miniature) and asserts an
+  inserted `running` row comes back `fail`.
+
+Full suite: 3 failing files, all pre-existing (`modal-dismiss` jsdom harness,
+the devtools formatter case, the svg tspan case) — no new failures.
+
+### Still owed
+
+Live verification against a paired relay browser (§4 steps 2–4, checklist row
+7). Needs `macbook chrome` (or any relay browser) paired and connected; the
+devtools/extension VM suites and `docker compose restart navigator` are the
+remaining steps once one is available.

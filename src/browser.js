@@ -46,6 +46,76 @@ export function browserOwnership(type) {
 }
 
 /**
+ * Relay round-trips are structurally slower than headless Chromium: a command
+ * crosses puppeteer → /relay gateway → extension WebSocket → chrome.debugger
+ * on the user's machine and back, i.e. two network hops plus the extension's
+ * message bus, where headless talks to the browser in-process. Giving both the
+ * same budget means a heavy `web_fetch` (goto + stabilize + JSDOM parse + link
+ * extraction) on a relay page blows the headless-sized ceiling and returns
+ * `-32001` while the work is still progressing.
+ *
+ * So BROWSER_OP_TIMEOUT_MS stays the *headless* baseline and `user`-owned
+ * browsers get a multiplier on top. Keyed off `browserOwnership()` so there is
+ * exactly one source of truth for "is this a relay", matching the ownership
+ * already reported by list_browsers / Target.getTargets.
+ */
+export const RELAY_TIMEOUT_MULTIPLIER = 3;
+
+/**
+ * Fix B (plan 51 §5): a bigger ceiling must not become "wait longer".
+ *
+ * A hung `goto`/`stabilize`/screenshot on a relay round-trip burns whatever
+ * budget it is given, and the Live feed shows `running` — a spinner — for the
+ * whole of it. So relay operations get a *cap* independent of the multiplier:
+ * a single hung CDP round-trip cannot exceed RELAY_ABSOLUTE_STEP_MS, and the
+ * whole `web_fetch` cannot exceed RELAY_ABSOLUTE_TOTAL_MS. A relay that is
+ * genuinely slower than that is a real failure, and should surface as one.
+ *
+ * These are caps, not replacements — a fast relay never waits for them.
+ */
+export const RELAY_ABSOLUTE_STEP_MS = 15000;
+export const RELAY_ABSOLUTE_TOTAL_MS = 30000;
+
+/** Step + total budget for an extraction, ownership-aware. */
+export function extractionTimeouts(type, config) {
+  return extractionTimeoutsForOwnership(browserOwnership(type), config);
+}
+
+/** Step + total budget keyed off an already-known ownership. */
+export function extractionTimeoutsForOwnership(ownership, config) {
+  const scaled = opTimeoutMsForOwnership(ownership, config);
+  if (ownership !== "user") return { stepTimeoutMs: scaled, totalTimeoutMs: scaled * 3 };
+  return {
+    stepTimeoutMs: Math.min(scaled, RELAY_ABSOLUTE_STEP_MS),
+    totalTimeoutMs: Math.min(scaled * 3, RELAY_ABSOLUTE_TOTAL_MS),
+  };
+}
+
+/** RELAY_CLOSE_TIMEOUT_MS — see closeTarget. A detach that has not landed in
+ *  this window will not land usefully; the handle is released either way. */
+export const RELAY_CLOSE_TIMEOUT_MS = 8000;
+
+/**
+ * The single primitive every timeout call site should use.
+ * @param {string|null} type  browser `type` (e.g. "navigator-cdp") — may be
+ *   omitted, in which case the headless baseline is returned.
+ * @param {object} config     the loaded config holding `browserOpTimeoutMs`.
+ */
+export function browserOpTimeoutMs(type, config) {
+  return opTimeoutMsForOwnership(browserOwnership(type), config);
+}
+
+/**
+ * Same primitive, for callers that already hold the ownership rather than the
+ * browser `type` — devtools targets carry `state.ownership`, and re-deriving
+ * it from the name would mean a second lookup and a second chance to drift.
+ */
+export function opTimeoutMsForOwnership(ownership, config) {
+  const base = Number(config?.browserOpTimeoutMs) || 60000;
+  return ownership === "user" ? base * RELAY_TIMEOUT_MULTIPLIER : base;
+}
+
+/**
  * The built-in Chromium's agent-facing prompt. The built-in is never
  * user-editable (no custom prompt allowed in BROWSERS — parseBrowsersEnv
  * rejects it) — instead its prompt is derived from where it sits in the
@@ -678,6 +748,22 @@ export class BrowserManager {
     if (!name) return null;
     const lower = String(name).toLowerCase();
     return this._effectiveAddOns().find((b) => b.name.toLowerCase() === lower) || null;
+  }
+
+  /**
+   * Per-operation timeout for a named browser, relay-aware. Unknown/built-in
+   * names resolve to the headless baseline. Call sites that already know which
+   * browser they are on should use this rather than reading
+   * config.browserOpTimeoutMs directly, so the multiplier cannot be forgotten.
+   */
+  opTimeoutMs(name) {
+    const entry = this._findAddOnByName(name);
+    return browserOpTimeoutMs(entry?.type, this.config);
+  }
+
+  /** ownership ("user" | "agent") for a named browser — default "agent". */
+  ownershipOf(name) {
+    return browserOwnership(this._findAddOnByName(name)?.type);
   }
 
   async _connectAddOnPage(addOnEntry) {
@@ -1660,8 +1746,10 @@ let managerPromise;
  *      `rollbackNotes` and reported in the tool result.
  *   3. All add-ons down (or none configured) — Chromium (always present).
  *
- * Returns `{ page, browser, rollbackNotes }` so callers can tag the result
- * with which browser actually served the page.
+ * Returns `{ page, browser, ownership, rollbackNotes }` so callers can tag the
+ * result with which browser actually served the page. `ownership` is the
+ * single value every relay-aware decision reads (timeouts, close grace) —
+ * see `browserOpTimeoutMs()`.
  */
 export async function resolveBrowserParam(args = {}, config = null, manager = null, opts = {}) {
   const mgr = manager || (await getBrowserManager());
@@ -1673,7 +1761,7 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
 
   if (explicit) {
     if (explicit === "chromium" || explicit === "Chromium") {
-      return { page: await mgr._newChromiumPage(), browser: "chromium", rollbackNotes: [] };
+      return { page: await mgr._newChromiumPage(), browser: "chromium", ownership: "agent", rollbackNotes: [] };
     }
     const entry = mgr._effectiveAddOns().find((b) => b.name.toLowerCase() === explicit.toLowerCase());
     if (!entry) {
@@ -1687,7 +1775,7 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     }
     try {
       const page = await mgr._connectAddOnPage(entry);
-      return { page, browser: entry.name, rollbackNotes: [] };
+      return { page, browser: entry.name, ownership: browserOwnership(entry.type), rollbackNotes: [] };
     } catch (error) {
       const endpoint = entry.type === "navigator-cdp"
         ? relayServer.gatewayWsUrl(entry.name)
@@ -1705,12 +1793,12 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     }
     try {
       const page = await mgr._connectAddOnPage(entry);
-      return { page, browser: entry.name, rollbackNotes };
+      return { page, browser: entry.name, ownership: browserOwnership(entry.type), rollbackNotes };
     } catch {
       rollbackNotes.push(`${entry.name}: down`);
     }
   }
-  return { page: await mgr._newChromiumPage(), browser: "chromium", rollbackNotes };
+  return { page: await mgr._newChromiumPage(), browser: "chromium", ownership: "agent", rollbackNotes };
 }
 
 export async function getBrowserManager() {

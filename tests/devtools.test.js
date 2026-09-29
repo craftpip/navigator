@@ -3,12 +3,27 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/browser.js", () => ({
   getBrowserManager: vi.fn(),
   browserOwnership: (type) => (type === "navigator-cdp" ? "user" : "agent"),
+  // Plan 51: relay-owned targets get a multiplied budget. Mirrors the real
+  // primitives so devtools' timeout behaviour is exercised, not stubbed away.
+  RELAY_TIMEOUT_MULTIPLIER: 3,
+  RELAY_ABSOLUTE_STEP_MS: 15000,
+  RELAY_ABSOLUTE_TOTAL_MS: 30000,
+  RELAY_CLOSE_TIMEOUT_MS: 8000,
+  opTimeoutMsForOwnership: (ownership, config) => {
+    const base = Number(config?.browserOpTimeoutMs) || 60000;
+    return ownership === "user" ? base * 3 : base;
+  },
+  browserOpTimeoutMs: (type, config) => {
+    const base = Number(config?.browserOpTimeoutMs) || 60000;
+    return type === "navigator-cdp" ? base * 3 : base;
+  },
   resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
     const mgr = manager || (await getBrowserManager());
     const page = await mgr.newPage({ browser });
     return {
       page,
       browser: browser || config?.devtoolsBackend || config?.defaultBackend || "chromium",
+      ownership: "agent",
       rollbackNotes: []
     };
   },

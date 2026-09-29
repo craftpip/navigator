@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { getBrowserManager, resolveBrowserParam, browserOwnership } from "./browser.js";
+import {
+  getBrowserManager,
+  resolveBrowserParam,
+  browserOwnership,
+  opTimeoutMsForOwnership,
+  RELAY_CLOSE_TIMEOUT_MS,
+} from "./browser.js";
 import { resolveRefIdToUrl } from "./ref-memory.js";
 import { clearTab, touchTab } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
@@ -470,8 +476,14 @@ function isDevtoolsOperationTimeout(error) {
   return error?.code === DEVTOOLS_TIMEOUT_CODE;
 }
 
-async function devtoolsOperationTimeoutMs() {
+async function devtoolsOperationTimeoutMs(targetId = "") {
   const manager = await getBrowserManager();
+  // Ownership-aware: a CDP round-trip to a relay browser crosses two network
+  // hops plus the extension message bus, so a headless-sized budget cuts the
+  // call off while it is still progressing (plan 51). Unknown targets fall
+  // back to the headless baseline via opTimeoutMs().
+  const state = targetId ? targetsById.get(String(targetId)) : null;
+  if (state?.ownership) return opTimeoutMsForOwnership(state.ownership, manager.config);
   return Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 }
 
@@ -829,7 +841,18 @@ async function closeTarget(args = {}) {
   // can be dropped silently when the extension's socket flaps or a response
   // arrives after the pending command was evicted. Bound the wait so the tool
   // never hangs forever, then release our handle either way.
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  //
+  // A relay tab gets a *short* grace period, not the op timeout: the whole
+  // point is to answer well inside the MCP request ceiling. The extension
+  // closes the real tab regardless — we are only waiting for confirmation that
+  // page.close() resolves, and the relay's own proactive eviction plus
+  // re-attach on next use clean up any residual mapping. Using
+  // browserOpTimeoutMs here (25s in Compose) meant the bound equalled the
+  // ceiling, so it never actually bounded anything (-32001 first).
+  const isUserOwned = targetOwnership(manager, state.backend) === "user";
+  const timeoutMs = isUserOwned
+    ? RELAY_CLOSE_TIMEOUT_MS
+    : Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
   let timedOut = false;
   let closeError = null;
   let timer = null;
@@ -1009,7 +1032,7 @@ async function navigatePage(args = {}) {
   return withStaleRetry(args.targetId, async (liveState) => {
     await liveState.page.goto(args.url.trim(), {
       waitUntil: manager.config.navWaitUntil,
-      timeout: manager.config.browserOpTimeoutMs
+      timeout: opTimeoutMsForOwnership(liveState.ownership, manager.config)
     });
     await refreshTitle(liveState);
     return { ...buildTargetSummary(liveState), created: false };
@@ -1060,7 +1083,7 @@ async function goHistory(args = {}, direction) {
   return withStaleRetry(args.targetId, async (state) => {
   const options = {
     waitUntil: manager.config.navWaitUntil,
-    timeout: manager.config.browserOpTimeoutMs
+    timeout: opTimeoutMsForOwnership(state.ownership, manager.config)
   };
   const before = state.page.url();
   const response = direction === "forward"
@@ -2786,7 +2809,7 @@ export async function handleDevtoolsToolCall(name, args = {}) {
     return sendRawCommand(args);
   };
 
-  const timeoutMs = await devtoolsOperationTimeoutMs();
+  const timeoutMs = await devtoolsOperationTimeoutMs(args.targetId || "");
   const retrySafe = operationIsReadOnly(name, args);
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {

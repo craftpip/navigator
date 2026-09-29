@@ -169,8 +169,34 @@ export function initDb(dataDir = process.env.NAVIGATOR_DATA_DIR || process.env.D
     applyMigration(db, MIGRATIONS[i]);
     db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(i + 1);
   }
+  reconcileOrphanedRunningRows(db);
   pruneActivity(true);
   return db;
+}
+
+// A row only stays `running` while the process that opened it is alive. If that
+// process dies mid-operation the `finish` call never runs, and nothing else
+// ever moves the row — `pruneActivity` deletes by age, it never reconciles
+// state. The Live feed renders `running` as a spinner, so orphans showed up as
+// "fetching forever" (6 such rows were found in page_ops on 2026-09-08).
+//
+// Reconcile on every init: no row may outlive the process that owned it.
+const ORPHANED_RUNNING_ERROR = "interrupted by server restart — never finished";
+
+function reconcileOrphanedRunningRows(handle) {
+  for (const table of ["searches", "page_ops", "engine_attempts"]) {
+    try {
+      handle
+        .prepare(
+          `UPDATE ${table} SET status = 'fail', ok = 0, duration_ms = NULL, error = ?
+           WHERE status = 'running'`,
+        )
+        .run(ORPHANED_RUNNING_ERROR);
+    } catch {
+      // A table without a status/ok column (engine_attempts predates some of
+      // them) must not stop the rest from being reconciled.
+    }
+  }
 }
 
 export function getDb() {
@@ -345,4 +371,8 @@ export function pruneActivity(force = false) {
   } catch (error) {
     console.error(`⚠️  Activity prune failed: ${String(error?.message || error)}`);
   }
+  // Cheap safety net for rows orphaned *without* a restart landing on them
+  // (e.g. an unhandled rejection mid-op). initDb is the authoritative sweep;
+  // this keeps a long-lived process honest between restarts.
+  reconcileOrphanedRunningRows(db);
 }

@@ -4270,7 +4270,7 @@ async function maybeStartHttpServer(managerOverride) {
                 await navigatePage({ targetId: targetIdParam, url: targetUrls[0] });
               }
               if (reuseCachedHtml) {
-                const pageHtml = await withExtractTimeout(getPageContent(targetIdParam), "getPageContent");
+                const pageHtml = await withExtractTimeout(getPageContent(targetIdParam), "getPageContent", tab?.backend);
                 const cachedByUrl = new Map();
                 if (pageHtml) cachedByUrl.set(targetUrls[0], pageHtml);
                 payload = await runWithHangGuard("http:/extract", () =>
@@ -4435,7 +4435,7 @@ async function maybeStartHttpServer(managerOverride) {
                 format,
                 fullPage,
                 ...(quality ? { quality } : {})
-              }), "screenshot");
+              }), "screenshot", tab?.backend);
               payload = {
                 index: 0,
                 ok: true,
@@ -4613,8 +4613,12 @@ async function shutdownWithExit(exitCode, context = {}) {
   process.exit(exitCode);
 }
 
-function withExtractTimeout(promise, label) {
-  const timeoutMs = (manager.config.browserOpTimeoutMs || 25000);
+function withExtractTimeout(promise, label, browserName = "") {
+  // Relay-backed browsers get the ownership multiplier — a screenshot of a
+  // page on the user's own machine is not a headless-cost operation (plan 51).
+  const timeoutMs = browserName
+    ? manager.opTimeoutMs(browserName)
+    : (manager.config.browserOpTimeoutMs || 25000);
   return Promise.race([
     promise,
     new Promise((_, reject) =>

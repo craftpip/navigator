@@ -1,4 +1,4 @@
-import { getBrowserManager, resolveBrowserParam } from "./browser.js";
+import { getBrowserManager, resolveBrowserParam, extractionTimeouts } from "./browser.js";
 import { DEFAULT_MAX_CHARS, DEFAULT_SEARCH_ENABLED_ENGINES } from "./config.js";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
@@ -2343,9 +2343,17 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
 
       return manager.withPageSlot(async () => {
         t = performance.now();
-        const { page, browser: usedBrowser, rollbackNotes = [] } = await operation.openPage(() =>
+        const { page, browser: usedBrowser, ownership = "agent", rollbackNotes = [] } = await operation.openPage(() =>
           resolveBrowserParam({ browser: requestedBrowser }, manager.config, manager)
         );
+        // Now that the serving browser is known, apply ownership-aware budgets
+        // (relay round-trips are slower; plan 51). Re-configuring is safe — the
+        // overall timer is simply restarted with the correct ceiling.
+        if (ownership === "user") {
+          const relayTimeouts = extractionTimeouts("navigator-cdp", manager.config);
+          operation.configureTimeouts(relayTimeouts);
+          debugLog("relay_timeouts", t);
+        }
         debugLog("new_page", t);
         const withPageTimeout = (label, task) => operation.step(label, task);
         const withOperationDeadline = (label, task) => operation.wait(label, task);
