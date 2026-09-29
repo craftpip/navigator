@@ -24,7 +24,7 @@ import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
-import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers } from "./db.js";
+import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
 import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsToolCall, captureTargetScreenshot, getDevtoolsCounters, createTarget, closeTarget, getPageContent, navigatePage, listTargets, getTargetState, getLastUsedBackend, releaseTargetsByBackend } from "./devtools.js";
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
@@ -341,6 +341,15 @@ function parsePositiveInt(value, field) {
   return Math.floor(parsed);
 }
 
+export function resolveSvgElementLimit(elementLimitArg, fullPage) {
+  const explicit = elementLimitArg !== undefined && elementLimitArg !== null;
+  const limit = Math.max(1, Math.min(5000, explicit ? parsePositiveInt(elementLimitArg, "elementLimit") : 5000));
+  // webcontentextraction.org table was missed with limit 100 (0 td) — keep a
+  // 500 floor for full-page captures unless the caller set an explicit limit.
+  if (fullPage === true && !explicit && limit < 500) return 500;
+  return limit;
+}
+
 function parseScreenshotViewport(value, fullPage) {
   if (value === undefined || value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -562,14 +571,34 @@ function getToolGroups() {
   ].filter((group) => group.tools.length);
 }
 
-function getAllowedToolsForRequest(headers, config) {
+// One lookup for both per-key permission lists. Returns null when the request
+// carries no API key, the console's own internal key, or an unauthorized key —
+// all of which mean "no restriction".
+function getAuthorizedKeyRecord(headers, config) {
   const key = getMcpApiKey(headers);
   if (!key || key === CONSOLE_API_KEY) return null;
   const authorizedKey = getAuthorizedMcpKey(headers, config);
   if (!authorizedKey) return null;
-  const record = listMcpApiKeys().find((entry) => entry.secret === authorizedKey);
-  const allowedTools = record ? parseAllowedTools(record.allowed_tools) : null;
+  return listMcpApiKeys().find((entry) => entry.secret === authorizedKey) || null;
+}
+
+function getAllowedToolsForRequest(headers, config) {
+  const record = getAuthorizedKeyRecord(headers, config);
+  if (!record) return null;
+  const allowedTools = parseAllowedTools(record.allowed_tools);
   return allowedTools === null ? null : new Set(allowedTools);
+}
+
+// Plan 57: the MCP-side browser allow-list, independent of allowed_browsers
+// (which only gates the raw /cdp endpoint). null = unrestricted.
+function getAllowedMcpBrowsersForRequest(headers, config) {
+  const record = getAuthorizedKeyRecord(headers, config);
+  if (!record) return null;
+  const names = parseAllowedBrowsers(record.allowed_mcp_browsers);
+  // Normalize to lower case: resolveBrowserParam matches add-on names
+  // case-insensitively, and a configured name like "Chrome" must not be denied
+  // a request spelled "chrome".
+  return names === null ? null : new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean));
 }
 
 async function getConsoleApiKeysPayload(manager) {
@@ -597,7 +626,8 @@ async function getConsoleApiKeysPayload(manager) {
       preview: maskApiKey(key.secret),
       createdAt: key.created_at,
       allowedTools: parseAllowedTools(key.allowed_tools),
-      allowedBrowsers: parseAllowedBrowsers(key.allowed_browsers)
+      allowedBrowsers: parseAllowedBrowsers(key.allowed_browsers),
+      allowedMcpBrowsers: parseAllowedBrowsers(key.allowed_mcp_browsers)
     }))
   };
 }
@@ -649,7 +679,12 @@ async function handleConsoleApiKeys(manager, body) {
     const allowedBrowsers = Array.isArray(body?.allowedBrowsers)
       ? [...new Set(body.allowedBrowsers.filter((name) => availableBrowsers.has(name)))]
       : [...availableBrowsers];
-    createMcpApiKey({ name, secret: key, allowedTools, allowedBrowsers });
+    // Plan 57: MCP browsers default to all on create, so a new key's web tools
+    // work out of the box. An admin can still post [] to deny every browser.
+    const allowedMcpBrowsers = Array.isArray(body?.allowedMcpBrowsers)
+      ? [...new Set(body.allowedMcpBrowsers.filter((name) => availableBrowsers.has(name)))]
+      : [...availableBrowsers];
+    createMcpApiKey({ name, secret: key, allowedTools, allowedBrowsers, allowedMcpBrowsers });
     syncMcpApiKeys(manager);
     return { ok: true, key, ...await getConsoleApiKeysPayload(manager) };
   }
@@ -695,6 +730,18 @@ async function handleConsoleApiKeys(manager, body) {
       ? [...new Set(body.allowedBrowsers.filter((name) => availableBrowsers.has(name)))]
       : [];
     if (!Number.isInteger(id) || !setMcpApiKeyBrowsers(id, allowedBrowsers)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    return getConsoleApiKeysPayload(manager);
+  }
+
+  if (action === "set_mcp_browsers") {
+    const id = Number(body?.id);
+    const availableBrowsers = new Set(listShareableBrowserNames(manager));
+    const allowedMcpBrowsers = Array.isArray(body?.allowedMcpBrowsers)
+      ? [...new Set(body.allowedMcpBrowsers.filter((name) => availableBrowsers.has(name)))]
+      : [];
+    if (!Number.isInteger(id) || !setMcpApiKeyMcpBrowsers(id, allowedMcpBrowsers)) {
       return { ok: false, error: "Unknown API key" };
     }
     return getConsoleApiKeysPayload(manager);
@@ -1134,6 +1181,61 @@ async function deleteHint(hintsPath, index) {
     if (!save.ok) return save;
     return { ok: true, index, removed, count: save.count, hintsPath: save.hintsPath };
   });
+}
+
+const MANAGED_HINT_EDITABLE_FIELDS = ["domain", "pathPattern", "pageType", "comment", "requireSelector", "browserEngine", "testUrls", "script", "scriptOptions", "enabled", "priority"];
+
+function sanitizeManagedHint(rawHint, id) {
+  const hint = { id };
+  for (const field of MANAGED_HINT_EDITABLE_FIELDS) {
+    if (rawHint[field] !== undefined) hint[field] = rawHint[field];
+  }
+  return hint;
+}
+
+async function upsertManagedHintFromConsole(config, id, rawHint) {
+  if (!rawHint || typeof rawHint !== "object" || Array.isArray(rawHint)) {
+    return { ok: false, error: "hint must be an object" };
+  }
+  const hint = sanitizeManagedHint(rawHint, id);
+  if (hint.pathPattern === undefined || hint.pathPattern === null || hint.pathPattern === "") {
+    hint.pathPattern = "/**";
+  }
+  const validation = validateManagedHint(hint);
+  if (validation.errors.length) {
+    return { ok: false, error: "invalid hint", validation };
+  }
+  const storePath = getManagedHintsPath(config);
+  const now = new Date().toISOString();
+  const { entries, revision } = await mutateManagedHints(storePath, (working) => {
+    const at = working.findIndex((e) => e?.id === id);
+    const previous = at >= 0 ? working[at] : null;
+    const saved = {
+      ...hint,
+      enabled: typeof hint.enabled === "boolean" ? hint.enabled : previous?.enabled !== false,
+      priority: Number.isInteger(hint.priority) ? hint.priority : (Number.isInteger(previous?.priority) ? previous.priority : 50),
+      createdAt: previous?.createdAt || now,
+      updatedAt: now
+    };
+    if (at >= 0) working[at] = saved;
+    else working.push(saved);
+    return { id: saved.id, created: !previous };
+  });
+  toolResultCache.web_fetch.clear();
+  const saved = entries.find((e) => e?.id === id);
+  return { ok: true, id, source: "managed", revision, hint: saved, count: entries.length };
+}
+
+async function removeManagedHintFromConsole(config, id) {
+  const storePath = getManagedHintsPath(config);
+  const { entries, revision } = await mutateManagedHints(storePath, (working) => {
+    const at = working.findIndex((e) => e?.id === id);
+    if (at < 0) throw new Error(`No managed hint with id "${id}"`);
+    working.splice(at, 1);
+    return { id };
+  });
+  toolResultCache.web_fetch.clear();
+  return { ok: true, id, source: "managed", revision, removed: { id }, count: entries.length };
 }
 
 const LOG_MAP = {
@@ -1910,7 +2012,8 @@ async function openTargetsParallel(targetUrls, maxParallel, includeSeoAnalysis =
           cachedHtml: opts?.cachedHtmlByUrl?.get(targetUrl) || null,
           captureHtml: opts?.captureHtml === true,
           browser: opts?.browser || "",
-          ...(opts?.requestScript != null ? { requestScript: opts.requestScript, requestScriptOptions: opts.requestScriptOptions } : {})
+          ...(opts?.requestScript != null ? { requestScript: opts.requestScript, requestScriptOptions: opts.requestScriptOptions } : {}),
+          allowedMcpBrowsers: opts?.allowedMcpBrowsers || null
         });
         if (debug) console.log(`[web_fetch] [${targetUrl}] openTargetsParallel process (post-extract): ${Math.round(performance.now() - tUrl)}ms`);
         const result = {
@@ -1960,7 +2063,7 @@ async function captureScreenshotsParallel(targetUrls, maxParallel, captureOption
     maxParallel,
     async (targetUrl, index) => {
       try {
-        const capture = await browserCaptureScreenshot({ url: targetUrl, browser: captureOptions?.browser || "", ...captureOptions });
+        const capture = await browserCaptureScreenshot({ url: targetUrl, browser: captureOptions?.browser || "", allowedMcpBrowsers: captureOptions?.allowedMcpBrowsers || null, ...captureOptions });
         return {
           index,
           ok: true,
@@ -2311,18 +2414,18 @@ function getToolsListResponse(allowedTools = null) {
             {
               name: "web_fetch_setup",
               description:
-                "Manage persisted page-extraction script customizations (plan 62). Backed by the managed hint store; declarative hints stay in domain-hints.json. Operations: list (managed scripts only), get (effective script for a URL + source), validate (schema + syntax check, no change), upsert (create/replace by id), disable (keep rule, stop matching), remove (delete). Only advertised when ENABLE_DOMAIN_HINT_MANAGEMENT=1.",
+                "Manage persisted page-extraction script customizations (plan 62). Backed by the managed hint store; declarative hints stay in domain-hints.json. Operations: list (managed scripts only), get (effective script for a URL + source), validate (schema + syntax check, no change), upsert (create/replace by id), disable (keep rule, stop matching), enable (re-enable a disabled rule), remove (delete). Only advertised when ENABLE_DOMAIN_HINT_MANAGEMENT=1.",
               inputSchema: {
                 type: "object",
                 properties: {
                   operation: {
                     type: "string",
-                    enum: ["list", "get", "validate", "upsert", "disable", "remove"],
+                    enum: ["list", "get", "validate", "upsert", "disable", "enable", "remove"],
                     description: "Operation to perform"
                   },
                   id: {
                     type: "string",
-                    description: "Managed hint id for disable/remove (upsert reads id from hint.id)"
+                    description: "Managed hint id for disable/enable/remove (upsert reads id from hint.id)"
                   },
                   url: {
                     type: "string",
@@ -2354,12 +2457,12 @@ function getToolsListResponse(allowedTools = null) {
   };
 }
 
-async function handleToolCall(name, args = {}, allowedTools = null) {
+async function handleToolCall(name, args = {}, allowedTools = null, allowedMcpBrowsers = null) {
   try {
     if (allowedTools && !allowedTools.has(name)) {
       throw new Error(`Tool "${name}" is not permitted for this API key`);
     }
-    const result = await handleToolCallInner(name, args);
+    const result = await handleToolCallInner(name, args, allowedMcpBrowsers);
     recordActivityRequest(name, true);
     return result;
   } catch (error) {
@@ -2368,7 +2471,7 @@ async function handleToolCall(name, args = {}, allowedTools = null) {
   }
 }
 
-async function handleToolCallInner(name, args = {}) {
+async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
   const timer = createExecutionTimer("mcp.tool.timing", {
     tool: name,
     mode: "mcp"
@@ -2458,7 +2561,14 @@ async function handleToolCallInner(name, args = {}) {
       requestScriptOptions = args.scriptOptions;
     }
 
-    const cached = bypassCache || hasRequestScript ? null : await getCachedToolResult(name, cacheKeyArgs);
+    // A key with a restricted MCP browser set must not share the tool-result
+    // cache (plan 57). The key is derived from request args only — it carries no
+    // API-key identity — so a cached entry fetched on an allowed browser would
+    // otherwise satisfy a denied key before resolveBrowserParam ever runs, and
+    // the permission check below would be unreachable. Restricted keys skip both
+    // the read and the write; unrestricted keys (null) keep the fast path.
+    const cacheable = !allowedMcpBrowsers;
+    const cached = bypassCache || hasRequestScript || !cacheable ? null : await getCachedToolResult(name, cacheKeyArgs);
     if (cached) {
       const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
       const truncated = truncateResultsText(cached, maxChars);
@@ -2471,10 +2581,10 @@ async function handleToolCallInner(name, args = {}) {
     const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     mark = timer.step("prepare_execution", mark);
     const fullResult = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "", ...(hasRequestScript ? { requestScript, requestScriptOptions } : {}) })
+      openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "", ...(hasRequestScript ? { requestScript, requestScriptOptions } : {}), allowedMcpBrowsers })
     );
     mark = timer.step("open_targets", mark);
-    if (!hasRequestScript) {
+    if (!hasRequestScript && cacheable) {
       await setCachedToolResult(name, cacheKeyArgs, fullResult);
       timer.step("cache_store", mark);
     }
@@ -2492,8 +2602,8 @@ async function handleToolCallInner(name, args = {}) {
     }
     const storePath = getManagedHintsPath(setupManager.config);
     const operation = args.operation;
-    if (!["list", "get", "validate", "upsert", "disable", "remove"].includes(operation)) {
-      throw new Error('web_fetch_setup requires operation to be one of "list", "get", "validate", "upsert", "disable", "remove"');
+    if (!["list", "get", "validate", "upsert", "disable", "enable", "remove"].includes(operation)) {
+      throw new Error('web_fetch_setup requires operation to be one of "list", "get", "validate", "upsert", "disable", "enable", "remove"');
     }
     const asJson = (value) => ({
       content: [{ type: "text", text: JSON.stringify(value, null, 2) }]
@@ -2584,6 +2694,21 @@ async function handleToolCallInner(name, args = {}) {
       });
       toolResultCache.web_fetch.clear();
       return asJson({ id: args.id, source: "managed", revision, enabled: false });
+    }
+
+    if (operation === "enable") {
+      if (typeof args.id !== "string" || !args.id) {
+        throw new Error('web_fetch_setup enable requires "id"');
+      }
+      const { revision } = await mutateManagedHints(storePath, (working) => {
+        const entry = working.find((e) => e?.id === args.id);
+        if (!entry) throw new Error(`No managed hint with id "${args.id}"`);
+        entry.enabled = true;
+        entry.updatedAt = new Date().toISOString();
+        return { id: args.id };
+      });
+      toolResultCache.web_fetch.clear();
+      return asJson({ id: args.id, source: "managed", revision, enabled: true });
     }
 
     // remove
@@ -2696,7 +2821,8 @@ async function handleToolCallInner(name, args = {}) {
             fullPage,
             ...(quality ? { quality } : {}),
             ...(viewport ? { viewport } : {}),
-            browser: args.browser || ""
+            browser: args.browser || "",
+            allowedMcpBrowsers
           })
         );
       } catch (error) {
@@ -2751,7 +2877,7 @@ async function handleToolCallInner(name, args = {}) {
     while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 10) {
       let segment = node.tagName.toLowerCase();
       if (node.id) {
-        segment += '#' + node.id;
+        segment += '#' + CSS.escape(node.id);
         parts.unshift(segment);
         break;
       }
@@ -2890,7 +3016,7 @@ async function handleToolCallInner(name, args = {}) {
     let asciiBrowserNotes = [];
     try {
       asciiResult = await runWithHangGuard(`mcp:${name}`, () => manager.withPageSlot(async () => {
-        const { page, browser: resolvedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser: args.browser || "" }, manager.config, manager);
+        const { page, browser: resolvedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser: args.browser || "" }, manager.config, manager, { allowedMcpBrowsers });
         usedBrowser = resolvedBrowser;
         asciiBrowserNotes = rollbackNotes;
         try {
@@ -3004,9 +3130,7 @@ async function handleToolCallInner(name, args = {}) {
   }
 
   if (name === "web_page_svg") {
-    let elementLimit = Math.max(1, Math.min(5000, args.elementLimit ? parsePositiveInt(args.elementLimit, "elementLimit") : 5000));
-    // webcontentextraction.org table was missed with limit 100 (0 td) — ensure fullPage captures all data tables
-    if (args.fullPage === true && elementLimit < 500) elementLimit = 500;
+    const elementLimit = resolveSvgElementLimit(args.elementLimit, args.fullPage === true);
     const fullPage = args.fullPage === true;
     const includeSelector = args.includeSelector !== false;
     const includeXpath = args.includeXpath !== false;
@@ -3117,7 +3241,7 @@ async function handleToolCallInner(name, args = {}) {
 
     const svgBatch = await mapWithConcurrency(targetUrls, managerSvg.config.openPageMaxParallel, async (targetUrl) => {
       return managerSvg.withPageSlot(async () => {
-        const { page, browser: svgBrowser, rollbackNotes: svgRollbackNotes } = await resolveBrowserParam({ browser: args.browser || "" }, managerSvg.config, managerSvg);
+        const { page, browser: svgBrowser, rollbackNotes: svgRollbackNotes } = await resolveBrowserParam({ browser: args.browser || "" }, managerSvg.config, managerSvg, { allowedMcpBrowsers });
         try {
           if (viewportOverride) await page.setViewport(viewportOverride);
           await page.goto(targetUrl, { waitUntil: managerSvg.config.navWaitUntil, timeout: managerSvg.config.browserOpTimeoutMs });
@@ -3320,7 +3444,7 @@ async function handleToolCallInner(name, args = {}) {
       source: "devtools"
     });
     try {
-      const result = await runWithHangGuard(`mcp:${name}`, () => handleDevtoolsToolCall(name, args));
+      const result = await runWithHangGuard(`mcp:${name}`, () => handleDevtoolsToolCall(name, args, allowedMcpBrowsers));
       recordPageOp({
         id: pageOpId,
         tool: name,
@@ -3353,7 +3477,7 @@ async function handleToolCallInner(name, args = {}) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
-async function handleStatelessMcpPost(body, allowedTools = null) {
+async function handleStatelessMcpPost(body, allowedTools = null, allowedMcpBrowsers = null) {
   const id = body?.id ?? null;
   const method = String(body?.method || "");
 
@@ -3383,7 +3507,7 @@ async function handleStatelessMcpPost(body, allowedTools = null) {
     const args = body?.params?.arguments || {};
     const t0 = Date.now();
     try {
-      const result = await handleToolCall(name, args, allowedTools);
+      const result = await handleToolCall(name, args, allowedTools, allowedMcpBrowsers);
       return { jsonrpc: "2.0", id, result };
     } catch (error) {
       logToolError({ tool: name, args, error, ms: Date.now() - t0, transport: "stateless" });
@@ -3412,7 +3536,7 @@ async function handleStatelessMcpPost(body, allowedTools = null) {
   };
 }
 
-function createMcpServer(allowedTools = null) {
+function createMcpServer(allowedTools = null, allowedMcpBrowsers = null) {
   const server = new Server(
     {
       name: "search-tools",
@@ -3443,7 +3567,7 @@ function createMcpServer(allowedTools = null) {
 
     const t0 = Date.now();
     try {
-      const response = await handleToolCall(name, args, allowedTools);
+      const response = await handleToolCall(name, args, allowedTools, allowedMcpBrowsers);
       const ms = Date.now() - t0;
       const okText = response?.content?.[0]?.text || "";
       const okLabel = okText.length ? `${Math.round(okText.length / 1000)}k chars` : "";
@@ -3548,6 +3672,7 @@ async function maybeStartHttpServer(managerOverride) {
             return;
           }
           const allowedTools = getAllowedToolsForRequest(req.headers, authConfig);
+          const allowedMcpBrowsers = getAllowedMcpBrowsersForRequest(req.headers, authConfig);
 
           if (isInitializeRequest(body)) {
             // If client sends initialize with an existing session ID, the old
@@ -3583,7 +3708,7 @@ async function maybeStartHttpServer(managerOverride) {
               }
             };
 
-            const mcpServer = createMcpServer(allowedTools);
+            const mcpServer = createMcpServer(allowedTools, allowedMcpBrowsers);
             await mcpServer.connect(transport);
             await transport.handleRequest(req, res, body);
             if (transport.sessionId) {
@@ -3611,7 +3736,7 @@ async function maybeStartHttpServer(managerOverride) {
 
           const ip = getClientIp(req);
           const keyInfo = getMcpCallKeyInfo(req.headers);
-          const response = await mcpCallContext.run({ ip, keyInfo }, () => handleStatelessMcpPost(body, allowedTools));
+          const response = await mcpCallContext.run({ ip, keyInfo }, () => handleStatelessMcpPost(body, allowedTools, allowedMcpBrowsers));
           const ms = Date.now() - t0;
 
           if (response === null) {
@@ -4017,14 +4142,26 @@ async function maybeStartHttpServer(managerOverride) {
           if (method === "GET" && url.pathname === "/console/api/hints") {
             const hints = await loadRawDomainHints(hintsPath);
             ensureWildcardHint(hints);
+            // Managed script customizations render in the same list. They are
+            // edited here via /console/api/hints/managed/:id and stored in the
+            // managed hint store — never the static file.
+            let managedRows = [];
+            let managedRevision = 0;
+            try {
+              const managed = await loadManagedHints(getManagedHintsPath(manager.config));
+              managedRevision = managed.revision;
+              managedRows = managed.entries.map((entry) => ({ ...entry, _managed: true }));
+            } catch {}
             logEvent("http.request", { method, path: url.pathname });
-            sendJson(res, 200, { ok: true, hintsPath, count: hints.length, hints, postProcessorModels });
+            sendJson(res, 200, { ok: true, hintsPath, count: hints.length + managedRows.length, hints: [...hints, ...managedRows], managedRevision, postProcessorModels });
             return;
           }
           if (method === "POST" && url.pathname === "/console/api/hints/validate") {
             const body = await readJsonBody(req);
             const scope = body?.scope === "test" ? "test" : "static";
-            const validation = validateHintRule(body?.hint, { scope, aiModelIds: modelIds });
+            const validation = body?.hint?._managed === true
+              ? validateManagedHint(body.hint)
+              : validateHintRule(body.hint, { scope, aiModelIds: modelIds });
             sendJson(res, 200, { ok: true, valid: validation.errors.length === 0, ...validation });
             return;
           }
@@ -4040,6 +4177,30 @@ async function maybeStartHttpServer(managerOverride) {
               return;
             }
             logEvent("http.request", { method, path: url.pathname, hint: result.hint?.domain });
+            sendJson(res, 200, result);
+            return;
+          }
+          const managedUpdateMatch = url.pathname.match(/^\/console\/api\/hints\/managed\/([a-z0-9-]+)$/);
+          if (method === "PUT" && managedUpdateMatch) {
+            const id = managedUpdateMatch[1];
+            const body = await readJsonBody(req);
+            const result = await upsertManagedHintFromConsole(manager.config, id, body?.hint);
+            if (!result.ok) {
+              sendJson(res, 400, result);
+              return;
+            }
+            logEvent("http.request", { method, path: url.pathname, hint: `${result.hint?.domain} (managed:${id})` });
+            sendJson(res, 200, result);
+            return;
+          }
+          if (method === "DELETE" && managedUpdateMatch) {
+            const id = managedUpdateMatch[1];
+            const result = await removeManagedHintFromConsole(manager.config, id);
+            if (!result.ok) {
+              sendJson(res, 400, result);
+              return;
+            }
+            logEvent("http.request", { method, path: url.pathname, hint: `(managed:${id})` });
             sendJson(res, 200, result);
             return;
           }

@@ -1759,7 +1759,21 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     : "";
   const roles = Array.isArray(opts.roles) && opts.roles.length ? new Set(opts.roles) : null;
 
+  // Per-key MCP browser allow-list (plan 57). `allowedMcpBrowsers` is a Set of
+  // browser names, or null = unrestricted. This is the single enforcement point
+  // for every tool that accepts a `browser` param, so the five call sites only
+  // have to thread the set through.
+  const allowed = opts.allowedMcpBrowsers instanceof Set ? opts.allowedMcpBrowsers : null;
+  const denied = (name) => {
+    throw new Error(
+      `browser "${name}" is not permitted for this API key (allowed MCP browsers: ${[...allowed].join(", ") || "none"})`,
+    );
+  };
+
   if (explicit) {
+    // Fast path: refuse a disallowed explicit name before any connect work, so
+    // a rejected key cannot open a page (or a relay tab) and then unwind.
+    if (allowed && !allowed.has(explicit.toLowerCase())) denied(explicit);
     if (explicit === "chromium" || explicit === "Chromium") {
       return { page: await mgr._newChromiumPage(), browser: "chromium", ownership: "agent", rollbackNotes: [] };
     }
@@ -1784,6 +1798,10 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     }
   }
 
+  // No explicit browser: the chain below picks the first healthy add-on and
+  // falls back to chromium. Resolution is deliberately not narrowed to the
+  // allow-list (that would change resolution semantics), so the post-checks
+  // here are what enforce the key against wherever it actually landed.
   const rollbackNotes = [];
   const candidates = mgr._effectiveAddOns().filter((b) => !roles || b.role.some((r) => roles.has(r)));
   for (const entry of candidates) {
@@ -1793,11 +1811,21 @@ export async function resolveBrowserParam(args = {}, config = null, manager = nu
     }
     try {
       const page = await mgr._connectAddOnPage(entry);
+      if (allowed && !allowed.has(entry.name.toLowerCase())) {
+        // Close before refusing — otherwise a denied key would leave a live
+        // page (or a visible tab on a user relay browser) behind on every call.
+        try { await page.close(); } catch { /* already gone */ }
+        denied(entry.name);
+      }
       return { page, browser: entry.name, ownership: browserOwnership(entry.type), rollbackNotes };
-    } catch {
+    } catch (error) {
+      // A permission refusal is a final answer, not a down add-on — let it out
+      // instead of recording it as a rollback note and falling through.
+      if (allowed && /is not permitted for this API key/.test(String(error?.message || ""))) throw error;
       rollbackNotes.push(`${entry.name}: down`);
     }
   }
+  if (allowed && !allowed.has("chromium")) denied("chromium");
   return { page: await mgr._newChromiumPage(), browser: "chromium", ownership: "agent", rollbackNotes };
 }
 

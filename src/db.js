@@ -5,6 +5,12 @@ import path from "node:path";
 const RETENTION_DAYS = 7;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
+// Every api_keys read projects the same column set. Listing them once means a
+// new permission column (allowed_tools, allowed_browsers, allowed_mcp_browsers)
+// can't land in one SELECT and be forgotten in another.
+const API_KEY_COLUMNS =
+  "id, name, secret, created_at, allowed_tools, allowed_browsers, allowed_mcp_browsers";
+
 let db = null;
 let lastPrune = 0;
 
@@ -144,6 +150,7 @@ const MIGRATIONS = [
      description TEXT NOT NULL DEFAULT '',
      updated_at INTEGER NOT NULL
    );`,
+  `ALTER TABLE api_keys ADD COLUMN allowed_mcp_browsers TEXT;`,
 ];
 
 function applyMigration(db, migration) {
@@ -315,12 +322,12 @@ export function initializeMcpApiKeys(legacyKeys = []) {
 }
 
 export function listMcpApiKeys() {
-  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys ORDER BY created_at DESC, id DESC").all();
+  return getDb().prepare(`SELECT ${API_KEY_COLUMNS} FROM api_keys ORDER BY created_at DESC, id DESC`).all();
 }
 
-export function createMcpApiKey({ name, secret, allowedTools = null, allowedBrowsers = null }) {
-  const result = getDb().prepare("INSERT INTO api_keys (name, secret, created_at, allowed_tools, allowed_browsers) VALUES (?, ?, ?, ?, ?)").run(name, secret, Date.now(), allowedTools === null ? null : JSON.stringify(allowedTools), allowedBrowsers === null ? null : JSON.stringify(allowedBrowsers));
-  return getDb().prepare("SELECT id, name, secret, created_at, allowed_tools, allowed_browsers FROM api_keys WHERE id = ?").get(result.lastInsertRowid);
+export function createMcpApiKey({ name, secret, allowedTools = null, allowedBrowsers = null, allowedMcpBrowsers = null }) {
+  const result = getDb().prepare("INSERT INTO api_keys (name, secret, created_at, allowed_tools, allowed_browsers, allowed_mcp_browsers) VALUES (?, ?, ?, ?, ?, ?)").run(name, secret, Date.now(), allowedTools === null ? null : JSON.stringify(allowedTools), allowedBrowsers === null ? null : JSON.stringify(allowedBrowsers), allowedMcpBrowsers === null ? null : JSON.stringify(allowedMcpBrowsers));
+  return getDb().prepare(`SELECT ${API_KEY_COLUMNS} FROM api_keys WHERE id = ?`).get(result.lastInsertRowid);
 }
 
 export function renameMcpApiKey(id, name) {
@@ -345,6 +352,10 @@ export function setMcpApiKeyTools(id, allowedTools) {
 
 export function setMcpApiKeyBrowsers(id, allowedBrowsers) {
   return getDb().prepare("UPDATE api_keys SET allowed_browsers = ? WHERE id = ?").run(JSON.stringify(allowedBrowsers), id).changes > 0;
+}
+
+export function setMcpApiKeyMcpBrowsers(id, allowedMcpBrowsers) {
+  return getDb().prepare("UPDATE api_keys SET allowed_mcp_browsers = ? WHERE id = ?").run(JSON.stringify(allowedMcpBrowsers), id).changes > 0;
 }
 
 export function closeDb() {

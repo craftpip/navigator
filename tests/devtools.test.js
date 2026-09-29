@@ -17,8 +17,18 @@ vi.mock("../src/browser.js", () => ({
     const base = Number(config?.browserOpTimeoutMs) || 60000;
     return type === "navigator-cdp" ? base * 3 : base;
   },
-  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
+  // Mirrors the real resolveBrowserParam permission contract (plan 57) so the
+  // tests can prove devtools threads `allowedMcpBrowsers` into it, rather than
+  // stubbing the gate away. The real enforcement itself is covered in
+  // tests/browser.test.js.
+  resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null, opts = {}) => {
     const mgr = manager || (await getBrowserManager());
+    const allowed = opts.allowedMcpBrowsers instanceof Set ? opts.allowedMcpBrowsers : null;
+    if (allowed && !allowed.has(String(browser).trim().toLowerCase())) {
+      throw new Error(
+        `browser "${browser}" is not permitted for this API key (allowed MCP browsers: ${[...allowed].join(", ") || "none"})`
+      );
+    }
     const page = await mgr.newPage({ browser });
     return {
       page,
@@ -282,6 +292,33 @@ describe("handleDevtoolsToolCall", () => {
     expect(result).toHaveProperty("targetId");
     expect(result).toHaveProperty("backend");
     expect(result).toHaveProperty("url");
+  });
+
+  it("refuses Target.createTarget on a browser the MCP key cannot use (plan 57)", async () => {
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "chromium",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+        browsers: [
+          { name: "chromium", role: ["default", "devtools"], addOn: false },
+          { name: "lightpanda", role: ["devtools"], cdpUrl: "http://127.0.0.1:9222", addOn: true }
+        ],
+      },
+      newPage: vi.fn().mockResolvedValue({}),
+      _effectiveAddOns: () => [],
+      _newChromiumPage: vi.fn().mockResolvedValue({}),
+    });
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await expect(
+      handleDevtoolsToolCall(
+        "Target.createTarget",
+        { browser: "lightpanda" },
+        new Set(["chromium"])
+      )
+    ).rejects.toThrow(/not permitted for this API key/);
   });
 
   it("routes Target.getTargets to the correct handler", async () => {
@@ -1367,9 +1404,75 @@ describe("window & focus & raw passthrough tools", () => {
     expect(sent).toContain("Browser.setWindowBounds");
   });
 
+  it("Browser.setWindowBounds sends windowId (not targetId) to CDP (plan 68)", async () => {
+    const browserSession = {
+      send: vi.fn((method) => {
+        if (method === "Browser.getWindowForTarget") {
+          return Promise.resolve({ windowId: 7, bounds: { left: 10, top: 20, width: 1200, height: 800, windowState: "normal" } });
+        }
+        if (method === "Browser.setWindowBounds") return Promise.resolve({ windowId: 7, bounds: { left: 10, top: 20, width: 1280, height: 900, windowState: "normal" } });
+        return Promise.resolve({});
+      }),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    managerWith(page);
+    const mod = await importMod();
+
+    const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "win-id" });
+    await mod.handleDevtoolsToolCall("Browser.setWindowBounds", {
+      targetId: created.targetId,
+      bounds: { width: 1280, height: 900 },
+    });
+
+    const setCall = browserSession.send.mock.calls.find((call) => call[0] === "Browser.setWindowBounds");
+    expect(setCall[1]).toMatchObject({ windowId: 7, bounds: { width: 1280, height: 900 } });
+    expect(setCall[1]).not.toHaveProperty("targetId");
+  });
+
+  it("Browser.setWindowBounds reports a readable error when no windowId resolves (plan 68)", async () => {
+    const browserSession = {
+      send: vi.fn().mockResolvedValue({}), // getWindowForTarget yields no windowId
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+      createCDPSession: vi.fn(),
+      browser: () => ({ target: () => ({ createCDPSession: vi.fn().mockResolvedValue(browserSession) }) }),
+    };
+    managerWith(page);
+    const mod = await importMod();
+
+    const created = await mod.handleDevtoolsToolCall("Target.createTarget", { targetId: "no-window" });
+    const error = await mod.handleDevtoolsToolCall("Browser.setWindowBounds", {
+      targetId: created.targetId,
+      bounds: { width: 800 },
+    }).then(() => null).catch((e) => e);
+
+    expect(error).not.toBeNull();
+    expect(String(error?.message || error)).toMatch(/no windowId/);
+  });
+
   it("Browser.focusWindow runs activateTarget then setWindowBounds({focused:true})", async () => {
     const browserSession = {
-      send: vi.fn().mockResolvedValue({}),
+      send: vi.fn((method) => {
+        if (method === "Browser.getWindowForTarget") {
+          return Promise.resolve({ windowId: 9, bounds: { left: 0, top: 0, width: 1280, height: 900, windowState: "normal" } });
+        }
+        return Promise.resolve({});
+      }),
       detach: vi.fn().mockResolvedValue(undefined),
     };
     const page = {
@@ -1390,8 +1493,10 @@ describe("window & focus & raw passthrough tools", () => {
     expect(result).toMatchObject({ activated: true, windowFocused: true });
     const calls = browserSession.send.mock.calls.map((call) => call[0]);
     expect(calls[0]).toBe("Target.activateTarget");
-    expect(calls[1]).toBe("Browser.setWindowBounds");
-    expect(browserSession.send.mock.calls[1][1]).toMatchObject({ bounds: { focused: true } });
+    expect(calls[1]).toBe("Browser.getWindowForTarget");
+    expect(calls[2]).toBe("Browser.setWindowBounds");
+    expect(browserSession.send.mock.calls[2][1]).toMatchObject({ windowId: 9, bounds: { focused: true } });
+    expect(browserSession.send.mock.calls[2][1]).not.toHaveProperty("targetId");
   });
 
   it("Target.sendCommand passes through page-level methods on the page CDP session", async () => {
@@ -1486,5 +1591,83 @@ describe("window & focus & raw passthrough tools", () => {
     } finally {
       relayServer.sendCdpCommand = originalSend;
     }
+  });
+});
+
+describe("truncateLongUrl + capped network URLs (plan 68)", () => {
+  let getBrowserManager;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    getBrowserManager = (await import("../src/browser.js")).getBrowserManager;
+  });
+
+  it("passes short and non-string URLs through untouched", async () => {
+    const { truncateLongUrl } = await import("../src/devtools.js");
+    expect(truncateLongUrl("https://example.com/a")).toBe("https://example.com/a");
+    expect(truncateLongUrl("")).toBe("");
+    expect(truncateLongUrl(null)).toBe(null);
+    expect(truncateLongUrl(undefined)).toBe(undefined);
+  });
+
+  it("caps data: URLs at 60 chars and long http(s) URLs at 120", async () => {
+    const { truncateLongUrl } = await import("../src/devtools.js");
+    const data = `data:text/javascript;charset=utf-8,${"x".repeat(5000)}`;
+    const cappedData = truncateLongUrl(data);
+    expect(cappedData.length).toBeLessThan(120);
+    expect(cappedData).toMatch(/^data:text\/javascript/);
+    expect(cappedData).toMatch(/…<\d+ chars>$/);
+    const longHttp = `https://example.com/${"y".repeat(500)}`;
+    const cappedHttp = truncateLongUrl(longHttp);
+    expect(cappedHttp.length).toBeLessThan(200);
+    expect(cappedHttp).toMatch(/^https:\/\/example\.com\//);
+    expect(cappedHttp).toMatch(/…<\d+ chars>$/);
+  });
+
+  it("Network.getRequests caps data: URLs but keeps totals and full-URL filtering", async () => {
+    const listeners = new Map();
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("https://example.com/"),
+      title: vi.fn().mockResolvedValue("Example"),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn((event, handler) => {
+        const handlers = listeners.get(event) || [];
+        handlers.push(handler);
+        listeners.set(event, handlers);
+      }),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "chromium",
+        defaultBackend: "cloakbrowser",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+      },
+      newPage: vi.fn().mockResolvedValue(page),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", { targetId: "cap-urls" });
+    const bigData = `data:text/javascript;charset=utf-8,${"z".repeat(3000)}`;
+    const request = { id: () => "r1", method: () => "GET", url: () => bigData, resourceType: () => "script" };
+    listeners.get("request").forEach((handler) => handler(request));
+    listeners.get("response").forEach((handler) => handler({
+      request: () => request,
+      url: () => bigData,
+      status: () => 200,
+      ok: () => true,
+      fromCache: () => false,
+    }));
+
+    const res = await handleDevtoolsToolCall("Network.getRequests", { targetId: created.targetId });
+    expect(res).toMatchObject({ total: 1, shown: 1, failed: 0 });
+    expect(res.requests[0].url.length).toBeLessThan(200);
+    expect(res.requests[0].url).toMatch(/^data:text\/javascript/);
+
+    // filtering still matches the full buffered URL, not the capped display
+    const filtered = await handleDevtoolsToolCall("Network.getRequests", { targetId: created.targetId, filter: "zzzz" });
+    expect(filtered.shown).toBe(1);
   });
 });

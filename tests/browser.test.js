@@ -470,6 +470,87 @@ describe("BrowserManager", () => {
       const result = await mod.resolveBrowserParam({}, config, manager, { roles: ["fetch"] });
       expect(result.rollbackNotes).toEqual(["fetch: down"]);
     });
+
+    describe("per-key MCP browser allow-list (plan 57)", () => {
+      const makeScopedManager = () => {
+        const config = makeConfig({
+          browsers: [
+            { name: "chromium", role: ["default"], cdpUrl: undefined, addOn: false },
+            { name: "lightpanda", role: ["fetch"], cdpUrl: "http://127.0.0.1:9222", addOn: true }
+          ]
+        });
+        const manager = new BrowserManager(config);
+        const addonPage = { id: "lp", close: vi.fn().mockResolvedValue(undefined) };
+        manager._connectAddOnPage = vi.fn().mockResolvedValue(addonPage);
+        manager._newChromiumPage = vi.fn().mockResolvedValue({ id: "ch" });
+        return { config, manager, addonPage };
+      };
+
+      it("serves an explicitly allowed add-on name", async () => {
+        const { config, manager, addonPage } = makeScopedManager();
+        const mod = await import("../src/browser.js");
+        const result = await mod.resolveBrowserParam({ browser: "lightpanda" }, config, manager, {
+          allowedMcpBrowsers: new Set(["lightpanda"])
+        });
+        expect(result).toMatchObject({ page: addonPage, browser: "lightpanda" });
+      });
+
+      it("refuses a disallowed explicit name before connecting anything", async () => {
+        const { config, manager } = makeScopedManager();
+        const mod = await import("../src/browser.js");
+        await expect(
+          mod.resolveBrowserParam({ browser: "lightpanda" }, config, manager, {
+            allowedMcpBrowsers: new Set(["chromium"])
+          })
+        ).rejects.toThrow(/not permitted for this API key/);
+        // The fast path must not have opened a page or touched the add-on.
+        expect(manager._connectAddOnPage).not.toHaveBeenCalled();
+        expect(manager._newChromiumPage).not.toHaveBeenCalled();
+      });
+
+      it("refuses post-resolve when the default chain lands on a disallowed add-on, and closes the page", async () => {
+        const { config, manager, addonPage } = makeScopedManager();
+        const mod = await import("../src/browser.js");
+        await expect(
+          mod.resolveBrowserParam({}, config, manager, { allowedMcpBrowsers: new Set(["chromium"]) })
+        ).rejects.toThrow(/not permitted for this API key/);
+        // The page was opened before the allow-list was known, so it must be
+        // closed again — otherwise a denied key leaks a tab on every call.
+        expect(addonPage.close).toHaveBeenCalled();
+      });
+
+      it("refuses when the chain falls back to a disallowed chromium", async () => {
+        const { config, manager, addonPage } = makeScopedManager();
+        manager._connectAddOnPage = vi.fn().mockRejectedValue(new Error("down"));
+        const mod = await import("../src/browser.js");
+        await expect(
+          mod.resolveBrowserParam({}, config, manager, { allowedMcpBrowsers: new Set(["lightpanda"]) })
+        ).rejects.toThrow(/not permitted for this API key/);
+        expect(manager._newChromiumPage).not.toHaveBeenCalled();
+        expect(addonPage.close).not.toHaveBeenCalled();
+      });
+
+      it("leaves an unrestricted key (null) untouched", async () => {
+        const { config, manager, addonPage } = makeScopedManager();
+        const mod = await import("../src/browser.js");
+        const result = await mod.resolveBrowserParam({ browser: "lightpanda" }, config, manager, {
+          allowedMcpBrowsers: null
+        });
+        expect(result).toMatchObject({ page: addonPage });
+      });
+
+      it("denies every browser for an empty allow-list", async () => {
+        const { config, manager } = makeScopedManager();
+        const mod = await import("../src/browser.js");
+        await expect(
+          mod.resolveBrowserParam({ browser: "chromium" }, config, manager, { allowedMcpBrowsers: new Set() })
+        ).rejects.toThrow(/allowed MCP browsers: none/);
+        await expect(
+          mod.resolveBrowserParam({}, config, manager, { allowedMcpBrowsers: new Set() })
+        ).rejects.toThrow(/not permitted for this API key/);
+        expect(manager._newChromiumPage).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe("getBrowserManager singleton", () => {

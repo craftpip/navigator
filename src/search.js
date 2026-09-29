@@ -16,7 +16,7 @@ import {
   recordSearchStart,
   searchContext
 } from "./activity.js";
-import { findMatchingHints, findMatchingManagedHints, getDomainHints, getWildcardHint, loadManagedHints, getManagedHintsPath, FLOW_TOTAL_TIMEOUT_MAX, SCRIPT_TIMEOUT_DEFAULT_MS, SCRIPT_TIMEOUT_MAX_MS } from "./domain-hints.js";
+import { findMatchingHints, findMatchingManagedHints, getDomainHints, getWildcardHint, loadManagedHints, getManagedHintsPath, compileScriptSource, FLOW_TOTAL_TIMEOUT_MAX, SCRIPT_TIMEOUT_DEFAULT_MS, SCRIPT_TIMEOUT_MAX_MS } from "./domain-hints.js";
 import { htmlToMarkdown } from "./markdown.js";
 import { getEngineDriver, getEngineMetadata, SUPPORTED_ENGINES } from "./engines/index.js";
 import { fetchDuckDuckGoInstantAnswers } from "./engines/instant-answers.js";
@@ -2091,6 +2091,24 @@ async function runFlowExtraction({ page, hint, config, maxChars, debug, debugLog
   return result;
 }
 
+export function extractMarkdownLinks(text, { limit = 500 } = {}) {
+  // Links a script renders as [text](https://…) markdown must also be
+  // registered (page.links) or openTargetsParallel leaves their URLs raw
+  // instead of rewriting them to ref_ids.
+  const found = [];
+  if (typeof text !== "string" || !text) return found;
+  const seen = new Set();
+  const re = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let m;
+  while ((m = re.exec(text)) !== null && found.length < limit) {
+    const href = String(m[2] || "").trim();
+    if (!/^https?:\/\//i.test(href) || seen.has(href)) continue;
+    seen.add(href);
+    found.push({ href, text: String(m[1] || "").trim().slice(0, 200) });
+  }
+  return found;
+}
+
 export async function runScriptExtraction({ page, hint, config, maxChars, debug, debugLog, withPageTimeout, withOperationDeadline, operationTimeoutMs, includeSeoAnalysis, hintNote, startTime, defaultExtractSkipSelectors, signal }) {
   if (signal?.aborted) throw new Error("Script extraction aborted before execution");
   const scriptSource = hint?.script;
@@ -2134,12 +2152,16 @@ export async function runScriptExtraction({ page, hint, config, maxChars, debug,
     undefined
   };
   const context = vm.createContext(sandbox, { name: "script-hint" });
-  const wrapped = `(async () => { ${scriptSource} })()`;
+  let compiled;
+  try {
+    compiled = compileScriptSource(scriptSource);
+  } catch (error) {
+    throw new Error(`Script hint failed: ${String(error?.message || error)}`);
+  }
   let rawResult;
   try {
-    const script = new vm.Script(wrapped, { filename: `hint:${hint.domain || "unknown"}` });
     rawResult = await withOperationDeadline("script_execution", () =>
-      script.runInContext(context, { timeout: timeoutMs })
+      compiled.runInContext(context, { timeout: timeoutMs })
     );
   } catch (error) {
     if (String(error?.message || "").includes("Script execution timed out")) {
@@ -2189,6 +2211,9 @@ export async function runScriptExtraction({ page, hint, config, maxChars, debug,
         .filter((l) => l && typeof l === "object" && (l.href || l.url) && l.text !== undefined)
         .map((l) => ({ href: l.href || l.url, text: String(l.text || "").slice(0, 200) }))
     : [];
+  for (const scanned of extractMarkdownLinks(finalText)) {
+    if (!links.some((l) => l.href === scanned.href)) links.push(scanned);
+  }
   const tables = Array.isArray(normalized.tables) ? normalized.tables : [];
   const warnings = Array.isArray(normalized.warnings) ? normalized.warnings.filter((w) => typeof w === "string") : [];
   const pageStateWarnings = await withPageTimeout("detect_page_state", () => detectPageState(page));
@@ -2215,7 +2240,7 @@ export async function runScriptExtraction({ page, hint, config, maxChars, debug,
   return result;
 }
 
-export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "", requestScript = null, requestScriptOptions }) {
+export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "", requestScript = null, requestScriptOptions, allowedMcpBrowsers = null }) {
   const tOverall = performance.now();
   activityCounters.fetches += 1;
   incrementUsageTotal("fetches");
@@ -2344,7 +2369,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       return manager.withPageSlot(async () => {
         t = performance.now();
         const { page, browser: usedBrowser, ownership = "agent", rollbackNotes = [] } = await operation.openPage(() =>
-          resolveBrowserParam({ browser: requestedBrowser }, manager.config, manager)
+          resolveBrowserParam({ browser: requestedBrowser }, manager.config, manager, { allowedMcpBrowsers })
         );
         // Now that the serving browser is known, apply ownership-aware budgets
         // (relay round-trips are slower; plan 51). Re-configuring is safe — the
@@ -2678,7 +2703,8 @@ export async function browserCaptureScreenshot({
   fullPage = true,
   quality,
   viewport,
-  browser = ""
+  browser = "",
+  allowedMcpBrowsers = null
 }) {
   activityCounters.screenshots += 1;
   incrementUsageTotal("screenshots");
@@ -2693,7 +2719,7 @@ export async function browserCaptureScreenshot({
 
   try {
     const result = await manager.withPageSlot(async () => {
-    const { page, browser: usedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser }, manager.config, manager);
+    const { page, browser: usedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser }, manager.config, manager, { allowedMcpBrowsers });
 
     try {
       if (viewport && typeof viewport === "object" && viewport.width) {

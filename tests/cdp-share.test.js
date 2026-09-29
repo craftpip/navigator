@@ -110,6 +110,17 @@ describe("checkBrowserAccess", () => {
     expect(checkBrowserAccess(record, "cloakbrowser")).toBe(true);
     expect(checkBrowserAccess(record, "chromium")).toBe(false);
   });
+
+  it("ignores allowed_mcp_browsers — the two lists stay independent (plan 57)", () => {
+    // Regression guard: the MCP allow-list must not leak into the /cdp gate.
+    // A key may grant MCP chromium while granting CDP only cloakbrowser.
+    const record = {
+      allowed_browsers: JSON.stringify(["cloakbrowser"]),
+      allowed_mcp_browsers: JSON.stringify(["chromium"])
+    };
+    expect(checkBrowserAccess(record, "cloakbrowser")).toBe(true);
+    expect(checkBrowserAccess(record, "chromium")).toBe(false);
+  });
 });
 
 describe("revokeMcpApiKey with used key (FK regression)", () => {

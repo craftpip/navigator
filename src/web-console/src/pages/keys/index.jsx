@@ -3,6 +3,7 @@ import { request } from "../../lib/request.js";
 import { formatKeyDate } from "../../lib/format.js";
 import { Panel, Empty, Pill, Check, Loading, Spinner } from "../../components/ui.jsx";
 import { usePopup } from "../../components/popup.jsx";
+import { useModalDismiss } from "../../components/modal.js";
 
 function sameTools(a, b) {
   const sa = [...new Set(a)].sort();
@@ -25,16 +26,25 @@ export function Keys() {
   const [name, setName] = useState("");
   const [allowedTools, setAllowedTools] = useState([]);
   const [allowedBrowsers, setAllowedBrowsers] = useState([]);
+  const [allowedMcpBrowsers, setAllowedMcpBrowsers] = useState([]);
   const [createdBrowsers, setCreatedBrowsers] = useState([]);
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [revoking, setRevoking] = useState(null);
+  // Shared feel: Escape closes, backdrop/X/Cancel play the exit animation.
+  // Enter submits via the form. Disabled while saving.
+  const { closing, requestClose, cancelClose } = useModalDismiss({
+    onClose: () => setModal(null),
+    disabled: saving,
+    active: modal !== null,
+  });
   const load = async () => {
     try {
       const payload = await request("/console/api-keys");
       setState(payload);
       setAllowedTools(payload.toolGroups.flatMap((group) => group.tools));
       setAllowedBrowsers((payload.browsers || []).map((browser) => browser.name));
+      setAllowedMcpBrowsers((payload.browsers || []).map((browser) => browser.name));
     } catch (error) {
       setMessage(error.message);
       setKind("err");
@@ -55,23 +65,33 @@ export function Keys() {
     return next;
   };
   const openCreate = () => {
+    // Cancel a close that may still be animating (rapid reopen after Escape /
+    // X / backdrop): without this the stale timer slams the fresh modal shut.
+    // This state change alone re-renders even when every value below is
+    // identical, so the reopen can never be swallowed by a bail-out.
+    cancelClose();
     setName("");
     setAllowedTools(allTools());
     setAllowedBrowsers([]);
+    // MCP tools are what a key is normally issued for, so start wide. The CDP
+    // list above stays empty until the operator opts a browser in.
+    setAllowedMcpBrowsers(allBrowsers());
     setSecret("");
     setCreatedBrowsers([]);
     setModal("create");
   };
   const openEdit = (key) => {
+    cancelClose();
     setName(key.name);
     setAllowedTools(key.allowedTools == null ? allTools() : key.allowedTools);
     setAllowedBrowsers(key.allowedBrowsers == null ? allBrowsers() : key.allowedBrowsers);
+    setAllowedMcpBrowsers(key.allowedMcpBrowsers == null ? allBrowsers() : key.allowedMcpBrowsers);
     setSecret("");
     setCreatedBrowsers([]);
     setModal(key);
   };
   const closeModal = () => {
-    if (!saving) setModal(null);
+    requestClose();
   };
   const save = async () => {
     const trimmed = name.trim();
@@ -79,7 +99,7 @@ export function Keys() {
     setSaving(true);
     try {
       if (modal === "create") {
-        const next = await postKeys({ action: "create", name: trimmed, allowedTools, allowedBrowsers });
+        const next = await postKeys({ action: "create", name: trimmed, allowedTools, allowedBrowsers, allowedMcpBrowsers });
         setSecret(next.key || "");
         setCreatedBrowsers([...allowedBrowsers]);
         setMessage("API key created.");
@@ -98,6 +118,11 @@ export function Keys() {
         const effectiveBrowsers = modal.allowedBrowsers == null ? allBrowsers() : modal.allowedBrowsers;
         if (!sameBrowsers(allowedBrowsers, effectiveBrowsers)) {
           await postKeys({ action: "set_browsers", id: modal.id, allowedBrowsers });
+          changed = true;
+        }
+        const effectiveMcpBrowsers = modal.allowedMcpBrowsers == null ? allBrowsers() : modal.allowedMcpBrowsers;
+        if (!sameBrowsers(allowedMcpBrowsers, effectiveMcpBrowsers)) {
+          await postKeys({ action: "set_mcp_browsers", id: modal.id, allowedMcpBrowsers });
           changed = true;
         }
         if (changed) {
@@ -140,6 +165,9 @@ export function Keys() {
   const toggleBrowser = (browser) => setAllowedBrowsers((current) =>
     current.includes(browser) ? current.filter((name) => name !== browser) : [...current, browser],
   );
+  const toggleMcpBrowser = (browser) => setAllowedMcpBrowsers((current) =>
+    current.includes(browser) ? current.filter((name) => name !== browser) : [...current, browser],
+  );
   const copyText = async (text, okMessage) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -162,7 +190,7 @@ export function Keys() {
             <button className="button primary" onClick={openCreate}>Add API key</button>
           </div>
         </div>
-        {modal && <div className="api-key-modal-backdrop" onMouseDown={closeModal}>
+        {modal && <div className={`api-key-modal-backdrop${closing ? " is-closing" : ""}`} onMouseDown={closeModal}>
           <form
             className="api-key-modal"
             onMouseDown={(event) => event.stopPropagation()}
@@ -176,7 +204,7 @@ export function Keys() {
                 <b>{modal === "create" ? "Create API key" : "Edit API key"}</b>
                 <small>{modal === "create" ? "Name it and choose exactly what it can access." : "Update the name and tool access for this key."}</small>
               </div>
-              <button type="button" className="clear" onClick={closeModal}>Close</button>
+              <button type="button" className="clear" aria-label="Close" onClick={closeModal}>×</button>
             </div>
             <label className="api-key-name-field">
               <span>API key name</span>
@@ -234,6 +262,35 @@ export function Keys() {
                     ))}
                   </div>
                   <small className="api-key-browser-note">Drives that browser over CDP at <code>/cdp/&lt;browser&gt;?key=</code> — relay browsers are the user's real window.</small>
+                </div>
+              </details>
+              <details className="api-key-browsers" open>
+                <summary>{allowedMcpBrowsers.length === allBrowsers().length ? "All MCP browsers allowed" : `${allowedMcpBrowsers.length} of ${allBrowsers().length} MCP browsers allowed`}</summary>
+                <div className="api-key-browser-groups">
+                  <div className="api-key-tool-actions">
+                    <button type="button" onClick={() => setAllowedMcpBrowsers(allBrowsers())}>Allow all</button>
+                    <button type="button" onClick={() => setAllowedMcpBrowsers([])}>Clear all</button>
+                  </div>
+                  <div className="api-key-browser-items">
+                    {(state?.browsers || []).map((browser) => (
+                      <span className="api-key-browser-row" key={browser.name}>
+                        <Check
+                          label={browser.name}
+                          checked={allowedMcpBrowsers.includes(browser.name)}
+                          onChange={() => toggleMcpBrowser(browser.name)}
+                          trailing={
+                            <span
+                              className={browser.connected ? "api-key-browser-on" : "api-key-browser-off"}
+                              title={`${browser.type} · ${browser.status}`}
+                            >
+                              {browser.connected ? "●" : "○"}
+                            </span>
+                          }
+                        />
+                      </span>
+                    ))}
+                  </div>
+                  <small className="api-key-browser-note">Browsers this key may reach with the <code>browser</code> argument on <code>web_fetch</code>, <code>web_page_screenshot</code>, <code>web_page_ascii</code>, <code>web_page_svg</code> and <code>Target.createTarget</code>. Independent of the CDP list above.</small>
                 </div>
               </details>
             </div>
@@ -294,7 +351,8 @@ export function Keys() {
                   <code>{key.preview}</code>
                   <small>
                     <span>{key.allowedTools == null ? "all tools" : `${key.allowedTools.length} tools`}</span>
-                    <span>{key.allowedBrowsers == null ? "all browsers" : `${key.allowedBrowsers.length} browsers`}</span>
+                    <span>{key.allowedBrowsers == null ? "all CDP browsers" : `${key.allowedBrowsers.length} CDP browsers`}</span>
+                    <span>{key.allowedMcpBrowsers == null ? "all MCP browsers" : `${key.allowedMcpBrowsers.length} MCP browsers`}</span>
                   </small>
                   <div className="api-key-row-actions">
                     <button className="button" onClick={() => openEdit(key)}>Edit</button>

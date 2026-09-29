@@ -444,6 +444,72 @@ describe("mcp-server HTTP endpoints", () => {
       expect(revoked.status).toBe(200);
     });
 
+    it("carries allowedMcpBrowsers per key, creates and replaces it independently of CDP (plan 57)", async () => {
+      const created = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          name: "MCP scoped key",
+          allowedTools: ["web_search"],
+          // The two lists are independent: MCP gets cloakbrowser, CDP gets chromium.
+          allowedMcpBrowsers: ["cloakbrowser", "no-such-browser"],
+          allowedBrowsers: ["chromium"],
+        }),
+      });
+      const payload = await created.json();
+      expect(created.status).toBe(200);
+      const key = payload.keys.find((entry) => entry.preview === `${payload.key.slice(0, 12)}...${payload.key.slice(-12)}`);
+      // Unknown names are dropped, and allowedBrowsers is untouched by the MCP list.
+      expect(key).toMatchObject({
+        name: "MCP scoped key",
+        allowedMcpBrowsers: ["cloakbrowser"],
+        allowedBrowsers: ["chromium"],
+      });
+
+      const replaced = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "set_mcp_browsers", id: key.id, allowedMcpBrowsers: ["cloakbrowser", "chromium"] }),
+      });
+      const after = await replaced.json();
+      expect(replaced.status).toBe(200);
+      const updated = after.keys.find((entry) => entry.id === key.id);
+      expect(updated.allowedMcpBrowsers).toEqual(["cloakbrowser", "chromium"]);
+      // set_mcp_browsers must not touch the CDP list (plan 57 §2.2).
+      expect(updated.allowedBrowsers).toEqual(["chromium"]);
+
+      // An empty list stays [] (deny everything) rather than silently widening
+      // back to "all browsers".
+      const emptied = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "set_mcp_browsers", id: key.id, allowedMcpBrowsers: [] }),
+      });
+      const emptyPayload = await emptied.json();
+      expect(emptyPayload.keys.find((entry) => entry.id === key.id).allowedMcpBrowsers).toEqual([]);
+
+      const revoked = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "revoke", id: key.id }),
+      });
+      expect(revoked.status).toBe(200);
+    });
+
+    it("leaves legacy keys unrestricted (allowedMcpBrowsers === null) (plan 57)", async () => {
+      // A key created before the migration has no allowed_mcp_browsers value,
+      // which must mean "unrestricted", not "no browsers".
+      const dbMod = await import("../src/db.js");
+      const { randomBytes } = await import("node:crypto");
+      const secret = `nvg_${randomBytes(32).toString("base64url")}`;
+      dbMod.createMcpApiKey({ name: "Legacy key", secret, allowedTools: ["web_search"] });
+
+      const res = await fetch(`${MCP_BASE}/console/api-keys`);
+      const payload = await res.json();
+      expect(payload.keys.find((entry) => entry.name === "Legacy key").allowedMcpBrowsers).toBeNull();
+    });
+
     it("GET /cdp requires a key and lists shareable browsers (plan 55)", async () => {
       const anon = await fetch(`${MCP_BASE}/cdp`);
       expect(anon.status).toBe(401);
@@ -1372,6 +1438,64 @@ describe("mcp-server HTTP endpoints", () => {
       expect(text).not.toContain("  - page content here");
     });
 
+    it("a key restricted to MCP browsers bypasses the web_fetch result cache (plan 57)", async () => {
+      // The tool-result cache is keyed on request args and carries no API-key
+      // identity, so a restricted key must not be able to read an entry another
+      // key fetched on a browser it is not allowed to use. Restricted keys skip
+      // both the read and the write.
+      const dbMod = await import("../src/db.js");
+      const searchMod = await import("../src/search.js");
+      searchMod.browserOpenAndExtract.mockReset();
+      searchMod.browserOpenAndExtract.mockImplementation(async ({ url }) => ({
+        title: "Cached Domain",
+        url,
+        text: "page body",
+      }));
+
+      // Create through the console API so the key is synced into the
+      // in-memory list the request path authorizes against.
+      const created = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          name: "cache-bypass key",
+          allowedTools: ["web_fetch"],
+          allowedMcpBrowsers: ["chromium"],
+        }),
+      });
+      const secret = (await created.json()).key;
+      expect(secret).toMatch(/^nvg_/);
+
+      const request = {
+        jsonrpc: "2.0", id: 300, method: "tools/call",
+        params: {
+          name: "web_fetch",
+          arguments: { urls: ["https://cache-bypass.example.com"], browser: "chromium" },
+        },
+      };
+
+      // 1. An unrestricted request populates the shared cache for these args.
+      await mcpPost(request);
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(1);
+
+      // 2. A second unrestricted request with the same args IS served from cache.
+      await mcpPost({ ...request, id: 301 });
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(1);
+
+      // 3. The restricted key must miss that cache and go to the browser, where
+      //    the per-key permission check can run.
+      await mcpPost(request, { authorization: `Bearer ${secret}` });
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(2);
+
+      const revoked = await fetch(`${MCP_BASE}/console/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "revoke", id: (await (await fetch(`${MCP_BASE}/console/api-keys`)).json()).keys.find((entry) => entry.name === "cache-bypass key").id }),
+      });
+      expect(revoked.status).toBe(200);
+    });
+
     it("forwards normalized extraction limits to the page extractor", async () => {
       const searchMod = await import("../src/search.js");
       searchMod.browserOpenAndExtract.mockReset();
@@ -1399,7 +1523,8 @@ describe("mcp-server HTTP endpoints", () => {
         hintOverride: null,
         cachedHtml: null,
         captureHtml: false,
-        browser: ""
+        browser: "",
+        allowedMcpBrowsers: null
       });
     });
 
@@ -1617,7 +1742,7 @@ describe("mcp-server HTTP endpoints", () => {
         }
       });
 
-      it("runs validate → upsert → get → disable → remove", async () => {
+      it("runs validate → upsert → get → disable → enable → remove", async () => {
         await enableSetup();
         try {
           const bad = await setupCall({ operation: "validate", hint: setupHint({ id: "BAD!" }) }, 204);
@@ -1644,9 +1769,14 @@ describe("mcp-server HTTP endpoints", () => {
           const afterDisable = await setupCall({ operation: "get", url: "https://example.com/feat" }, 210);
           expect(JSON.parse(afterDisable.result.content[0].text).source).toBe("none");
 
-          const removed = await setupCall({ operation: "remove", id: "ex-1h-v1" }, 211);
+          const enabled = await setupCall({ operation: "enable", id: "ex-1h-v1" }, 211);
+          expect(JSON.parse(enabled.result.content[0].text).enabled).toBe(true);
+          const afterEnable = await setupCall({ operation: "get", url: "https://example.com/feat" }, 212);
+          expect(JSON.parse(afterEnable.result.content[0].text).source).toBe("managed");
+
+          const removed = await setupCall({ operation: "remove", id: "ex-1h-v1" }, 213);
           expect(JSON.parse(removed.result.content[0].text).removed).toBe(true);
-          const afterRemove = await setupCall({ operation: "list" }, 212);
+          const afterRemove = await setupCall({ operation: "list" }, 214);
           expect(JSON.parse(afterRemove.result.content[0].text).hints).toEqual([]);
         } finally {
           await disableSetup();
@@ -1656,11 +1786,78 @@ describe("mcp-server HTTP endpoints", () => {
       it("rejects unknown ids and missing upsert fields", async () => {
         await enableSetup();
         try {
-          const noHint = await setupCall({ operation: "disable", id: "nope" }, 213);
+          const noHint = await setupCall({ operation: "disable", id: "nope" }, 215);
           expect(noHint.result.isError).toBe(true);
-          const missingField = await setupCall({ operation: "upsert", hint: { id: "x" } }, 214);
+          const noHintEnable = await setupCall({ operation: "enable", id: "nope" }, 216);
+          expect(noHintEnable.result.isError).toBe(true);
+          const missingField = await setupCall({ operation: "upsert", hint: { id: "x" } }, 217);
           expect(missingField.result.isError).toBe(true);
           expect(missingField.result.content[0].text).toMatch(/hint\.domain/);
+        } finally {
+          await disableSetup();
+        }
+      });
+
+      it("console hints API can create, list, edit, validate and remove managed hints by id", async () => {
+        const manager = await enableSetup();
+        manager.config.domainHintsPath = path.join(path.dirname(manager.config.domainHintsManagedPath), "domain-hints.json");
+        try {
+          const createdRes = await fetch(`${MCP_BASE}/console/api/hints/managed/console-test`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ hint: { id: "console-test", domain: "test.example.com", pathPattern: "/**", pageType: "probe", comment: "console probe", script: 'return { text: document.title };' } }),
+          });
+          expect(createdRes.status).toBe(200);
+          const created = await createdRes.json();
+          expect(created.ok).toBe(true);
+          expect(created.id).toBe("console-test");
+          expect(created.source).toBe("managed");
+          expect(created.hint.domain).toBe("test.example.com");
+
+          const listRes = await fetch(`${MCP_BASE}/console/api/hints`).then((r) => r.json());
+          const row = listRes.hints.find((h) => h._managed === true && h.id === "console-test");
+          expect(row).toBeDefined();
+          expect(row.pageType).toBe("probe");
+
+          const urlIdWinsRes = await fetch(`${MCP_BASE}/console/api/hints/managed/console-test`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ hint: { id: "WRONG-ID", domain: "test.example.com", pathPattern: "/foo/**", pageType: "probe2", comment: "updated", script: 'return { text: document.title + "!" };' } }),
+          });
+          expect(urlIdWinsRes.status).toBe(200);
+          const updated = await urlIdWinsRes.json();
+          expect(updated.hint.id).toBe("console-test");
+          expect(updated.hint.pathPattern).toBe("/foo/**");
+          expect(updated.hint.pageType).toBe("probe2");
+
+          const invalidRes = await fetch(`${MCP_BASE}/console/api/hints/managed/console-test`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ hint: { id: "console-test", domain: "test.example.com", pathPattern: "/**", script: "x", enabled: "not-bool" } }),
+          });
+          expect(invalidRes.status).toBe(400);
+          const invalid = await invalidRes.json();
+          expect(invalid.ok).toBe(false);
+          expect(invalid.validation.errors.some((e) => e.field === "enabled")).toBe(true);
+
+          const validateRes = await fetch(`${MCP_BASE}/console/api/hints/validate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ hint: { _managed: true, id: "console-test", domain: "test.example.com", pathPattern: "/**", script: "x", scriptOptions: { timeoutMs: 99999 } } }),
+          }).then((r) => r.json());
+          expect(validateRes.valid).toBe(false);
+
+          const removedRes = await fetch(`${MCP_BASE}/console/api/hints/managed/console-test`, { method: "DELETE" });
+          expect(removedRes.status).toBe(200);
+          const removed = await removedRes.json();
+          expect(removed.ok).toBe(true);
+          expect(removed.removed).toMatchObject({ id: "console-test" });
+
+          const afterRes = await fetch(`${MCP_BASE}/console/api/hints`).then((r) => r.json());
+          expect(afterRes.hints.find((h) => h._managed === true && h.id === "console-test")).toBeUndefined();
+
+          const missingRes = await fetch(`${MCP_BASE}/console/api/hints/managed/does-not-exist`, { method: "DELETE" });
+          expect(missingRes.status).toBe(400);
         } finally {
           await disableSetup();
         }
@@ -2568,6 +2765,19 @@ describe("DISABLE_TOOLS env filtering", () => {
     expect(body.result.isError).toBe(true);
     expect(body.result.content[0].text).toContain("disabled");
     expect(body.result.content[0].text).toContain("DISABLE_TOOLS");
+  });
+});
+
+describe("resolveSvgElementLimit (plan 68)", () => {
+  it("honors explicit limits on full-page captures, floors only defaulted ones", async () => {
+    const { resolveSvgElementLimit } = await import("../src/mcp-server.js");
+    expect(resolveSvgElementLimit(60, true)).toBe(60);
+    expect(resolveSvgElementLimit(60, false)).toBe(60);
+    expect(resolveSvgElementLimit(undefined, true)).toBe(5000);
+    expect(resolveSvgElementLimit(undefined, false)).toBe(5000);
+    expect(resolveSvgElementLimit(100000, true)).toBe(5000);
+    expect(() => resolveSvgElementLimit(0, true)).toThrow(/positive number/);
+    expect(() => resolveSvgElementLimit("many", true)).toThrow(/positive number/);
   });
 });
 

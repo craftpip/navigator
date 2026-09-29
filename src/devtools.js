@@ -679,7 +679,7 @@ function installPageObservers(state) {
   }));
 }
 
-async function createTarget(args = {}) {
+async function createTarget(args = {}, allowedMcpBrowsers = null) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
 
@@ -730,7 +730,7 @@ async function createTarget(args = {}) {
     { browser: typeof args.browser === "string" && args.browser.trim() ? args.browser.trim() : "" },
     manager.config,
     manager,
-    { roles: ["devtools", "default"] }
+    { roles: ["devtools", "default"], allowedMcpBrowsers }
   );
 
   if (viewport) await page.setViewport(viewport);
@@ -1059,7 +1059,7 @@ async function reloadPage(args = {}) {
   try {
     await state.page.reload({
       waitUntil: manager.config.navWaitUntil,
-      timeout: manager.config.browserOpTimeoutMs
+      timeout: opTimeoutMsForOwnership(state.ownership, manager.config)
     });
   } finally {
     if (cacheToggled) {
@@ -1160,8 +1160,14 @@ async function getNetworkRequests(args = {}) {
     shown: Math.min(entries.length, limit),
     failed: entries.filter((entry) => entry.failed).length,
     observed: true,
-    requests: entries.slice(-limit).reverse()
+    requests: entries.slice(-limit).reverse().map((entry) => ({ ...entry, url: truncateLongUrl(entry.url) }))
   };
+}
+
+export function truncateLongUrl(url, max = 300) {
+  if (typeof url !== "string" || url.length <= max) return url;
+  const headLen = url.startsWith("data:") ? 60 : 120;
+  return `${url.slice(0, headLen)}…<${url.length} chars>`;
 }
 
 async function evaluateRuntime(args = {}) {
@@ -1184,7 +1190,7 @@ async function evaluateRuntime(args = {}) {
       while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
         let segment = node.tagName.toLowerCase();
         if (node.id) {
-          segment += `#${node.id}`;
+          segment += `#${CSS.escape(node.id)}`;
           parts.unshift(segment);
           break;
         }
@@ -1386,7 +1392,7 @@ async function getDocument(args = {}) {
       while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
         let segment = node.tagName.toLowerCase();
         if (node.id) {
-          segment += `#${node.id}`;
+          segment += `#${CSS.escape(node.id)}`;
           parts.unshift(segment);
           break;
         }
@@ -1537,7 +1543,7 @@ async function querySelector(args = {}, multiple = false) {
       while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
         let segment = node.tagName.toLowerCase();
         if (node.id) {
-          segment += `#${node.id}`;
+          segment += `#${CSS.escape(node.id)}`;
           parts.unshift(segment);
           break;
         }
@@ -1657,7 +1663,7 @@ async function getOuterHtml(args = {}) {
       while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
         let segment = node.tagName.toLowerCase();
         if (node.id) {
-          segment += `#${node.id}`;
+          segment += `#${CSS.escape(node.id)}`;
           parts.unshift(segment);
           break;
         }
@@ -1771,7 +1777,7 @@ async function getCompactHtml(args = {}) {
         while (node && node.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
           let segment = node.tagName.toLowerCase();
           if (node.id) {
-            segment += `#${node.id}`;
+            segment += `#${CSS.escape(node.id)}`;
             parts.unshift(segment);
             break;
           }
@@ -2334,7 +2340,8 @@ async function setWindowBounds(args = {}) {
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
     const rid = realTargetId(state);
-    const result = await sendWindowCommand(state, "Browser.setWindowBounds", { targetId: rid || state.targetId, bounds }, { realTargetId: rid || null });
+    const windowId = await resolveWindowId(state, rid);
+    const result = await sendWindowCommand(state, "Browser.setWindowBounds", { windowId, bounds }, { realTargetId: rid || null });
     return {
       targetId: args.targetId,
       realTargetId: rid,
@@ -2344,6 +2351,19 @@ async function setWindowBounds(args = {}) {
       bounds: result.bounds ?? bounds
     };
   }, { retryable: false, operation: "Browser.setWindowBounds" });
+}
+
+/**
+ * CDP Browser.setWindowBounds takes { windowId, bounds } — not a targetId.
+ * Resolve the window for the target first; every window/bounds caller goes
+ * through here so the id is never dropped again.
+ */
+async function resolveWindowId(state, rid) {
+  const win = await sendWindowCommand(state, "Browser.getWindowForTarget", { targetId: rid || state.targetId }, { realTargetId: rid || null });
+  if (win?.windowId === undefined || win?.windowId === null) {
+    throw new Error("Browser.getWindowForTarget returned no windowId for this target");
+  }
+  return win.windowId;
 }
 
 async function focusWindow(args = {}) {
@@ -2357,7 +2377,8 @@ async function focusWindow(args = {}) {
     let windowFocused = false;
     let boundsError = null;
     try {
-      await sendWindowCommand(state, "Browser.setWindowBounds", { targetId: rid || state.targetId, bounds: { focused: true } }, routed);
+      const windowId = await resolveWindowId(state, rid);
+      await sendWindowCommand(state, "Browser.setWindowBounds", { windowId, bounds: { focused: true } }, routed);
       windowFocused = true;
     } catch (error) {
       boundsError = String(error?.message || error);
@@ -2768,7 +2789,7 @@ export async function getPageContent(targetId) {
   return html;
 }
 
-export async function handleDevtoolsToolCall(name, args = {}) {
+export async function handleDevtoolsToolCall(name, args = {}, allowedMcpBrowsers = null) {
   // Reject unknown tools synchronously before any manager/config await.
   const KNOWN = new Set([
     "Target.createTarget", "Target.getTargets", "Target.closeTarget",
@@ -2783,7 +2804,9 @@ export async function handleDevtoolsToolCall(name, args = {}) {
   if (!KNOWN.has(name)) throw new Error(`Unknown developer browser tool: ${name}`);
 
   const run = () => {
-    if (name === "Target.createTarget") return createTarget(args);
+    // Only createTarget resolves a browser, so it is the only handler that
+    // needs the per-key allow-list. The rest address an existing targetId.
+    if (name === "Target.createTarget") return createTarget(args, allowedMcpBrowsers);
     if (name === "Target.getTargets") return listTargets(args);
     if (name === "Target.closeTarget") return closeTarget(args);
     if (name === "Page.navigate") return navigatePage(args);
