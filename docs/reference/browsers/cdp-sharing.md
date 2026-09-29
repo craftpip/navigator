@@ -36,6 +36,10 @@ The gate fails closed, in order, on WebSocket upgrade:
 
 Access is configured in the console **API keys** modal (**Browser CDP access** checkbox section: per-browser chips with connected/type status, "Allow all"/"Clear all"). Stale browser names never 403 — resolution happens before access, so a removed browser just stops resolving (404).
 
+### The MCP-side twin
+
+`allowed_browsers` governs **only** this endpoint. The same key's MCP tools (`web_fetch`, `web_page_screenshot`, `web_page_ascii`, `web_page_svg`, `Target.createTarget`) are gated by a **separate** per-key list, `allowed_mcp_browsers`, edited as its own group in the modal. The two are never merged, and neither implies the other: a key can share `cloakbrowser` here while its MCP tools are limited to `chromium`, or share nothing over CDP while using every browser through MCP. Console-internal and legacy `MCP_API_KEYS` keys are unrestricted on both surfaces. Full table in [MCP and HTTP](/api/mcp-and-http#per-key-permissions).
+
 ### Internal keys get full access
 
 - The console's own internal key (`ensureConsoleToolsApiKey` / "Web Tools UI") has `allowed_browsers NULL` — full access. Safe: its secret is server-generated, never displayed.

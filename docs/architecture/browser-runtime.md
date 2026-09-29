@@ -14,6 +14,8 @@ Browser instances come from the `BROWSERS` array — the built-in Chromium plus 
 
 `resolveBrowserParam()` (src/browser.js) picks the browser for a page call: an explicit `browser` param is strict (errors if that browser is down), otherwise add-ons are tried in `BROWSERS` array order (first connected one serving, each down add-on reported in `rollbackNotes`), falling back to Chromium. Search engines always run on the built-in Chromium — engines never use add-on browsers.
 
+It is also the **single enforcement point for per-key browser permissions**. When the calling API key carries an MCP browser allow-list, an explicit `browser` param that is not on it is refused before any connect work; in the default chain the list is checked after resolution (the opened page is closed again before the refusal, so a denied key never leaves a tab behind), and a refusal is re-thrown rather than recorded as a rollback note, so a permission error is never mistaken for a down add-on. The allow-list narrows what a key may use; it never redirects it — a key that omits `browser` and lands off-list gets an error naming the allowed browsers, not a silent reroute. See [MCP and HTTP](/api/mcp-and-http#authentication) for the per-key lists.
+
 ## Browser Lifetime
 
 - The built-in Chromium launches with the configured profile directory and a keep-alive page so it can recover from an idle page close. It is self-healing.

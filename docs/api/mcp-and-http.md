@@ -79,4 +79,22 @@ HTTP MCP can be open for local use or require a key.
 - Comparisons use `timingSafeEqual`.
 - Persisted API keys and tool allow-lists are managed through the console API and stored in SQLite.
 
+### Per-key permissions
+
+An API key carries up to three independent permission lists, all edited in the console **API keys** modal (`/console/keys`):
+
+| List | Gates | Semantics |
+|---|---|---|
+| `allowed_tools` | which MCP tool names the key may call | `NULL` = all, `[]` = none, array = exact list |
+| `allowed_mcp_browsers` | which browsers the key may drive **through MCP tools** — `web_fetch`, `web_page_screenshot`, `web_page_ascii`, `web_page_svg`, `Target.createTarget` — via their `browser` argument | `NULL` = all, `[]` = none, array = exact names (case-insensitive) |
+| `allowed_browsers` | which browsers the key may reach over the **external CDP endpoint** (`/cdp/<browser>?key=`) — see [CDP Sharing](/reference/browsers/cdp-sharing) | `NULL` = all, `[]` = none, array = exact names |
+
+The two browser lists are deliberately independent: a key may share `cloakbrowser` over CDP while its MCP tools may only use `chromium`, and either list may be cleared to deny everything on that surface. Enforcement is centralized in `resolveBrowserParam()` — see [Browser Runtime](/architecture/browser-runtime#browsermanager).
+
+Three behaviors worth knowing:
+
+- **A refusal is an error, not a redirect.** Naming a browser the key may not use fails the call with `browser "<name>" is not permitted for this API key (allowed MCP browsers: …)`. Omitting `browser` still runs the normal resolution chain; if that lands on a browser the key may not use, the call fails the same way instead of silently rerouting — pass an allowed name.
+- **Restricted keys skip the `web_fetch` result cache** (both read and write). The cache is keyed on request arguments and carries no key identity, so a cached page fetched on a browser the key may not use would otherwise be served before the permission check could run.
+- **Enforcement covers browser *resolution*, not target handles.** Tools that address an existing `targetId` (`Runtime.evaluate`, `DOM.*`, `Input.*`, …) never re-resolve a browser, so a restricted key that already knows a `targetId` can still drive that tab. Restrict the tool list too if that matters.
+
 The web console itself is not protected by MCP API keys. Put it behind a trusted network or reverse proxy when exposed.

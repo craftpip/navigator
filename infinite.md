@@ -30,8 +30,7 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [~] plans/57_mcp-browser-permissions.md — started 2026-09-29 (validate)
-- [ ] plans/59_llm_browser_tool_reliability_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
+- [~] plans/59_llm_browser_tool_reliability_audit.md — started 2026-09-30 (validate first: already-shipped → absorb into `docs/` + archive; else run the plan)
 - [ ] plans/60_configuration_lifecycle_integrity_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/61_wedged-relay-target-purge.md — validate (`proposed`, 10 unticked). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/69_cdp_relay_test_hardening.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
@@ -39,6 +38,8 @@ Each one should be a single reply away from done.
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done
+
+- [x] plans/archive/57_mcp-browser-permissions.md — validated + absorbed 2026-09-30 (implementation was already written, uncommitted, and complete). All five browser-resolution call sites threaded, one enforcement point in `resolveBrowserParam` (`src/browser.js:1762-1828`), 4/4 test files 237/237 pass, full suite 756 pass / 1 pre-existing plan-37 SVG failure / 1 known jsdom-harness suite error. Live proof with a throwaway key (MCP + CDP lists `["cloakbrowser"]`, revoked afterwards): `web_fetch`/`web_page_screenshot`/`web_page_svg`/`Target.createTarget` on `chromium` → `browser "chromium" is not permitted for this API key`, on `cloakbrowser` → success; `/cdp/cloakbrowser` upgraded `101` while `/cdp/chromium` + `/cdp/lightpanda` → `403`; `set_mcp_browsers([])` left the CDP list untouched. `web_page_ascii` unverifiable live (`.env:15` disables it). 8 discrepancies recorded in plan §6.2 — notably §2.5's two grouped modal sections were never built (three flat `<details>`, both browser groups sharing `className="api-key-browsers"`), and a load-bearing mechanism the plan omits: restricted keys bypass the `web_fetch` result cache (`src/mcp-server.js:2570`), because that cache is key-agnostic. Absorbed in `docs/api/mcp-and-http.md` §Per-key permissions, `docs/architecture/browser-runtime.md`, `docs/reference/browsers/cdp-sharing.md`.
 
 - [x] plans/archive/51_relay-timeout-and-close.md — validated + absorbed + archived 2026-09-29. Code + 14 unit tests confirmed; full suite 756 pass / 2 pre-existing failures (modal-dismiss jsdom harness, svg tspan case). The "blocked" live item was unblocked by the connected `Chrome` relay: fetch ok 4458ms, screenshot ok 600/968ms, create+close `{closed:true}` in 108ms, headless close 20ms, zero `running` rows after. 4 follow-up discrepancies recorded in plan §8 (screenshot inner bounds not relay-aware; `engine_attempts` never reconciled — no `ok` column, test masks it; `configureTimeouts` doesn't restart the timer; stale line numbers/baseline) — none fixed. Absorbed in `docs/architecture/browser-runtime.md` §"Relay operation budgets" + `docs/operations/operations-and-configuration.md` §SQLite State; docs rebuilt, `/docs/` 200.
 

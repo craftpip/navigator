@@ -1,8 +1,19 @@
 # 57 — Per-Key MCP Browser Permissions (MCP vs CDP Browser Lists)
 
-**Status:** Plan
+**Status:** Complete — validated 2026-09-30. Every functional requirement ships and was re-verified end-to-end: the `allowed_mcp_browsers` column + migration, the single enforcement point inside `resolveBrowserParam`, all five browser-resolution call sites threaded, the console modal's third permission group, and the four test files §3 asked for. Live proof on the running server (temporary key, MCP + CDP lists `["cloakbrowser"]`): `web_fetch`/`web_page_screenshot`/`web_page_svg`/`Target.createTarget` on `chromium` → `browser "chromium" is not permitted for this API key`, same calls on `cloakbrowser` → success; `/cdp/cloakbrowser?key=` upgraded `101` while `/cdp/chromium` and `/cdp/lightpanda` → `403` (the two lists stayed independent); `set_mcp_browsers([])` left the CDP list untouched. Full suite 756 pass / 1 pre-existing plan-37 SVG failure / 1 known jsdom-harness suite error — the documented baseline. Implementation was already written and uncommitted in the working tree; validation did not change code. 8 discrepancies recorded in §6.2, none blocking.
 **Created:** 2026-09-12
 **Scope:** DB migration + server (`src/db.js`, `src/browser.js`, `src/mcp-server.js`, `src/search.js`, `src/devtools.js`, reuse `src/cdp-share.js` helpers) + console keys modal (`src/web-console/src/pages/keys/index.jsx` + `style.css`) + tests.
+
+**Progress:**
+
+- [x] 1. §2.1 Data model — `allowed_mcp_browsers` column + migration, `NULL`/`[]`/array semantics
+- [x] 2. §2.2 Server payload + key handlers (`allowedMcpBrowsers` on payload, `create`, `set_mcp_browsers`)
+- [x] 3. §2.3 Gate inside `resolveBrowserParam` (fast-path + post-resolve)
+- [x] 4. §2.4 Request plumbing (session + stateless + devtools + 5 call sites)
+- [x] 5. §2.5 Console modal (new browser group, state, save paths, access cell)
+- [x] 6. §3 Tests — `tests/mcp-server.test.js`, `tests/browser.test.js`, `tests/devtools.test.js`, `tests/cdp-share.test.js`
+- [x] 7. §3 Manual e2e on the live server (steps 2–5; step 1 deploy already done — see §6.1)
+- [x] 8. Absorbed into `docs/api/mcp-and-http.md`, `docs/architecture/browser-runtime.md`, `docs/reference/browsers/cdp-sharing.md`
 
 ---
 
@@ -155,11 +166,57 @@ The default-resolution chain (`:1590-1604`) is **not** modified — an omitted p
 
 | File | Change |
 |---|---|
-| `src/db.js` | migration index 13 (`allowed_mcp_browsers`), SELECT/INSERT in `listMcpApiKeys`/`createMcpApiKey`, new `setMcpApiKeyMcpBrowsers` |
+| `src/db.js` | migration index 13 at authoring time — landed as the last entry, index 17 (`src/db.js:153`); SELECT/INSERT in `listMcpApiKeys`/`createMcpApiKey`, new `setMcpApiKeyMcpBrowsers` |
 | `src/mcp-server.js` | `getAllowedMcpBrowsersForRequest`; `allowedMcpBrowsers` on payload + `create`/`set_mcp_browsers`; thread set through `handleToolCall`/`handleToolCallInner`, session + stateless, `web_page_ascii`/`web_page_svg` resolve calls |
 | `src/search.js` | `allowedMcpBrowsers` param on `browserOpenAndExtract` + `browserCaptureScreenshot`, forwarded to `resolveBrowserParam` |
 | `src/devtools.js` | `handleDevtoolsToolCall(name, args, allowedMcpBrowsers)`; `createTarget` forwards to `resolveBrowserParam` opts |
 | `src/browser.js` | `resolveBrowserParam` — `opts.allowedMcpBrowsers` fast-path + post-resolve checks |
-| `src/web-console/src/pages/keys/index.jsx` | MCP permissions section (tools + new browser list), CDP permissions section (existing list moved); new state/handlers/save paths; access-cell third line |
-| `src/web-console/src/style.css` | section headers, mcp-browser grid reuses, access-column width |
+| `src/web-console/src/pages/keys/index.jsx` | MCP browser group added as a third `<details>` next to tools + CDP browsers; new state/handlers/save paths; access-cell third line |
+| `src/web-console/src/style.css` | shared `.api-key-browser-items` grid reused for the MCP list; no new selectors |
 | `tests/mcp-server.test.js`, `tests/browser.test.js`, `tests/devtools.test.js`, `tests/cdp-share.test.js` | per §3 |
+
+---
+
+## 6. Validation (2026-09-30)
+
+### 6.1 What was verified
+
+**Implementation already present** in the working tree (uncommitted) — validation read it against every section and re-ran the plan's own checks. No code was changed by this pass.
+
+| Plan section | Verified as |
+|---|---|
+| §2.1 data model | `src/db.js:12` shared `API_KEY_COLUMNS`, migration `src/db.js:153` (`ALTER TABLE api_keys ADD COLUMN allowed_mcp_browsers TEXT`), `createMcpApiKey` `:328`, `setMcpApiKeyMcpBrowsers` `:357`, `parseAllowedBrowsers` reused as planned (`src/cdp-share.js:34`), already imported at `src/mcp-server.js:19` — §2.1's "verify the import" note resolves to yes |
+| §2.2 payload + handlers | payload per key `src/mcp-server.js:630`; `create` filters unknown names `:684-687`; `set_mcp_browsers` `:738-744`; console key left `NULL` |
+| §2.3 the gate | `src/browser.js:1762-1828` — one enforcement point: explicit-name fast path `:1776`, chain post-check `:1814-1819`, chromium fallback check `:1828` |
+| §2.4 plumbing | `getAllowedMcpBrowsersForRequest` `:594` (lower-cases names); `handleToolCall` `:2460` → `handleToolCallInner` `:2474`; devtools `:3447`; stateless `:3480`/`:3510`; `createMcpServer` `:3539`/`:3570`; per-request wiring `:3675`/`:3711`/`:3739`. Five call sites: `src/search.js:2372` (web_fetch), `src/search.js:2722` (screenshot), `src/mcp-server.js:3019` (ascii), `:3244` (svg), `src/devtools.js:733` (createTarget) |
+| §2.5 console modal | `src/web-console/src/pages/keys/index.jsx` — state `:29`, load seed `:47`, create defaults (MCP all / CDP none) `:75-78`, edit seed `:88`, save order `:113-127`, three `<details>` `:238` (CDP) and `:267` (MCP), access cell `:355` |
+| §3 tests | `tests/mcp-server.test.js:447,500,1441`, `tests/browser.test.js:474`, `tests/devtools.test.js:297`, `tests/cdp-share.test.js:114` — **237/237 pass** across the four files |
+| §4 invariants | 1,2,3,4,6,7 hold as written (verified live for 1/2/4/7; §4.6 gap confirmed still open and accurately described) |
+
+**Live e2e on the running server** (`http://10.69.1.164:1994`, no rebuild needed — the container already ran this code). Two throwaway keys created through `/console/api-keys` and revoked afterwards; `keys` list back to `xdl, Web Tools UI, opencode-cli, mist`.
+
+| §3 step | Result |
+|---|---|
+| 2 — key with MCP + CDP browsers `["cloakbrowser","no-such-browser"]` | `no-such-browser` dropped on write; payload returned `["cloakbrowser"]` |
+| 3 — `web_fetch` `chromium` / `cloakbrowser` / omitted | `browser "chromium" is not permitted for this API key (allowed MCP browsers: cloakbrowser)` / success `Browser: cloakbrowser` / success (`cloakbrowser` is first in the chain — §4.5's clear error is the expected path when the default lands off-list) |
+| 3 — `web_page_screenshot` `chromium` / `cloakbrowser` | same refusal / success with JPEG |
+| 3 — `web_page_svg` `chromium` / `cloakbrowser` | same refusal / success |
+| 3 — `Target.createTarget` `chromium` / `cloakbrowser` | MCP tool error `isError: true` / target created on `cloakbrowser` |
+| 3 — `web_page_ascii` | could not be exercised: `.env:15` sets `DISABLE_TOOLS=web_page_ascii,DOM.getCompactHTML`, so the tool is not advertised and the key's tool list can never contain it. Its gate is the same `resolveBrowserParam({ allowedMcpBrowsers })` call shape as `web_page_svg` (verified live) and is covered by `tests/browser.test.js:474` |
+| 4 — CDP independence | `/cdp/cloakbrowser?key=` → `101` upgrade; `/cdp/chromium` → `403`; `/cdp/lightpanda` → `403` |
+| 5 — modal + save | third group renders and persists; `set_mcp_browsers([])` left `allowedBrowsers` at `["cloakbrowser"]`, both MCP names then refused (`allowed MCP browsers: none`), and `/cdp/cloakbrowser` still upgraded afterwards |
+
+**Suite / lint.** Full `npx vitest run`: **756 pass, 1 fail, 2 failed files** — the failure is the pre-existing plan-37 SVG tspan case and the second file is the known broken jsdom harness (`tests/modal-dismiss.test.jsx`), i.e. exactly the baseline recorded by the plan 51/55/56 validations. `npm run lint` reports 68 pre-existing errors repo-wide (see §6.2 #5 for the one this plan added).
+
+### 6.2 Discrepancies — recorded, not fixed
+
+1. **§5 migration index is wrong (harmless).** It says "migration index 13"; the array holds 18 entries and the column landed last, at index 17 (`src/db.js:153`). Index 13 is `allowed_browsers`. Edited in place in §5.
+2. **§2.5 modal layout was not built as specified.** The plan called for two *grouped* sections — `details.api-key-permissions` "MCP permissions" containing the tools group + the new browser group, and `details.api-key-cdp-permissions` "CDP permissions". What shipped is three flat, open-by-default `<details>`: tools, CDP browsers, MCP browsers — and **both browser sections carry the same `className="api-key-browsers"`** (`keys/index.jsx:238` and `:267`), so the CSS added in §5 for `.api-key-permissions`/`.api-key-cdp-permissions` was never needed and does not exist. Functionally equivalent and arguably simpler; the CDP-vs-MCP distinction survives only through the summary text and the note under the MCP list ("Independent of the CDP list above"). Anyone re-reading §2.5 will expect two nested groups that aren't there.
+3. **Access-cell format differs from §2.5.** Plan: two stacked lines, `MCP: N tools · M browsers` / `CDP: K browsers`. Shipped: three stacked `<span>`s — `all tools`/`N tools`, `all CDP browsers`/`N CDP browsers`, `all MCP browsers`/`N MCP browsers` (`keys/index.jsx:355`). Same information, different shape.
+4. **A mechanism the plan never mentions is load-bearing: restricted keys bypass the `web_fetch` result cache entirely** (`src/mcp-server.js:2570`, `const cacheable = !allowedMcpBrowsers` — skips both read and write). The cache key is derived from request args and carries no API-key identity, so an entry another key fetched on a browser this key may not use would be served before `resolveBrowserParam` ever runs, making the permission check unreachable. The fix is correct but has a real cost (no cache hit or reuse for any restricted key) and no §4 invariant records it. Covered by `tests/mcp-server.test.js:1441`.
+5. **One new lint error from this plan's tests.** `tests/mcp-server.test.js:1446` imports `dbMod` and never uses it. The repo lint baseline is already dirty (68 errors), but this one is attributable to plan 57.
+6. **Refusal message is lower-cased.** Plan: `Browser "<name>" is not permitted …`; code: `browser "<name>" is not permitted for this API key (allowed MCP browsers: <list>|none)` (`src/browser.js:1768`), matching the style of the neighbouring `unknown browser "…"` / `browser "…" is <status>` messages.
+7. **The gate is stricter than §2.3 specified, in two good ways.** In the default chain the code closes the just-opened page before refusing (`src/browser.js:1814-1818`) so a denied key cannot leave a live page — or a visible tab on the user's relay window — behind, and it re-throws a permission refusal instead of recording it as a rollback note and falling through (`:1824`). Neither is in the plan; both are correct.
+8. **Every §1 source reference is stale.** The plan cites pre-change coordinates (e.g. the tool gate `mcp-server.js:2140` is now `:2460`; `resolveBrowserParam` `browser.js:1557` is now `:1754`; `createTarget` `devtools.js:594` is now `:682`; `db.js:130` is `:136`). Harmless for a shipped feature, misleading for anyone using §1 to navigate. §6.1 carries the current coordinates.
+
+**Not verified:** §3 step 1 (`docker compose build && docker compose up -d`) was unnecessary — no new dependency, and the console bundle in `src/web-console/dist` was already built with the new modal, which the live payload and §3 step 5 confirm.
