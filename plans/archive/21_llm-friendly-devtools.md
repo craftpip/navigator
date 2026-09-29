@@ -1,8 +1,9 @@
 # LLM-Friendly DevTools
 
-## Plan Status
+## Status: Complete — 2026-09-29
 
-**Status: DRAFT** — planned only; no implementation started.
+**Status: Complete** — closed 2026-09-29, archived to `plans/archive/`. Historical
+note: DRAFT (planned only) at the time of writing.
 
 ### Checklist
 

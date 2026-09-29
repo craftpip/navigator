@@ -1,6 +1,6 @@
 # Plan 63 — Chat-test tool-surface fixes (#8–#11)
 
-Source: `test-blind/README.md` run 2 (HN article-hint session, 2026-09-24).
+Source: `friction/README.md` run 2 (HN article-hint session, 2026-09-24).
 Scope is LOCKED to the four findings below. No refactors, no drive-bys (STRICT mode).
 
 ## Finding #8 — `\n` escaping asymmetry (per-call script vs validate/upsert)
@@ -81,7 +81,7 @@ Scope is LOCKED to the four findings below. No refactors, no drive-bys (STRICT m
 
 Already implemented live in managed `hn-item-v1` (anchor-text titles,
 `.toptext` story body, `item?id=` self-post guard, conditional Comments
-section, absolute href + `links[]`). Recorded in `test-blind/README.md`.
+section, absolute href + `links[]`). Recorded in `friction/README.md`.
 **Verification only:** post-restart `web_fetch(bypassCache)` on story item,
 Ask HN item, front page (see global checks).
 

@@ -1,7 +1,7 @@
 # Plan 64 — Blind surface sweep: full web-tool exercise on a random site
 
 Routine step: plan. Execution follows in blind mode (browser tools only);
-report lands in `test-blind/README.md` as run 3.
+report lands in `friction/README.md` as run 3.
 
 ## Goal
 
@@ -68,7 +68,7 @@ Log every friction point; deviations from expected observables are findings.
 
 ## Reporting
 
-Append run 3 to `test-blind/README.md` from `RUN-TEMPLATE.md`: task,
+Append run 3 to `friction/README.md` from `RUN-TEMPLATE.md`: task,
 friction tagged `request`/`response`/`tool`, simplification, this plan ref,
 fix proposals (code fixes become plan 65+ — no code changes in this run).
 
@@ -77,7 +77,7 @@ fix proposals (code fixes become plan 65+ — no code changes in this run).
 - Every step above produces its expected observable; each deviation is a
   logged finding. No silent workarounds.
 - Store ends exactly as it started (ids identical); tabs all closed.
-- Report filed in `test-blind/` before the run counts as done.
+- Report filed in `friction/` before the run counts as done.
 
 ## Non-goals
 

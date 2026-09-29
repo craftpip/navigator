@@ -1,7 +1,7 @@
 # Plan 67 — Blind window + capture-options sweep
 
 Routine step: plan. Execution blind (browser tools only); report in
-`test-blind/README.md` as run 5. Runs 1–4 covered search/fetch/links/
+`friction/README.md` as run 5. Runs 1–4 covered search/fetch/links/
 visuals-basic/DOM/setup-lifecycle/interactive-drive. This run covers the
 window chrome and capture option matrix. (Run-4 `data:`-URL fix → plan 68+.)
 
@@ -43,7 +43,7 @@ tall page: good for fullPage vs viewport contrast).
 
 ## Reporting
 
-Append run 5 to `test-blind/README.md` from `RUN-TEMPLATE.md`. Fixes → plan 68+.
+Append run 5 to `friction/README.md` from `RUN-TEMPLATE.md`. Fixes → plan 68+.
 
 ## Testing / success criteria (this run IS the test)
 

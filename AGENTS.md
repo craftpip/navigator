@@ -281,7 +281,7 @@ Check the documented Tool Contract against observed behavior first — if they d
 
 **Routine loop — every chat-test run follows the same five steps, no skipping:**
 1. **Run** the task in chat-test mode (rules 1–3 above) and finish the task itself.
-2. **Log** friction in `test-blind/` (findings list, tagged `request`/`response`/`tool`; append to the run log, never overwrite). Raw confusion first, simplification second.
+2. **Log** friction in `friction/` (findings list, tagged `request`/`response`/`tool`; append to the run log, never overwrite). Raw confusion first, simplification second. The folder's own protocol is `friction/AGENTS.md`.
 3. **Plan** the fixes in `plans/<NN>_<topic>.md` — one section per finding, each with its own testing section (unit + live MCP checks). Testing is mandatory in every plan.
 4. **Fix** the code (STRICT mode: scope-locked, minimal diffs), with unit tests per fix; full suite must show zero new failures vs the documented baseline.
 5. **Verify live** through the MCP tools only (rebuild/restart the container first so the server runs the new code), then close out the findings as fixed with revision numbers.
@@ -324,7 +324,11 @@ The loop, in order:
 `plans/<NN>_<topic>.md` — one `.md` per work item; `plans/README.md` documents the convention in full.
 
 - Items go in `plans/` as one `.md` file each.
-- **Work items live in the file and only then get absorbed**: when an item is complete, absorb what it taught into the project's documentation (`AGENTS.md` → Project Learnings, or `docs/`), then **move the file to `plans/archive/`**. An item never just vanishes — absorb into docs first, then archive.
+- **Work items live in the file and only then get absorbed**: when an item is complete, absorb what it taught into **`docs/`** (the VitePress documentation folder — `docs/api`, `docs/architecture`, `docs/code`, `docs/extraction`, `docs/guides`, `docs/operations`, `docs/reference`, `docs/archive`), then **move the file to `plans/archive/`**. An item never just vanishes — absorb into docs first, then archive.
+  - **Every completed task is absorbed into `docs/`** (user directive, 2026-09-29). Pick the section that matches the subject: a tool/contract change → `docs/api/tool-reference.md`; a new mechanism or design decision → `docs/architecture/*`; code layout → `docs/code/*`; extraction/hints → `docs/extraction/extraction-and-hints.md`; config/ops → `docs/operations/operations-and-configuration.md`.
+  - `AGENTS.md` → Project Learnings is the **secondary** target, only for knowledge that is about *how the agent works* (protocol, gotchas, test/deploy recipes) rather than about the product. Product knowledge goes in `docs/`.
+  - Absorption means **durable, user-facing documentation** — what the thing does, how it behaves, how to use/configure it, and why it was built that way. Not a line-by-line paraphrase of the plan file.
+  - After editing `docs/`, rebuild so the served copy on `:1994/docs/` is current: `docker exec navigator sh -c "cd /app/docs && npm install --include=dev && npm run docs:build"`.
 - Every item file carries a standardized `## Status:` header directly under the `#` title, dated, stating **exactly how much is complete** (e.g. "11/12 items done, remaining: …", "Phases 1–3 done, Phase 4 deferred", "0/4 phases, design complete"). Allowed states: `Complete` / `In progress` / `Proposed` / `Blocked` (incl. dropped) / `Draft` (raw requirements only). No item file without one.
 - Keep a `[x]` progress checklist in the file body.
 - **Always update the item file before leaving its work** — whenever something is built, a phase finished, a finding made, or the session ends, the `## Status:` header and the checklist must match exactly what was done. Never leave it stale.
@@ -951,7 +955,7 @@ Hermes agent reported browser tools disappearing after ~5 min. Container logs sh
 ### Table Extraction — Always On, No Flag
 
 **Created:** 2026-07-25
-**Superseded:** 2026-08-16 — see plan `plans/22_jina-reader-lm-extractor.md`. The default path
+**Superseded:** 2026-08-16 — see plan `plans/archive/22_jina-reader-lm-extractor.md`. The default path
 no longer appends `### Table N` sections unconditionally, and there is no `default.tables`
 toggle anymore. **The extractor is now the single source of truth for tables:**
 - `table` / `table_json` / `table_csv` extractors return **tables-only** output (the old

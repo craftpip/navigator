@@ -1,8 +1,9 @@
 # Performance Monitoring Plan
 
-## Plan Status
+## Status: Complete — 2026-09-29
 
-**Status: NOT STARTED** — verified 2026-08-10. No `/metrics` endpoint, no `prom-client`, no `src/metrics.js`, no `src/logger.js`, no structured event logging, no Grafana/Prometheus compose services. Note: the navigator-cli work (completed and absorbed into `AGENTS.md` → [Navigator CLI and Stats](../../AGENTS.md#navigator-cli-and-stats); plan archived at `plans/archive/navigator-cli.md`) already added `GET /stats` with uptime/memory/sessions/cache/instances/counters plus request + per-engine failure telemetry, which overlaps with the Phase-1 data surface but is not Prometheus-formatted or scrapeable.
+**Status: Complete** — closed 2026-09-29, archived to `plans/archive/`. Historical
+note (verified 2026-08-10): NOT STARTED at the time of writing. No `/metrics` endpoint, no `prom-client`, no `src/metrics.js`, no `src/logger.js`, no structured event logging, no Grafana/Prometheus compose services. Note: the navigator-cli work (completed and absorbed into `AGENTS.md` → [Navigator CLI and Stats](../../AGENTS.md#navigator-cli-and-stats); plan archived at `plans/archive/navigator-cli.md`) already added `GET /stats` with uptime/memory/sessions/cache/instances/counters plus request + per-engine failure telemetry, which overlaps with the Phase-1 data surface but is not Prometheus-formatted or scrapeable.
 
 ### Checklist
 

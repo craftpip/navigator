@@ -1,7 +1,10 @@
 # 32 — web_fetch stuck requests investigation
 
+## Status: Complete — 2026-09-29
+
 **Created:** 2026-08-21
-**Status:** Completed and deployed 2026-08-21
+**Status:** Complete — completed and deployed 2026-08-21; archived to
+`plans/archive/` 2026-09-29
 **Reported:** "web fetch requests are getting stuck" (user, 2026-08-21)
 
 ## Symptom

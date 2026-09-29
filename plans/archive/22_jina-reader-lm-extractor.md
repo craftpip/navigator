@@ -1,8 +1,10 @@
 # Jina reader-lm-0.5b as an "AI Model" Extractor in web_fetch
 
-## Plan Status
+## Status: Complete — 2026-09-29
 
-**Status: DRAFT** — planned only; no implementation started.
+**Status: Complete** — closed 2026-09-29, archived to `plans/archive/`. Historical
+note: DRAFT (planned only) at the time of writing; the shipped result is the
+`POST_PROCESSOR_MODELS` / "AI Model" extractor pipeline (plans 25, 36, 62).
 
 ### Checklist
 

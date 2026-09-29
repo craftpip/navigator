@@ -1,6 +1,6 @@
 # Plan 68 — Run-5 fixes + run-4 `data:` URLs: windowId, elementLimit, URL caps
 
-Sources: `test-blind/README.md` run 5 (plan 67) + run 4 `data:` finding.
+Sources: `friction/README.md` run 5 (plan 67) + run 4 `data:` finding.
 Scope LOCKED to the three items below. STRICT mode.
 
 ## Fix A — thread `windowId` through setWindowBounds/focusWindow (tool, high)
@@ -58,4 +58,4 @@ Scope LOCKED to the three items below. STRICT mode.
    (devtools format test, svg innerText test, modal-dismiss.jsx).
 2. `docker compose build && down && up -d`; live A+B+C via MCP tools only
    (`tmp-blind-*` probes only; window bounds restored; tabs closed).
-3. Close-out appended to run-5 (+run-4 `data:` item) in `test-blind/`.
+3. Close-out appended to run-5 (+run-4 `data:` item) in `friction/`.

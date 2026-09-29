@@ -1,6 +1,6 @@
 # Plan 65 — Run-3 fixes: SVG viewport selection, setup `enable`, managed validate scope
 
-Source: `test-blind/README.md` run 3 (plan 64 blind sweep).
+Source: `friction/README.md` run 3 (plan 64 blind sweep).
 Scope LOCKED to the three items below. STRICT mode: minimal diffs only.
 
 ## Fix A — SVG viewport capture under-selects ("60 found, 2 in SVG")
@@ -62,4 +62,4 @@ Scope LOCKED to the three items below. STRICT mode: minimal diffs only.
    modal-dismiss.jsx).
 2. `docker compose build && down && up -d`; live checks A+B+C through MCP
    tools only (probe hints `tmp-blind-*`, removed afterward).
-3. Close-out appended to run-3 section in `test-blind/README.md`.
+3. Close-out appended to run-3 section in `friction/README.md`.

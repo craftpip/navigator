@@ -1,7 +1,11 @@
 # Plan 29: Manual Domain Hints Extraction Test Routine
 
+## Status: Complete — 2026-09-29
+
+**Status:** Complete — closed 2026-09-29, archived to `plans/archive/`. The routine
+it describes is documented in `AGENTS.md` → [Domain Hints Workflow](../AGENTS.md).
+
 **Created:** 2026-08-18
-**Status:** Draft
 
 ---
 

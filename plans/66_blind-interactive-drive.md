@@ -1,7 +1,7 @@
 # Plan 66 — Blind interactive drive: click/type/navigate/back-console-network
 
 Routine step: plan. Execution blind (browser tools only); report in
-`test-blind/README.md` as run 4. Runs 1–3 covered search/fetch/links/
+`friction/README.md` as run 4. Runs 1–3 covered search/fetch/links/
 visuals/DOM/setup-lifecycle. This run covers the INTERACTIVE devtools:
 input, navigation, console, network.
 
@@ -47,7 +47,7 @@ record why.
 
 ## Reporting
 
-Append run 4 to `test-blind/README.md` from `RUN-TEMPLATE.md`. Fix proposals
+Append run 4 to `friction/README.md` from `RUN-TEMPLATE.md`. Fix proposals
 → plan 67+; no code changes in this run.
 
 ## Testing / success criteria (this run IS the test)

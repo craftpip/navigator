@@ -1,8 +1,9 @@
 # Low-VRAM HTML→Markdown Extraction — Model Research
 
-## Plan Status
+## Status: Complete — 2026-09-29
 
-**Status: RESEARCH** — comparing lightweight alternatives to the current
+**Status: Complete** — closed 2026-09-29, archived to `plans/archive/`. Historical
+note: RESEARCH — comparing lightweight alternatives to the current
 reader-lm-0.5b (Ollama) and MinerU-HTML v1.1 (GPU sidecar, plan 23) for this box's
 **4GB GPU**. No code written yet; this file is the decision record so the options can
 be evaluated side by side. Next step after the pick is a numbered follow-up plan.

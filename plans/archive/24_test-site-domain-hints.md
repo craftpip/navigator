@@ -1,5 +1,9 @@
 # Plan: Comprehensive Domain Hints for the Test Site
 
+## Status: Complete — 2026-09-29
+
+**Status: Complete** — closed 2026-09-29, archived to `plans/archive/`.
+
 **Created:** 2026-08-17
 **Test site:** `http://10.69.1.164:32768/` (domain hint domain: `10.69.1.164`)
 **Goal:** Create domain hints for every page on the test site, covering every extraction feature the system offers. Each hint doubles as a test case for its feature.
