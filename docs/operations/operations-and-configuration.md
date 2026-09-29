@@ -51,6 +51,8 @@ docker compose exec navigator npx vitest run
 
 Search IDs and page-operation IDs have independent sequences. Consumers of `/stats/activity` must therefore keep separate search and page-operation cursors.
 
+A `running` row never outlives the process that opened it: `initDb()` — with the hourly `pruneActivity()` as a safety net — flips `status = 'running'` rows in `searches` and `page_ops` to `fail` (`interrupted by server restart — never finished`). A container that dies mid-operation therefore surfaces as an error row on the next start, never as a permanent "fetching…" spinner in Live activity.
+
 ## Activity and Health
 
 `activity.js` records searches, engine attempts, page operations, and tool events. `searchContext` is an `AsyncLocalStorage` context that attaches route attempts to the search that created them. The status API supplies both recent incremental activity and zero-filled trends for several durations.

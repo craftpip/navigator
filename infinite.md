@@ -30,7 +30,6 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [x] plans/archive/51_relay-timeout-and-close.md — validated + absorbed + archived 2026-09-29
 - [~] plans/57_mcp-browser-permissions.md — started 2026-09-29 (validate)
 - [ ] plans/59_llm_browser_tool_reliability_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/60_configuration_lifecycle_integrity_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
@@ -40,6 +39,8 @@ Each one should be a single reply away from done.
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done
+
+- [x] plans/archive/51_relay-timeout-and-close.md — validated + absorbed + archived 2026-09-29. Code + 14 unit tests confirmed; full suite 756 pass / 2 pre-existing failures (modal-dismiss jsdom harness, svg tspan case). The "blocked" live item was unblocked by the connected `Chrome` relay: fetch ok 4458ms, screenshot ok 600/968ms, create+close `{closed:true}` in 108ms, headless close 20ms, zero `running` rows after. 4 follow-up discrepancies recorded in plan §8 (screenshot inner bounds not relay-aware; `engine_attempts` never reconciled — no `ok` column, test masks it; `configureTimeouts` doesn't restart the timer; stale line numbers/baseline) — none fixed. Absorbed in `docs/architecture/browser-runtime.md` §"Relay operation budgets" + `docs/operations/operations-and-configuration.md` §SQLite State; docs rebuilt, `/docs/` 200.
 
 - [x] plans/archive/55_cdp-url-sharing-api-keys.md — validated + archived 2026-09-30 (already implemented and already absorbed). All 3 requirements ship: `allowed_browsers` per-key scoping (`src/db.js:136` migration, `:353` setter), the console "Browser CDP access" modal with per-browser rows and per-browser Puppeteer connect URLs, and `ws://<host>:<port>/cdp/<browser>?key=` (`src/cdp-share.js`) with 401/403/404/429/502 gates. All §7 invariants hold and all three §8 "remaining decisions" were built with the recommended defaults (fresh per-session Chromium via `createSharedBrowser()` + `_sharedBrowsers` reap, shared add-on exposure, `SHARED_CHROMIUM_CAP = 3`). Re-verified: `tests/cdp-share.test.js` + `tests/mcp-server.test.js` 133/133; live `/cdp` unauthenticated → 401 (fails closed) and `/stats` counters carry `cdpConnections: 1`; full vitest 756 pass / 1 pre-existing plan-37 SVG failure / 1 known jsdom-harness suite error. Pre-existing revoke FK bug (mcp_calls.api_key_id has no `ON DELETE`) really fixed in `revokeMcpApiKey()`. Absorbed in `docs/guides/browsers/cdp-sharing.md` + `docs/reference/browsers/cdp-sharing.md`, both in the VitePress sidebar. Archived **as-is** by user call 2026-09-30 — the 8 validation defects (notably the §2.2-vs-§7.7 gate-order contradiction: the code resolves the browser at `src/cdp-share.js:380` *before* the access check at `:386`, so §2.2's step 4/5 numbering is backwards) were knowingly left in place.)
 

@@ -1,10 +1,12 @@
 # 51 — Relay (navigator-cdp / macbook chrome) Timeout & Close Failures
 
-**Status:** In progress 2026-09-29 — code complete + unit-tested (6 of 8
-checklist items). The two live items are blocked: `macbook chrome` is not
-paired/connected (`/stats` shows every `navigator-cdp` browser
-`connected: false`), so the symptom that motivated this plan cannot be
-reproduced on this machine yet.
+**Status:** Complete 2026-09-29 — code + unit tests + live verification done.
+`macbook chrome` itself stayed offline, but a different relay browser
+(`Chrome`, ownership `user`, 5 tabs) was connected, so §4 steps 2–5 were
+verified live against it instead (fetch ok 4458ms, screenshot ok 600/968ms,
+create+close round-trip `{closed:true}` in 108ms, headless close 20ms; zero
+`running` rows after). Validation found 4 follow-up discrepancies (§8) —
+filed as queue items, not fixed here. Archived 2026-09-29.
 **Created:** 2026-09-08
 **Scope:** `navigator-cdp` (relay) browsers — the user's real browser window bridged over the
 extension WS gateway (`/relay`). Fixes the 25s timeouts seen on `web_fetch`,
@@ -196,7 +198,7 @@ minutes". DB audit of `data/navigator.db` `page_ops`:
 - [x] Absolute op-cap (fix B) so a relay hang fails fast, not at 75s
 - [x] Orphaned `running` reconciliation on startup (fix A) — searches, engine_attempts, page_ops
 - [x] Headless regression green
-- [ ] Restart + verified live against `macbook chrome` — **blocked**: `macbook chrome` is not paired on this machine
+- [x] Restart + verified live against a relay browser — done 2026-09-29 on `Chrome` (not `macbook chrome`, still offline): fetch/screenshot/close/headless all green, see §8
 - [x] No `status='running'` row survives a crash/restart in `page_ops`
 
 ---
@@ -256,7 +258,31 @@ the devtools formatter case, the svg tspan case) — no new failures.
 
 ### Still owed
 
-Live verification against a paired relay browser (§4 steps 2–4, checklist row
-7). Needs `macbook chrome` (or any relay browser) paired and connected; the
-devtools/extension VM suites and `docker compose restart navigator` are the
-remaining steps once one is available.
+Nothing — live verification landed 2026-09-29 on the connected `Chrome` relay
+(see §8). `macbook chrome` remains offline but is no longer needed.
+
+---
+
+## 8. Validation record (2026-09-29)
+
+Independent validation confirmed the shipped behavior and the test counts
+(14/14 pass; full suite shows 2 failing files, not 3 — the devtools formatter
+case passes again). Four follow-up discrepancies were found, none fixed here:
+
+1. **Blocked item was not blocked** — `Chrome` (`navigator-cdp`, `user`) was
+   connected with 5 tabs; §4 steps 2–5 verified live against it. Closed.
+2. **`captureTargetScreenshot` is not relay-aware** — the inner race at
+   `src/devtools.js:906` (and the URL path at `src/search.js:2758`) still uses
+   the headless `browserOpTimeoutMs` (25s); only the outer
+   `withExtractTimeout` wrapper got the multiplier. A slow relay page still
+   fails with `Screenshot timed out after 25000ms`. §7's threading claim is
+   wrong for these two sites.
+3. **Fix A never reconciles `engine_attempts` in production** — the real table
+   has no `ok` column, so the sweep throws and the catch skips it. Proven on a
+   prod-schema copy: post-restart `searches` 0 / `page_ops` 0 /
+   `engine_attempts` 1 orphan surviving. The unit test masks it (hand-built
+   schema adds the missing column). Impact is limited (stale pill, not a
+   spinner), but the three-table claim is false.
+4. **`configureTimeouts` does not restart the timer** — `remainingMs()` counts
+   from `startedAt`, so the 30s relay cap includes hint loading + page-slot
+   queueing. §7 and the `search.js` comment say otherwise.
