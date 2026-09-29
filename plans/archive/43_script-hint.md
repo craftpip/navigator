@@ -1,7 +1,7 @@
 # Plan 43 — Script Extraction Hints
 
 **Created:** 2026-09-04
-**Status:** Draft
+**Status:** Complete — all phases shipped and tested 2026-09-29
 **Scope:** New third extraction method for domain hints — "script"
 **See also:** `plans/62_web-fetch-setup.md` (`web_fetch_setup` tool + per-call `script` on `web_fetch` — reuses this plan's sandbox/schema)
 

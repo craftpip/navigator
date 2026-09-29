@@ -9,6 +9,9 @@
 - [Search Engine Drivers](#search-engine-drivers)
 - [Agent Flow](#agent-flow)
 - [Chat Testing Protocol](#chat-testing-protocol)
+- [Infinite loop](#infinite-loop)
+- [Item Files (Plan Workflow)](#item-files-plan-workflow)
+- [User Preferences](#user-preferences)
 - [Configuration](#configuration)
 - [Development](#development)
 - [Navigator CLI and Stats](#navigator-cli-and-stats)
@@ -276,7 +279,69 @@ For visual verification, call `web_page_screenshot` with the same `ref_ids`.
 
 Check the documented Tool Contract against observed behavior first — if they disagree, that IS a finding (docs drift). Do not fix anything silently and do not absorb friction; every `request`/`response`/`tool` complaint from this mode is a filed bug report or feature request.
 
+**Routine loop — every chat-test run follows the same five steps, no skipping:**
+1. **Run** the task in chat-test mode (rules 1–3 above) and finish the task itself.
+2. **Log** friction in `test-blind/` (findings list, tagged `request`/`response`/`tool`; append to the run log, never overwrite). Raw confusion first, simplification second.
+3. **Plan** the fixes in `plans/<NN>_<topic>.md` — one section per finding, each with its own testing section (unit + live MCP checks). Testing is mandatory in every plan.
+4. **Fix** the code (STRICT mode: scope-locked, minimal diffs), with unit tests per fix; full suite must show zero new failures vs the documented baseline.
+5. **Verify live** through the MCP tools only (rebuild/restart the container first so the server runs the new code), then close out the findings as fixed with revision numbers.
+
 **Why:** Reasoning over the source cannot predict how the tool surface reads to a model that only sees schemas and replies. Going through the tools yourself surfaces exactly what needs improving so the code gets written against real consumer experience, not guesses.
+
+---
+
+## Infinite loop
+
+`infinite.md` (repo root) is the forever task queue. It is a **convention, not a feature** — no source file reads it. The user brain-dumps work as plain `- [ ] plans/<file>.md` lines under `## Queue` and says "check infinite" / "keep going" / "drain".
+
+**Infinite means infinite**: once started on the queue ("check infinite" / "keep going" / "drain" or any work-the-queue instruction), keep working item after item without stopping until the queue is empty. Never stop after one task to ask what is next. Never build a daemon around it unless the user explicitly asks for unattended runs.
+
+The loop, in order:
+
+1. **Read `infinite.md` first**, before picking anything up, even when the message names no item. Work the **first `- [ ]` line** — order IS priority. **Then read `## Needs your call` and surface any entries in your report.**
+2. **Claim before working**: rewrite the line to `- [~] plans/<file> — started <date>` as your FIRST act. A crash or a truncated turn then leaves an honest trace instead of silently re-picking the same item forever.
+3. **A path whose file is gone is DONE, not an error** — the item was absorbed into the docs and moved to `plans/archive/` per the item-file workflow. Move the line to `## Done` with today's date and continue. Never report a missing file as a blocker.
+4. **Do the item**, following the normal workflow in this file: build it, verify it, and keep the item's own `## Status:` header / checklist current.
+5. **Test it, commit it, then tick it** — run the relevant tests, verify the thing actually works, then `git add` only intended files + `git commit`. **Tick `[x]` only on real completion**: the work is tested, committed and verified, and the item has been absorbed into the docs and its file moved to `plans/archive/`. Then move the line into `## Done` as `- [x] <path> — absorbed <date>`.
+   - **Tests (in-container only — the entrypoint prunes dev deps on every start):**
+     ```bash
+     docker compose exec navigator npm install --include=dev
+     docker compose exec navigator npx vitest run                        # all
+     docker compose exec navigator npx vitest run tests/mcp-server.test.js # one file
+     docker compose exec navigator npm run lint
+     ```
+   - **Console changes** need a rebuild to be visible: `docker exec navigator npm install --include=dev && docker exec navigator npm run console:build`; server-side changes need `docker restart navigator` before live MCP verification.
+   - **Commits** must be authored/committed by `Boniface Pereira <bonifacepereira@gmail.com>` (see Project Learnings → Git Push Safety). Drain runs **commit**; pushing is a separate, explicit instruction.
+6. **Blocked is not done**: leave the line `- [ ]` and append the blocker to it (`— blocked: <what is needed>`), commit what IS done, then move to the next item immediately — never stop the run for a blocker. A partial item stays `[ ]` and gets finished next time; never tick something with open items.
+7. **Never stop after one — move to the next**: after test + commit + tick, immediately start the next `- [ ]` line in the same run. Repeat until the queue is empty. Report progress between items but do not wait for input. "One item per turn" is abolished — **infinite means keep going**.
+8. **An empty queue means STOP.** Report "queue empty" and do nothing else. **Never invent a task, feature or todo to fill an empty queue** — that is the single failure mode that turns an unattended agent into a machine building things nobody asked for.
+9. Keep `## Queue` and `## Done` tidy as you go: exactly one `[~]` line exists at a time, finished lines leave the queue, and the file stays short enough to read at a glance.
+
+---
+
+## Item Files (Plan Workflow)
+
+`plans/<NN>_<topic>.md` — one `.md` per work item; `plans/README.md` documents the convention in full.
+
+- Items go in `plans/` as one `.md` file each.
+- **Work items live in the file and only then get absorbed**: when an item is complete, absorb what it taught into the project's documentation (`AGENTS.md` → Project Learnings, or `docs/`), then **move the file to `plans/archive/`**. An item never just vanishes — absorb into docs first, then archive.
+- Every item file carries a standardized `## Status:` header directly under the `#` title, dated, stating **exactly how much is complete** (e.g. "11/12 items done, remaining: …", "Phases 1–3 done, Phase 4 deferred", "0/4 phases, design complete"). Allowed states: `Complete` / `In progress` / `Proposed` / `Blocked` (incl. dropped) / `Draft` (raw requirements only). No item file without one.
+- Keep a `[x]` progress checklist in the file body.
+- **Always update the item file before leaving its work** — whenever something is built, a phase finished, a finding made, or the session ends, the `## Status:` header and the checklist must match exactly what was done. Never leave it stale.
+- If the user asks to "show me my plans" (or similar), summarise with a status column per file read from its own `## Status:` header, plus what's complete vs not — don't just dump filenames.
+
+---
+
+## User Preferences
+
+### Queue everything, never context-switch
+
+The user brain-dumps tasks and can't hold a list in their head — they drop a new task mid-task, then come back with hints or steering.
+
+- Whenever the user gives a new task while one is already going, **add it to the todo list immediately** (verbatim intent, not the full wording) and finish it later. Do not treat it as a context switch.
+- Keep the todo list updated one by one as items complete.
+- If the user repeats or clarifies an item later, that's a **steer on an existing item**, not a new task.
+- Anything that is real, durable work (not a question) belongs in the forever queue as an item file + `- [ ] plans/<file>.md` line in `infinite.md` — see [Infinite loop](#infinite-loop) and [Item Files](#item-files-plan-workflow).
 
 ---
 
@@ -617,6 +682,25 @@ field is rejected as unknown.
 - Project documentation explains intent, end-to-end behavior, conditions, fallbacks, decisions, operational impact, and safe change boundaries. Do not turn it into a line-by-line code paraphrase or a mechanical symbol inventory; use source references only to help maintainers trace the behavior.
 
 ## Project Learnings
+
+### Script Extraction Hints — One Compile Path, Scripts Are Bodies (Plan 43)
+
+**Created:** 2026-09-29
+**Absorbed from:** `plans/43_script-hint.md` (archived)
+
+**The three-method model is live and tested:** every domain hint carries exactly one extraction method — `default` (single-shot), `flow` (scripted steps), or `script` (arbitrary JS against the live page). `getExtractionMethod()` (`src/domain-hints.js`) is the single dispatcher: non-empty `script` → `"script"`, non-empty `flow` → `"flow"`, present `default` → `"default"`, else `null`.
+
+**Users write a function BODY, not `async function(page){...}`.** `compileScriptSource()` wraps the input as `(async () => { <script> })()` so bare statements and `return` work. That wrapper is the **only** compile path: `validateScript()` (hint save / `web_fetch_setup validate`) and `runScriptExtraction()` (`src/search.js`) both go through it, so the save-time verdict and the run-time verdict can never disagree on the same input. Adding a second `new vm.Script(...)` call site is a bug.
+
+**Sandbox contents:** `page` (live Puppeteer), `capturePageState()` → `{html, url, title, browserText}`, `console`, timers, and standard web/JS builtins. No `require` / `import` / `process` / `fs` / `net` / `http` / `crypto`. Result is coerced: a returned string becomes `{ text }`; a plain object passes through; missing/non-string `text` is an error. `scriptOptions.timeoutMs` is 1–60000, default 30000, and requires `script` to be set.
+
+**Precedence when several script sources are in play:** per-call `web_fetch` `script` → managed `web_fetch_setup` script → static `script` hint → flow / default / generic. Managed scripts override static ones, and a managed rule that matches the domain but misses its `requireSelector` falls back to the static hint rather than failing.
+
+**The literal-newline trap (worth remembering):** scripts are transported as JSON strings, so a raw multi-line body arriving with real newlines instead of `\n` escapes fails `new vm.Script` with a generic `Invalid or unexpected token`. `compileScriptSource` detects that exact combination and appends "(the script contains literal newlines …)" to the message. If you see that error, the fix is on the caller's encoding, not the script.
+
+**Wildcard hints reject `script`** (same as `flow`) — the wildcard is the deterministic last-resort fallback. Script hints are never cached (a cached HTML page cannot satisfy a live-page script) and script hints skip the cache fast-path in `browserOpenAndExtract` entirely.
+
+**Tests:** `tests/domain-hints.test.js` + `tests/search.test.js` — the `runScriptExtraction (plan 43)` describe block covers the request-script-wins and managed-over-static precedence rules.
 
 ### Report Browser-Tool Failures and Improvement Ideas Instantly
 
