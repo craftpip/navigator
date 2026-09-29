@@ -31,6 +31,8 @@ The flags behind it — `--remote-debugging-port` plus the exact `--remote-allow
 
 Pairing is one-time and token-based, exactly like the Chrome extension — the token persists, so navigator container restarts do not force a re-PIN.
 
+The popup UX is identical to the Chrome one — validate-before-dial with inline field errors, a spinner + progress bar for every async call (Connect, PIN verify, Disconnect, attach/detach), and a read-only summary card in place of the form while connected. See [Chrome Extension → Popup UX](/guides/browsers/chrome-extension#popup-ux).
+
 ## Behavior notes
 
 - **`ownership: "user"`** — it's your real, visible Firefox; `list_browsers` / `Target.getTargets` label it as such.

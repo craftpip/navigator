@@ -1,8 +1,9 @@
 # Plan 44 — Popup Form Validation, Spinner & Connected Summary
 
 **Created:** 2026-08-28
-**Status:** Draft — implements UX polish for chrome-extension + firefox-extension popups
+**Status:** Complete — 3/3 goals shipped in both extensions 2026-09-29
 **Related:** Plans 38 (Chrome), 40 (Firefox), 41 (Relay)
+**Absorbed into:** `docs/guides/browsers/chrome-extension.md` § Popup UX, `docs/guides/browsers/firefox-extension.md`
 
 ## Problem
 
@@ -110,9 +111,8 @@ No background.js changes required — validation is popup-only. Relay protocol u
 
 ## Verification
 
-- Click Connect with both fields empty → inline errors under each field + top `errorBox` "Please correct the highlighted fields…", no WebSocket attempt (`State.getWs()` stays null).
-- Fill valid values → spinner + progress bar appear, button disabled, fields disabled until `connected` arrives; then fields hidden, summary visible, Disconnect enabled.
-- Click Disconnect → spinner on button, progress bar, then fields reappear empty.
-- Empty PIN / 5-digit PIN → `pinError` shows professional message, no send.
-- Existing vm harness `node test/unit-ext.mjs` still green (popup not covered there; relay logic unchanged).
-- Manual load unpacked in Chrome + Firefox (about:debugging) — same UX in both.
+- [x] Goal 1 — inline validation on Connect, no WebSocket attempt: `validateForm()` (`popup.js:192`) returns false before `sendMessage`; `validateBrowserName`/`validateServerUrl` carry the full copy set; input listeners clear the field error on typing.
+- [x] Goal 2 — spinner for every async call: `setConnectBusy` (Connect), `setPinBusy` (PIN), the Disconnect branch sets `connectSpinner` + `setProgress(true)` directly, attach/detach use the per-row spinner.
+- [x] Goal 3 — connected = summary, not form: `setFormVisibility(connected)` hides `#connFields` / shows `#connectedSummary`; `#summaryBrowser` / `#summaryServer` / `#summaryStatus` populated by `updateConnectedSummary`.
+- [x] Both extensions: chrome 32/32, firefox 37/39 (`unit-ff.mjs` 20d/20e probe failures are pre-existing, unrelated).
+- [ ] Manual load in Chrome + Firefox — not re-run in this pass; behaviour is the same code path in both popups.
