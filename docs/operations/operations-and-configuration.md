@@ -55,6 +55,16 @@ Search IDs and page-operation IDs have independent sequences. Consumers of `/sta
 
 `activity.js` records searches, engine attempts, page operations, and tool events. `searchContext` is an `AsyncLocalStorage` context that attaches route attempts to the search that created them. The status API supplies both recent incremental activity and zero-filled trends for several durations.
 
+### API key attribution in the activity feed
+
+Each Live activity row is attributed to the API key that made it, and the feed renders that key's name as a pill beside the browser/backend pill. A row that has no key — a stdio call, or an unauthenticated stateless POST — renders **no** pill at all: there is deliberately no "unauthenticated" label in the feed, because that label belongs only in the row's detail modal.
+
+Attribution is a heuristic, not a foreign key. `mcp_calls` rows carry `api_key_id` / `api_key_name` / `api_key_preview`, but the MCP tool-call handlers do not pass a `search_id` or `page_op_id` when they record, so those columns are effectively always `NULL`. `getRecentActivity()` therefore joins on time and tool instead: `findMcpCallForEntry({ ts, tool })` selects the `mcp_calls` row with the same `tool` whose `ts` is nearest within a ±10s window. `keyInfoFromCall()` normalizes a call row to `{ api_key_id, api_key_name, api_key_preview }`, or to three `null`s when nothing matches, and the same helper backs both the feed and the detail modal's API-key line.
+
+Page operations short-circuit the join: `page_ops` has its own `api_key_*` columns, so when a page op already carries them they are used directly and no window query runs.
+
+Two consequences worth knowing before you read the feed as an audit log. The join is per row, so attribution costs up to ~200 small indexed queries per poll, and because it is time-and-name based a burst of same-tool calls inside the window can attribute a row to a neighbouring call. In practice a small minority of rows legitimately show no key — those are the calls that were never authenticated, not dropped joins. The feed shows the key name only; the full masked preview (`nvg_…YIttW`) and the key ID are in the detail modal.
+
 `/health` is the fast operational probe. `/stats` adds browser tabs, caches, usage totals, request rates, errors, engine route attempts, scheduler profiles, and activity. The host `navigator.js` CLI uses these endpoints:
 
 ```bash

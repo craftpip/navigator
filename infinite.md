@@ -34,7 +34,6 @@ Each one should be a single reply away from done.
 - [ ] plans/49_browser-extension-security-hardening.md — blocked 2026-09-29: needs your call on the v2-only break sequencing (see `## Needs your call` + plan §9). Validated 0/6, nothing implemented.
 - [ ] plans/50_request-activity-ui-changes.md — blocked 2026-09-29: plan is a "never specified" placeholder; needs you to pick A / B / D. Validated: **C is already shipped**, A absent, B partial (see plan §6).
 - [ ] plans/51_relay-timeout-and-close.md — code + tests committed (d6bbe99); **blocked**: live verify needs a paired relay browser, all `navigator-cdp` browsers offline
-- [ ] plans/52_live-feed-api-key-pill.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/53_loading-spinners.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/57_mcp-browser-permissions.md — validate (`Plan`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/59_llm_browser_tool_reliability_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
@@ -45,6 +44,8 @@ Each one should be a single reply away from done.
 - [ ] plans/14_request-activity-trend-graph.md — **priority Low** (user 2026-09-29: "can be done later, not in priority"). `In progress`: server + core chart built; remaining gaps are the engine selector, legend toggles, tooltip/tap readout, empty state, 3 test cases, and the `Browser.` devtools category bug.
 
 ## Done
+
+- [x] plans/archive/52_live-feed-api-key-pill.md — absorbed 2026-09-29 (already implemented; verified live end-to-end: server attribution 18/21 searches + 97/100 page ops, console renders 90 adjacent backend+key pill pairs, standalone key pill where the backend pill is suppressed, and nothing for unauthenticated rows. Documented in `docs/operations/operations-and-configuration.md` §"API key attribution in the activity feed".)
 
 - [x] plans/43_script-hint.md — absorbed 2026-09-29
 - [x] plans/44_popup-validation-connected-ux.md — absorbed 2026-09-29

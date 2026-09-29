@@ -1,6 +1,17 @@
 # 52 — Live Activity: Show API Key Name Pill
 
-**Status:** Planned
+**Status:** Complete 2026-09-29 — implemented and verified live; absorbed into
+`docs/operations/operations-and-configuration.md` ("API key attribution in the
+activity feed"), archived to `plans/archive/`. Carried no `[x]` checklist while
+in flight, so one is recorded here from the plan sections:
+
+- [x] §3a `src/activity.js` — extract the key lookup out of `getMcpCallForActivity()` into `findMcpCallForEntry()` + `keyInfoFromCall()`
+- [x] §3b `src/activity.js` — `getRecentActivity()` attaches `api_key_*` to search entries and page ops (page ops use their own columns as a fast path)
+- [x] §3c `LiveFeed.jsx` — `buildFeed()` sets `keyName` on search and page-op rows
+- [x] §3d `LiveFeed.jsx` — `.feed-key` pill rendered after `.feed-backend`, independent of the backend pill
+- [x] §3e `style.css` — `.feed-key` pill style, grouped with `.feed-backend` plus a colour override and a `.feed-backend + .feed-key` negative-margin join
+- [x] §3f console bundle rebuilt and served; `src/activity.js` live in the running server
+- [x] §6 verification performed against the running console
 **Created:** 2026-09-11
 **Scope:** Console status page — Live activity feed (`src/web-console/src/pages/status/LiveFeed.jsx`, `src/web-console/src/style.css`) + activity endpoint enrichment (`src/activity.js`, served via `src/mcp-server.js` `/stats/activity`)
 
@@ -126,3 +137,35 @@ No container restart needed for the console bundle; the `src/activity.js` change
 4. Expect: (a) row shows two pills — backend + key name, adjacent; `web_search` shows only the key pill; (b) unauthenticated row shows **no** key pill.
 5. Click any row → detail modal still shows `API key` + `Key ID` (unchanged).
 6. Confirm `Target.getTargets`, `web_fetch`, `DOM.*` rows all show the key pill when the request carried an API key.
+---
+
+## 7. Verification record (2026-09-29)
+
+Validated against the **running** server and the **served** console bundle, not by reading source.
+
+**Server (`src/activity.js` against the live DB):**
+
+| Check | Result |
+|---|---|
+| `mcp_calls` rows carrying a key name | 6554 / 10816 |
+| `page_ops` rows carrying a key name | 2662 / 2722 |
+| `getRecentActivity()` search entries with `api_key_name` | 18 / 21 (the 3 blanks are unauthenticated) |
+| `getRecentActivity()` page ops with `api_key_name` | 97 / 100 (blanks are `web_fetch` rows) |
+| `GET /stats/activity` search entries with `api_key_name` | 18 / 21, e.g. `opencode-cli` / `nvg_XN1RyaIp...YIttW` |
+
+**Console (DOM inspected on `http://<host>:1994/console`, status → Live activity):**
+
+| Plan edge case (§4) | Observed |
+|---|---|
+| key pill sits next to the backend pill | 90 elements match `.feed-backend + .feed-key`; rows render `Runtime.evaluate` + `cloakbrowser` + `opencode-cli` |
+| key pill still renders when the backend pill is suppressed | `Target.closeTarget` / `Target.createTarget` rows show `opencode-cli` alone, no `.feed-backend` |
+| no key → nothing rendered, no placeholder | `web_fetch` / `cloakbrowser` rows carry no `.feed-key` element |
+| detail modal still shows key + ID | unchanged, `getMcpCallForActivity()` now wraps the shared helper |
+
+**Bundle freshness:** the served `dist/assets/index-Bx3QO2SP.js` contains `feed-key` and postdates the `LiveFeed.jsx` source, so the change is actually in the console users load — not just in the source tree.
+
+**Notes for the next reader:**
+
+- The row element is `.activity-row-wrapper` (containing `div.activity-row`), *not* `.feed-request` — `.feed-request` is the response-text cell. Selecting the wrong one makes the pills look absent when they are present on all 119 rows.
+- `.feed-key` appears twice in `style.css` by design: once grouped with `.feed-backend` for the shared pill shape, once as a colour override. Not a duplicate rule.
+- `page_ops.ok` is `NOT NULL` in the schema — relevant to any future reconciliation sweep, cf. plan 51.
