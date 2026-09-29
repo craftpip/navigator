@@ -26,11 +26,12 @@ action on its own recognizance — your job is to surface these, not to guess.
 Each one should be a single reply away from done.
 
 - **jsdom test harness is dead repo-wide.** `tests/setup.js` imports `node:fs`/`node:os`/`node:path`, and under vitest 4.1.10 + `environment: "jsdom"` *any* node builtin import in a setup file aborts collection with `Error: No such built-in module: node:`. Every `// @vitest-environment jsdom` test fails to run — including the in-flight `tests/modal-dismiss.test.jsx`. Bisected: no-imports setup passes; `node:fs`, bare `fs`, `await import("node:fs")` and `createRequire` all fail. `globalThis.process` *is* available, so the fix could drop the imports — but then the per-file `mkdtemp` isolation becomes a fixed shared dir (SQLite cross-file contention), which is your call, not mine. Options: (a) fixed shared `test.env` path, (b) split setup — DB isolation only for `environment: "node"`, (c) leave broken. Plan 49's own 7-case unit test (`tests/console-driver-collapse.test.jsx`) is written and held back until this is resolved.
+- **Plan 49 (security hardening) needs a sequencing decision before code.** Validated 2026-09-29: 0/6 work items done, zero HMAC/challenge/nonce in `relay-server.js`, `relay_sessions` still the bearer table. §5.1 is a *coordinated v2-only break* — shipping the server half first rejects every paired relay browser with `4001` and forces a re-PIN, and `AGENTS.md` says you actively drive `maclap2` through the relay. A `RELAY_AUTH_V2=0` flag would sequence it safely but directly overrides the plan's stated "no legacy compat" decision, so I did not add one. Also open: `?token=` in the northbound URL leaks to process lists (Bearer-header support in `puppeteer.connect` is the constraint), and whether keys live in DB rows or a `0600` file. Full write-up in `plans/49_browser-extension-security-hardening.md` §9.
 - (empty — items get appended here as they come up)
 
 ## Queue
 
-- [ ] plans/49_browser-extension-security-hardening.md — validate (`Draft 2026-09-06`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
+- [ ] plans/49_browser-extension-security-hardening.md — blocked 2026-09-29: needs your call on the v2-only break sequencing (see `## Needs your call` + plan §9). Validated 0/6, nothing implemented.
 - [ ] plans/50_request-activity-ui-changes.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/51_relay-timeout-and-close.md — validate (`Planned`, 8 unticked). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/52_live-feed-api-key-pill.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
