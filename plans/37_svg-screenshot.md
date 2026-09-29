@@ -2,7 +2,7 @@
 
 ## Plan Status
 
-**Status: IMPLEMENTED — perfect-render pass landed 2026-08-22 — MODULARIZED 2026-08-22 18:24 UTC → LONG-HORIZON 100% FIDELITY (multi-agent)** — **SPEC CORRECTED 2026-08-22 evening audit (§14.0): oracle drift found (9.6%→8.9% over 7.5h, claimed 4.7–5.1% not in log), Δ==0 replaced by tiered fidelity bar (§14.1), pinned oracle protocol (§14.4), attribution-first loop (§14.4), architecture A/B re-decision pending (§14.6). All future sessions follow the corrected §14, not earlier prose.**
+**Status: ACTIVE — long-horizon 100% fidelity (multi-agent) — remains in `plans/`** — **SPEC CORRECTED 2026-08-22 evening audit (§14.0): oracle drift found (9.6%→8.9% over 7.5h, claimed 4.7–5.1% not in log), Δ==0 replaced by tiered fidelity bar (§14.1), pinned oracle protocol (§14.4), attribution-first loop (§14.4), architecture A/B re-decision pending (§14.6). All future sessions follow the corrected §14, not earlier prose.**
 
 **New spec 2026-08-22 (user): 100% faithful replication — "I don't care what your spec says but I want complete replication done in SVG" — innovation is the goal, hasn't been done yet. Benchmark site `http://10.69.1.164:1994/` (navigator console itself). Long-horizon forever loop: compare → fix → compare → fix… See §14.**
 
