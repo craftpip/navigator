@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { formatBytes, formatUptime } from "../lib/format.js";
 import { useNarrow } from "../lib/hooks.js";
 import logo from "../../../../navigator-logo.png";
+import { Spinner } from "./ui.jsx";
 
 export function Layout({
   children,
@@ -123,6 +124,7 @@ export function Layout({
           {toggleVnc && (
             vncBusy ? (
               <button className="button" disabled>
+                <Spinner small />
                 Working...
               </button>
             ) : vnc?.running ? (

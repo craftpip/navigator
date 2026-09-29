@@ -6,6 +6,7 @@ import { HintFieldGroup, HintField, LineListEditor, UrlListEditor } from "./Hint
 import { FlowEditor, FlowOptionsEditor } from "./FlowEditor.jsx";
 import { ScriptEditor } from "./ScriptEditor.jsx";
 import { HintGuide } from "./HintGuide.jsx";
+import { Spinner } from "../../components/ui.jsx";
 import { HintTestPanel } from "./HintTest.jsx";
 
 export function HintEditorPane({ index, initial, postProcessorModels = [], onClose, onSaved }) {
@@ -385,10 +386,10 @@ export function HintEditorPane({ index, initial, postProcessorModels = [], onClo
           )}
           <div className="hints-form-actions">
             <button className="button" disabled={validating} onClick={validate}>
-              {validating ? "Validating…" : "Validate"}
+              {validating ? <><Spinner small /> Validating…</> : "Validate"}
             </button>
             <button className="button primary" disabled={!canSave} onClick={save}>
-              {saving ? "Saving…" : isNew ? "Create hint" : "Save"}
+              {saving ? <><Spinner small /> Saving…</> : isNew ? "Create hint" : "Save"}
             </button>
             <button className="button" disabled={saving} onClick={onClose}>
               Cancel

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { request } from "../../lib/request.js";
-import { Panel, Dot, Pill, Countdown } from "../../components/ui.jsx";
+import { Panel, Dot, Pill, Countdown, Spinner } from "../../components/ui.jsx";
 import { BrowserEditModal } from "../manage/BrowserEditModal.jsx";
 import { parseBrowsersEntries, serializeBrowsersEntries } from "../manage/browser-utils.js";
 import { BROWSER_TYPE_LABEL } from "../manage/constants.js";
@@ -246,7 +246,7 @@ export function Drivers({ health, instances, reload, height }) {
                             }}
                             title="Clear pairing for this browser — the browser stays listed until you remove it from the Manage page"
                           >
-                            {forgetting === backend ? "…" : "Forget"}
+                            {forgetting === backend ? <><Spinner small /> …</> : "Forget"}
                           </button>
                         )}
                         <button

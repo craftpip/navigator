@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { request } from "../../lib/request.js";
 import { formatMs, formatCountdown } from "../../lib/format.js";
-import { Panel, Empty, Dot, Pill } from "../../components/ui.jsx";
+import { Panel, Empty, Dot, Pill, Spinner } from "../../components/ui.jsx";
 
 export function Engines({ config, health, stats, reload }) {
   const [resetStatus, setResetStatus] = useState(null);
@@ -66,7 +66,7 @@ export function Engines({ config, health, stats, reload }) {
     >
       <div className="engine-summary">
         <b>{ready.length}</b> ready · <b>{probes.length}</b> recovery probes · <b>{cooling.length}</b> cooling down
-        <button className="button small engine-reset-all" onClick={() => resetEngine("all")} disabled={resetStatus?.engine === "all" && resetStatus.text === "resetting..."}>{resetStatus?.engine === "all" ? resetStatus.text : "reset all"}</button>
+        <button className="button small engine-reset-all" onClick={() => resetEngine("all")} disabled={resetStatus?.engine === "all" && resetStatus.text === "resetting..."}>{resetStatus?.engine === "all" ? <><Spinner small /> {resetStatus.text}</> : "reset all"}</button>
       </div>
       <div className="engine-grid">
         {engines.map((engine, index) => {
@@ -111,7 +111,7 @@ export function Engines({ config, health, stats, reload }) {
                    <span className="queue-position">{profile.rank || index + 1}</span>
                    {engine.id}
                    <Pill tone={tone}>{route}</Pill>
-                  <button className="button small engine-reset" onClick={() => resetEngine(engine.id)} disabled={resetStatus?.engine === engine.id && resetStatus.text === "resetting..."}>{resetStatus?.engine === engine.id ? resetStatus.text : "reset"}</button>
+                  <button className="button small engine-reset" onClick={() => resetEngine(engine.id)} disabled={resetStatus?.engine === engine.id && resetStatus.text === "resetting..."}>{resetStatus?.engine === engine.id ? <><Spinner small /> {resetStatus.text}</> : "reset"}</button>
                 </div>
                 <div className="engine-inline-meta"><span className="feed-backend">{(engine.pool === "shared" ? "engine" : engine.pool) || "api"}</span> · {role}</div>
                 <div className="ordering-factors">

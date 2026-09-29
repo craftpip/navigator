@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { hintUrlMismatch, KEEP_TEST_TARGET_ID } from "./constants.js";
 import { renderMarkdown } from "../../markdown.js";
+import { Spinner } from "../../components/ui.jsx";
 
 async function fetchHintText(url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -141,7 +142,7 @@ export function HintTestPanel({ hint }) {
             }}
           />
           <button className="button primary" type="submit" disabled={!testUrl || running}>
-            {running ? "Running…" : "▶ Run test"}
+            {running ? <><Spinner small /> Running…</> : "▶ Run test"}
           </button>
         </form>
       </div>

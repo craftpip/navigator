@@ -1,4 +1,4 @@
-import { SchemaField } from "../../components/ui.jsx";
+import { SchemaField, Spinner } from "../../components/ui.jsx";
 
 export function RequestForm({
   activeTool,
@@ -36,7 +36,7 @@ export function RequestForm({
         <p className="hint">This tool takes no arguments.</p>
       )}
       <button className="run" type="submit" disabled={running}>
-        {running ? "Running..." : "Send request"}
+        {running ? <><Spinner small /> Running...</> : "Send request"}
       </button>
     </form>
   );

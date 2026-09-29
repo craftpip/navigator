@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import { renderMarkdown } from "../../markdown.js";
+import { Spinner } from "../../components/ui.jsx";
 
 export function ResponsePanel({ response, toolName }) {
   const [viewMode, setViewMode] = useState("html");
@@ -65,6 +66,7 @@ export function ResponsePanel({ response, toolName }) {
         <span
           className={`status ${response.status.startsWith("200") ? "ok" : response.status === "Request failed" ? "error" : ""}`}
         >
+          {response.status === "Running..." ? <Spinner small /> : null}
           {response.status}
         </span>
         <div className="view-toggle" role="group" aria-label="Response view">

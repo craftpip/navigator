@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { request } from "../../lib/request.js";
-import { Pill } from "../../components/ui.jsx";
+import { Pill, Spinner, Loading } from "../../components/ui.jsx";
 import { usePopup } from "../../components/popup.jsx";
 import { MANAGE_GROUPS } from "./constants.js";
 import { validateEntryValue, normalizeDraftValue, compareDraftValue } from "./validate.js";
@@ -35,6 +35,9 @@ function Manage({ config, health, reload }) {
     "Changes persist to .env and apply immediately — no container restart needed.",
   );
   const [kind, setKind] = useState("");
+  // Plan 53 (B7): a request is in flight for save / revert / reset — all three
+  // route through save(), so one flag covers them.
+  const [busy, setBusy] = useState(false);
   const envSignature = useRef("");
   // Names the health-sync has already surfaced into the BROWSERS draft once.
   // Re-emitting a removed-but-still-detected driver would fight the user's
@@ -88,6 +91,7 @@ function Manage({ config, health, reload }) {
   const save = async (body, success) => {
     setMessage("Saving...");
     setKind("");
+    setBusy(true);
     try {
       const result = await request("/console/config", {
         method: "PUT",
@@ -102,8 +106,15 @@ function Manage({ config, health, reload }) {
     } catch (error) {
       setMessage(error.message);
       setKind("err");
+    } finally {
+      setBusy(false);
     }
   };
+  // A4: before the first /console/config response there is no schema, so the
+  // table would otherwise render "No variables match" and read as empty state.
+  const configLoaded = Boolean(
+    (config.schema || []).length || config.configValues || config.env,
+  );
   const changed = (config.schema || []).filter(
     (entry) =>
       !compareDraftValue(
@@ -201,11 +212,13 @@ function Manage({ config, health, reload }) {
           Revert last save
         </button>
         <span className={`manage-message ${invalidCount > 0 ? "err" : kind}`}>
+          {busy ? <Spinner small /> : null}
           {invalidCount > 0
             ? `${invalidCount} invalid value${invalidCount === 1 ? "" : "s"} — fix before saving.`
             : message}
         </span>
       </div>
+      {configLoaded ? (
       <div className="manage-table-wrap">
         <table className="manage-table">
           <thead>
@@ -253,6 +266,9 @@ onChange={(value) => setDraft({ ...draft, [entry.key]: value })}
         </tbody>
         </table>
       </div>
+      ) : (
+        <Loading>Loading configuration…</Loading>
+      )}
     </section>
   );
 }
