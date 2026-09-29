@@ -33,7 +33,7 @@ Each one should be a single reply away from done.
 
 - [ ] plans/49_browser-extension-security-hardening.md — blocked 2026-09-29: needs your call on the v2-only break sequencing (see `## Needs your call` + plan §9). Validated 0/6, nothing implemented.
 - [ ] plans/50_request-activity-ui-changes.md — blocked 2026-09-29: plan is a "never specified" placeholder; needs you to pick A / B / D. Validated: **C is already shipped**, A absent, B partial (see plan §6).
-- [ ] plans/51_relay-timeout-and-close.md — validate (`Planned`, 8 unticked). Same rule: done → absorb into `docs/` + archive; else run the plan.
+- [ ] plans/51_relay-timeout-and-close.md — code + tests committed (d6bbe99); **blocked**: live verify needs a paired relay browser, all `navigator-cdp` browsers offline
 - [ ] plans/52_live-feed-api-key-pill.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/53_loading-spinners.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/57_mcp-browser-permissions.md — validate (`Plan`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
