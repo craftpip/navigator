@@ -1,6 +1,12 @@
 # 49 — Browser Extension Security Hardening (OpenClaw parity, PIN kept)
 
-**Status:** Draft 2026-09-06
+**Status:** Draft 2026-09-06 — re-validated 2026-09-29: **0 of 6 work items
+done.** Ground truth checked this run: `src/relay-server.js` contains no
+`hmac` / `createHmac` / `challenge` / `nonce` and no `Authorization`/`Bearer`
+check; `relay_sessions` is still the 3-column bearer table
+(`name, session_token, created_at`, `src/db.js:102-107`). The whole HMAC
+challenge-response redesign, the northbound gateway auth and the logical-session
+ownership model are absent. **Held, not started** — see §9 for why.
 **Created:** 2026-09-06
 **Scope:** relay pairing + auth + gateway auth + multi-client safety (`src/relay-server.js`, `src/db.js`, `src/mcp-server.js`, `src/browser.js`, `chrome-extension/`, `firefox-extension/`, console relay UI, tests)
 
@@ -89,3 +95,39 @@ Removed per user directive. Connected = all visible tabs, as today. No mode swit
 
 - Both-ends ship required (server + extension together); old bearer-only extensions fail closed with `4001` → re-pair. Acceptable: we own both ends, no store lag to manage (unlike OpenClaw).
 - `?token=` in URLs leaks to process lists/logs — document Bearer-header preference; keep query as compat for `browserWSEndpoint`.
+
+---
+
+## 9. Why this is held (2026-09-29)
+
+Implementation is deliberately not begun. §5.1 makes this a **coordinated
+protocol break**, and one work item alone is worse than none:
+
+- **v2-only fail-closed means a partial ship breaks live pairings.** If the
+  server stops accepting bearer tokens before both extensions ship the
+  challenge reply, every paired relay browser is rejected with `4001` and must
+  re-PIN. `AGENTS.md` records the user actively driving `maclap2` through the
+  relay, so those are real machines with real work in them — re-pairing them is
+  the user-visible cost of an out-of-order deploy.
+- **A feature flag would be the safe way to sequence it, but the plan forbids
+  it.** §5.1 is explicit: "v2-only from day one (we ship both ends; no legacy
+  compat unlike OpenClaw)". A `RELAY_AUTH_V2=0` default would let server,
+  Chrome and Firefox land independently and flip on together — but that is a
+  direct override of a stated decision, so it needs the user, not me.
+- **Migrations are one-way.** §6.1 hash-migrates the existing bearer rows
+  "for audit" while declaring the bearer path dead. Doing that before any
+  client can answer a challenge is unrecoverable without a second migration.
+
+Sequencing that works, once approved: §6.1 → §6.2 (behind the decision) →
+§6.3 Chrome → §6.4 Firefox → §6.5 console → §6.6 tests, with the server's
+bearer acceptance removed **last**, in its own commit.
+
+Open decisions for the user before starting:
+
+1. Break now (v2-only, everyone re-PINs once) vs. ship behind a flag and flip later?
+2. Is `?token=` in the northbound URL acceptable, or Bearer-header only? It
+   leaks to process lists and logs; §8 notes it as a risk, and
+   `puppeteer.connect` support for custom headers on `browserWSEndpoint` is the
+   constraint to confirm first.
+3. Key storage: DB rows only (as §6.1 implies), or a `0600` key file as §5.5
+   describes? The two are not obviously the same thing.
