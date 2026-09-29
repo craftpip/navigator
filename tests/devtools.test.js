@@ -293,6 +293,52 @@ describe("handleDevtoolsToolCall", () => {
     expect(title).not.toHaveBeenCalled();
   });
 
+  it("carries the relay browser's own description on each of its listed targets (plan 45)", async () => {
+    const { relayServer } = await import("../src/relay-server.js");
+    const originalGetEntry = relayServer.getEntry;
+    const originalIsPaired = relayServer.isPaired;
+    const entry = {
+      name: "user-browser",
+      type: "navigator-cdp",
+      status: "connected",
+      tabs: [
+        { targetId: "relay-tab-1", url: "https://mail.example/", title: "Inbox", type: "page" },
+        { targetId: "relay-tab-2", url: "https://news.example/", title: "News", type: "page" },
+      ],
+      description: "my personal laptop, logged into Gmail",
+    };
+    relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    relayServer.isPaired = () => true;
+
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "user-browser", type: "navigator-cdp", status: "connected" },
+        { name: "quiet-browser", type: "navigator-cdp", status: "connected" },
+      ]),
+    });
+
+    try {
+      const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+      const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+      const mine = listing.targets.filter((t) => t.targetId?.startsWith("relay-tab-"));
+      // One description per browser, repeated on every tab it owns — the model
+      // sees which physical browser a target belongs to without a second call.
+      expect(mine).toHaveLength(2);
+      expect(mine.every((t) => t.description === "my personal laptop, logged into Gmail")).toBe(true);
+      expect(mine.every((t) => t.backend === "user-browser" && t.ownership === "user")).toBe(true);
+
+      // A browser with no description of its own must not get the key at all
+      // (no empty-string noise in the response).
+      entry.description = "";
+      const quiet = await handleDevtoolsToolCall("Target.getTargets", {});
+      expect(quiet.targets.some((t) => Object.hasOwn(t, "description"))).toBe(false);
+    } finally {
+      relayServer.getEntry = originalGetEntry;
+      relayServer.isPaired = originalIsPaired;
+    }
+  });
+
   it("Network.getRequests never adopts an unobserved target", async () => {
     getBrowserManager.mockResolvedValue({
       config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },

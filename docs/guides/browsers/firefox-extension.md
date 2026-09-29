@@ -25,13 +25,17 @@ The flags behind it — `--remote-debugging-port` plus the exact `--remote-allow
 
 1. Install the extension (temporary add-on via `web-ext`, or loaded into the profile; `launch-firefox.sh` handles it).
 2. In the extension popup: set the **Server URL** to the navigator server's URL — Firefox cannot reach `localhost` from extension pages, so use the navigator server's reachable LAN address.
-3. Set the **browser name** (must match the `BROWSERS` entry) and click **Connect**.
+3. Set the **browser name** (must match the `BROWSERS` entry), optionally a **description for AI** (see below), and click **Connect**.
 4. Connect **BiDi** (`ws://127.0.0.1:9222/session`).
 5. Enter the **PIN** shown by the navigator side (console box, ~60s expiry) and verify.
 
 Pairing is one-time and token-based, exactly like the Chrome extension — the token persists, so navigator container restarts do not force a re-PIN.
 
-The popup UX is identical to the Chrome one — validate-before-dial with inline field errors, a spinner + progress bar for every async call (Connect, PIN verify, Disconnect, attach/detach), and a read-only summary card in place of the form while connected. See [Chrome Extension → Popup UX](/guides/browsers/chrome-extension#popup-ux).
+The popup UX is identical to the Chrome one — validate-before-dial with inline field errors, a spinner + progress bar for every async call (Connect, PIN verify, Disconnect, attach/detach), and a summary card in place of the form while connected, with the **Description for AI** field deliberately left editable in that state. See [Chrome Extension → Popup UX](/guides/browsers/chrome-extension#popup-ux).
+
+## Description for AI
+
+The optional **Description for AI** field behaves exactly as in the Chrome popup: up to 500 characters of your own instructions for the agent ("Personal laptop — Gmail is logged in here"). It travels in the `navigator-hello` handshake, a blur **while connected** pushes it live without reconnecting, a blur while disconnected only saves it locally for the next hello, and clearing it clears the stored value. It overrides the console-configured `BROWSERS[].prompt` for this browser in `list_browsers` while non-empty. See [Chrome Extension → Description for AI](/guides/browsers/chrome-extension#description-for-ai).
 
 ## Behavior notes
 

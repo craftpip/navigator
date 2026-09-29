@@ -49,18 +49,25 @@ importScripts('features/badge.js');
         // The durable connection intent lives in storage (survives
         // service-worker termination); in-memory State is ephemeral.
         Config.getPendingConnecting(function(pending) {
-          chrome.storage.local.get(['serverUrl', 'browserName', 'autoConnect', 'sessionToken'], function(result) {
+          chrome.storage.local.get(['serverUrl', 'browserName', 'browserDescription', 'autoConnect', 'sessionToken'], function(result) {
             if (pending.pending) {
               // A connect was in flight (or the popup closed during it).
               // Restore the attempted values + spinner from the durable flag.
               state.serverUrl = pending.serverUrl || result.serverUrl || '';
               state.browserName = pending.browserName || result.browserName || 'Chrome';
+              // The pending flag is the user's *current* intent, so an empty
+              // description there means "cleared" — falling back to the stored
+              // value would resurrect a stale one.
+              state.browserDescription = pending.browserDescription != null
+                ? String(pending.browserDescription)
+                : (result.browserDescription || '');
               if (!State.isConnecting() && !State.isConnected() && !State.isPairing()) {
                 State.setConnecting(true);
               }
             } else {
               if (!state.serverUrl) state.serverUrl = result.serverUrl || '';
               if (!state.browserName) state.browserName = result.browserName || 'Chrome';
+              state.browserDescription = result.browserDescription || '';
             }
             var attachedIds = State.getAttachedTabIds();
             var allTabs = [];
@@ -124,6 +131,9 @@ importScripts('features/badge.js');
         var st = State.getState();
         st.serverUrl = message.serverUrl || st.serverUrl || '';
         st.browserName = message.browserName || st.browserName || 'Chrome';
+        st.browserDescription = message.browserDescription != null
+          ? String(message.browserDescription)
+          : (st.browserDescription || '');
         State.setConnecting(true);
         State.setLastError(null);
         State.setConnected(false);
@@ -135,18 +145,30 @@ importScripts('features/badge.js');
         // chain starts, so a service-worker kill / popup close mid-connect
         // still restores to Connecting… on reopen (in-memory State alone
         // would be wiped and leave the popup blank).
-        Config.setPendingConnecting(st.serverUrl, st.browserName);
+        Config.setPendingConnecting(st.serverUrl, st.browserName, st.browserDescription);
 
         ConnectionManager.notify({ type: 'connection-status-changed' });
         Badge.update();
         Config.saveServerUrl(message.serverUrl || '', function() {
           Config.saveBrowserName(message.browserName || 'Chrome', function() {
-            Config.setAutoConnect(true, function() {
-              ConnectionManager.connect();
-              Badge.update();
-              sendResponse({ success: true });
+            Config.saveBrowserDescription(st.browserDescription, function() {
+              Config.setAutoConnect(true, function() {
+                ConnectionManager.connect();
+                Badge.update();
+                sendResponse({ success: true });
+              });
             });
           });
+        });
+        return true;
+      }
+
+      // Live description update while connected — no reconnect, no new PIN.
+      // The relay channel is already authenticated by the session token.
+      if (message && message.type === 'update-description') {
+        var desc = String(message.description == null ? '' : message.description);
+        ConnectionManager.updateDescription(desc, function(result) {
+          sendResponse({ success: !!(result && result.success), queued: !!(result && result.queued) });
         });
         return true;
       }
@@ -258,14 +280,19 @@ importScripts('features/badge.js');
         // path) and this don't both fire a connect in the same tick.
         Config.clearPendingConnecting();
         State.setConnecting(true);
-        Config.getSessionToken(function(token) {
-          // No token yet → this was a first-time pairing; pass the URL through
-          // so connect() doesn't rely on saved serverUrl alone.
-          if (!token && pending.serverUrl) {
-            ConnectionManager.connect({ serverUrl: pending.serverUrl });
-          } else {
-            ConnectionManager.connect();
-          }
+        // The description was persisted only as part of the pending flag, so
+        // commit it before connecting — otherwise a suspension between the
+        // popup save and the handshake would drop it from the hello.
+        Config.saveBrowserDescription(pending.browserDescription, function() {
+          Config.getSessionToken(function(token) {
+            // No token yet → this was a first-time pairing; pass the URL through
+            // so connect() doesn't rely on saved serverUrl alone.
+            if (!token && pending.serverUrl) {
+              ConnectionManager.connect({ serverUrl: pending.serverUrl });
+            } else {
+              ConnectionManager.connect();
+            }
+          });
         });
       });
     }

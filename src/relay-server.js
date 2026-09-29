@@ -21,13 +21,21 @@
 // (any extension that dials in, regardless of pairing) are ALSO persisted
 // (known_relay_browsers) so forget() — which clears ONLY the pairing — keeps the
 // dashboard row visible until remove() (or a BROWSERS config removal) exists.
+//
+// A browser's own LLM-facing description is durable too (relay_browser_meta):
+// the extension authors it in its popup, sends it on every hello, and can
+// update it live over an authenticated channel. It is hydrated in init() so a
+// paired-but-offline browser still shows what it is for.
 
 import { WebSocketServer } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
-import { deleteKnownRelayBrowser, deleteRelaySession, loadKnownRelayBrowsers, loadRelaySessions, saveKnownRelayBrowser, saveRelaySession } from "./db.js";
+import { deleteKnownRelayBrowser, deleteRelayBrowserMeta, deleteRelaySession, initDb, loadKnownRelayBrowsers, loadRelayBrowserMetas, loadRelaySessions, saveKnownRelayBrowser, saveRelayBrowserMeta, saveRelaySession } from "./db.js";
 import { PLUGIN_PLATFORMS } from "./config.js";
 
 const PIN_EXPIRY_MS = 60_000;
+// A browser's self-description is read by the model on every list_browsers
+// call, so it stays short enough to be useful inline.
+const DESCRIPTION_MAX_CHARS = 500;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
 const HELLO_TIMEOUT_MS = 10_000;
@@ -80,6 +88,7 @@ export class RelayServer {
     this._entries = new Map(); // name -> entry
     this._tokenToName = new Map(); // sessionToken -> name
     this._knownBrowsers = new Map(); // name -> { plugin, firstSeenAt } — durable "has dialed in" registry, survives forget()
+    this._meta = new Map(); // name -> { description, updatedAt } — durable user-authored LLM hint, survives disconnect AND restart
     this._wss = null;
     this._server = null;
     this._host = "127.0.0.1";
@@ -95,6 +104,17 @@ export class RelayServer {
     if (host) this._host = host;
     if (port) this._port = port;
     this._wss = new WebSocketServer({ noServer: true });
+
+    // The db helpers are silent no-ops until the database is open, so
+    // restoring persisted state here would quietly restore nothing when the
+    // relay is mounted before anything called initDb(). initDb() is
+    // idempotent, so claiming it here makes this module's persistence
+    // self-contained instead of depending on mcp-server's call order.
+    try {
+      initDb();
+    } catch (e) {
+      log(`relay database unavailable: ${String(e && e.message)}`);
+    }
 
     // Restore persisted pairings so a navigator restart does not force a
     // re-PIN — the extension reconnects with the same session token.
@@ -116,6 +136,18 @@ export class RelayServer {
       if (known.length) log(`restored ${known.length} known relay browser(s)`);
     } catch (e) {
       log(`restore known relay browsers skipped: ${String(e && e.message)}`);
+    }
+
+    // Descriptions are hydrated up front so a paired-but-disconnected browser
+    // still tells the agent what it is for, before any extension reconnects.
+    try {
+      const metas = loadRelayBrowserMetas();
+      for (const m of metas) {
+        this._meta.set(m.name, { description: m.description || "", updatedAt: m.updated_at || Date.now() });
+      }
+      if (metas.length) log(`restored ${metas.length} relay browser description(s)`);
+    } catch (e) {
+      log(`restore relay browser descriptions skipped: ${String(e && e.message)}`);
     }
 
     server.on("upgrade", (req, socket, head) => {
@@ -163,6 +195,10 @@ export class RelayServer {
    * is KEPT, so the dashboard entry stays visible as "disconnected — not
    * paired" until the browser itself is removed (remove() or a BROWSERS config
    * removal). Forget and Remove are different actions.
+   *
+   * The owner-authored description is KEPT: it is not part of the pairing (it
+   * lives in relay_browser_meta, not relay_sessions), so re-pairing restores
+   * the same description the owner wrote.
    */
   forget(name) {
     if (!name) return false;
@@ -187,7 +223,9 @@ export class RelayServer {
       } catch {}
       this._teardownEntry(entry);
     }
-    // Remove from DB (persisted pairing)
+    // Remove from DB (persisted pairing). The description is deliberately
+    // KEPT: it is not part of the pairing, and Forget answers "drop the
+    // pairing", not "forget who this browser is". remove() owns the deletion.
     try {
       if (deleteRelaySession(trimmed)) found = true;
     } catch {}
@@ -195,10 +233,11 @@ export class RelayServer {
   }
 
   /**
-   * Full removal — forget() the pairing and drop the browser from the known
-   * registry so its dashboard row disappears entirely. Used for dynamic
-   * (unconfigured) browsers the user explicitly removes, and by BROWSERS
-   * config reconciliation when an entry is deleted (so it cannot linger as a
+   * Full removal — forget() the pairing, drop the browser from the known
+   * registry so its dashboard row disappears entirely, and delete its
+   * owner-authored description with it. Used for dynamic (unconfigured)
+   * browsers the user explicitly removes, and by BROWSERS config
+   * reconciliation when an entry is deleted (so it cannot linger as a
    * dynamic driver). Deleting a configured browser is always a config action;
    * the reconciliation path calls this.
    */
@@ -210,6 +249,11 @@ export class RelayServer {
     const found = this.forget(trimmed);
     try {
       deleteKnownRelayBrowser(trimmed);
+    } catch {}
+    // Gone for good: the known row, the pairing, and what it said about itself.
+    this._meta.delete(trimmed);
+    try {
+      deleteRelayBrowserMeta(trimmed);
     } catch {}
     return found || hadKnown;
   }
@@ -225,6 +269,45 @@ export class RelayServer {
     } catch (e) {
       log(`persist known relay browser "${name}" failed`, String(e && e.message));
     }
+  }
+
+  /**
+   * The user-authored, LLM-facing description for a relay browser. Returns ""
+   * when the browser has never set one — the caller decides how to present
+   * "no description" (the console-configured BROWSERS prompt is the fallback).
+   */
+  getDescription(name) {
+    return this._meta.get(name)?.description || "";
+  }
+
+  /**
+   * Persist a description typed in the extension's own popup. Returns
+   * { ok, description } — a bad value is rejected but never throws and never
+   * drops the connection; the previous value is kept.
+   */
+  setDescription(name, raw) {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) return { ok: false, error: "name required" };
+    const raw0 = raw === undefined || raw === null ? "" : String(raw);
+    // Control characters are meaningless to the model and can corrupt log lines.
+    // eslint-disable-next-line no-control-regex -- matching them is the point
+    const cleaned = raw0.replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").trim();
+    if (cleaned.length > DESCRIPTION_MAX_CHARS) {
+      return { ok: false, error: `description must be ${DESCRIPTION_MAX_CHARS} characters or fewer` };
+    }
+    const updatedAt = Date.now();
+    this._meta.set(trimmed, { description: cleaned, updatedAt });
+    const entry = this._entries.get(trimmed);
+    if (entry) {
+      entry.description = cleaned;
+      entry.descriptionUpdatedAt = updatedAt;
+    }
+    try {
+      saveRelayBrowserMeta(trimmed, cleaned, updatedAt);
+    } catch (e) {
+      log(`persist description for "${trimmed}" failed`, String(e && e.message));
+    }
+    return { ok: true, description: cleaned, updatedAt };
   }
 
   /**
@@ -354,6 +437,8 @@ export class RelayServer {
           connectedAt: null,
           extensionVersion: null,
           bidiOrigin: null,
+          description: this.getDescription(name),
+          descriptionUpdatedAt: this._meta.get(name)?.updatedAt || null,
           pin: null,
           pinExpiresAt: null
         };
@@ -372,6 +457,10 @@ export class RelayServer {
       connectedAt: entry?.connectedAt || null,
       extensionVersion: entry?.extensionVersion || null,
       bidiOrigin: entry?.bidiOrigin || null,
+      // The browser's own words first; the live entry is the writer of truth
+      // when connected, the durable map covers every offline case.
+      description: entry?.description ?? this.getDescription(name),
+      descriptionUpdatedAt: entry?.descriptionUpdatedAt ?? this._meta.get(name)?.updatedAt ?? null,
       pin: pending && pendingPin ? pendingPin.pin : null,
       pinExpiresAt: pending && pendingPin ? pendingPin.expiresAt : null
     };
@@ -426,6 +515,22 @@ export class RelayServer {
       try { ws.close(code, String(reason).slice(0, 120)); } catch {}
     };
 
+    // A description may ride along on the hello, but it is only written once
+    // the socket has actually authenticated (valid session token, or a PIN
+    // the user accepted). Anything earlier would let an unauthenticated peer
+    // that merely knows a browser's name rewrite that browser's description.
+    // Held here, applied on the connected paths below.
+    let helloDescription;
+    const applyHelloDescription = () => {
+      if (helloDescription === undefined) return;
+      const applied = this.setDescription(name, helloDescription);
+      if (!applied.ok) {
+        log(`extension "${name}" description rejected: ${applied.error}`);
+        sendJson(ws, { type: "description_error", error: applied.error });
+      }
+      helloDescription = undefined;
+    };
+
     const helloTimer = setTimeout(() => {
       if (!settled) fail(4000, "hello timeout");
     }, HELLO_TIMEOUT_MS);
@@ -457,6 +562,10 @@ export class RelayServer {
         // BiDi WebSocket connects from — surfaced via status()/stats so the
         // Remote Agent allow-list (--remote-allow-origins) can be set correctly.
         if (typeof msg.bidiOrigin === "string" && msg.bidiOrigin.startsWith("moz-extension://")) entry.bidiOrigin = msg.bidiOrigin;
+        // The extension re-sends its description on EVERY hello (including a
+        // silent token reconnect) so edits made while offline still land.
+        // A missing field means "old extension" — keep whatever we already have.
+        if (msg.browserDescription !== undefined) helloDescription = msg.browserDescription;
         entry.lastActivity = Date.now();
 
         const token = typeof msg.sessionToken === "string" && msg.sessionToken ? msg.sessionToken : "";
@@ -467,6 +576,7 @@ export class RelayServer {
             entry.connectedAt = Date.now();
             entry.pendingPin = null;
             sendJson(ws, { type: "connected", sessionToken: token });
+            applyHelloDescription();
             this._onPairingComplete(entry);
           } else {
             // A token that is stale or that belongs to a different browser is a
@@ -518,12 +628,30 @@ export class RelayServer {
         log(`extension "${name}" PIN accepted`);
         sendJson(ws, { type: "pin_accepted" });
         sendJson(ws, { type: "connected", sessionToken: entry.sessionToken });
+        applyHelloDescription();
         this._onPairingComplete(entry);
         return;
       }
 
       // ---- connected traffic ------------------------------------------------
       if (entry.status !== "connected") return;
+
+      // ---- live description update -----------------------------------------
+      // The popup lets the owner re-word their browser while it stays paired
+      // and connected — no re-PIN, no reconnect. Reached only past the
+      // connected guard above, so the channel is already authenticated by the
+      // session token.
+      if (msg.type === "update_description") {
+        const applied = this.setDescription(name, msg.description);
+        if (applied.ok) {
+          log(`extension "${name}" description updated`);
+          sendJson(ws, { type: "description_updated", description: applied.description });
+        } else {
+          log(`extension "${name}" description update rejected: ${applied.error}`);
+          sendJson(ws, { type: "description_error", error: applied.error });
+        }
+        return;
+      }
 
       if (msg.type === "ping") {
         sendJson(ws, { type: "pong" });
@@ -625,6 +753,7 @@ export class RelayServer {
   _ensureEntry(name) {
     let entry = this._entries.get(name);
     if (!entry) {
+      const meta = this._meta.get(name);
       entry = {
         name,
         plugin: "auto",
@@ -636,6 +765,11 @@ export class RelayServer {
         connectedAt: null,
         sessionToken: null,
         pendingPin: null,
+        // Carry the durable description onto a fresh live entry so a browser
+        // that reconnects with an old extension (no browserDescription field)
+        // keeps the description it set earlier.
+        description: meta?.description || "",
+        descriptionUpdatedAt: meta?.updatedAt || null,
         tabs: [],
         tabWaiters: [],
         sessionForTarget: new Map(), // targetId -> extSessionId
@@ -724,7 +858,23 @@ export class RelayServer {
   }
 
   _onTabList(entry, tabs) {
-    entry.tabs = tabs || [];
+    const incoming = Array.isArray(tabs) ? tabs.slice() : [];
+    if (incoming.length === 0 && entry.tabs.length > 0) {
+      // A delayed extension response must not turn a populated registry into an
+      // empty browser and tear down every client session. A real tab close is
+      // reported through tab_detached / Target.closeTarget instead.
+      log(`[relay] ignoring empty tab_list from "${entry.name}"; preserving ${entry.tabs.length} known target(s)`);
+    } else {
+      const incomingIds = new Set(incoming.map((tab) => tab.targetId));
+      for (const tab of entry.tabs) {
+        // A list snapshot can predate Target.createTarget. Keep an actively
+        // attached target until its explicit detach or close confirmation.
+        if (entry.sessionForTarget.has(tab.targetId) && !incomingIds.has(tab.targetId)) {
+          incoming.push(tab);
+        }
+      }
+      entry.tabs = incoming;
+    }
     for (const finish of [...entry.tabWaiters]) finish();
     entry.tabWaiters.length = 0;
 
@@ -835,8 +985,9 @@ export class RelayServer {
     sendJson(client.ws, message);
   }
 
-  _reply(client, id, result, error) {
+  _reply(client, id, result, error, sessionId = null) {
     const msg = { id };
+    if (sessionId) msg.sessionId = sessionId;
     if (error) {
       const errObj = error instanceof Error ? error : error && typeof error === "object" ? error : { message: String(error) };
       msg.error = { code: Number.isInteger(errObj.code) ? errObj.code : -32000, message: String(errObj.message || errObj) };
@@ -861,7 +1012,10 @@ export class RelayServer {
       }
       case "Target.setAutoAttach": {
         client.autoAttach = Boolean(params.autoAttach);
-        this._reply(client, id, {});
+        // Puppeteer sends this both at browser level and through every newly
+        // attached page session. Session-scoped replies must keep that session
+        // id or CDP drops them as replies for the wrong transport.
+        this._reply(client, id, {}, null, sessionId);
         this._emitBrowserTarget(entry, client);
         // Don't mass-attach pages at browser level.  puppeteer v24's TargetManager
         // sends setAutoAttach with filter [{type:'page',exclude:true}] (expects
@@ -1059,12 +1213,19 @@ export class RelayServer {
       this._reply(client, id, null, { code: -32000, message: `Failed to attach target ${params.targetId}: ${reason}` });
       return;
     }
-    clientSessions(client).set(params.targetId, sessionId);
+    const sessions = clientSessions(client);
+    const alreadyAttached = sessions.has(params.targetId);
+    sessions.set(params.targetId, sessionId);
+    if (!alreadyAttached) {
+      this._emitToClient(client, {
+        method: "Target.attachedToTarget",
+        params: { sessionId, targetInfo: { ...target, attached: true }, waitingForDebugger: false }
+      });
+    }
+    // A newly discovered target needs its event before Puppeteer resolves the
+    // attach call. A page created by this client already has that session, and
+    // re-emitting it would replace Puppeteer's active page session.
     this._reply(client, id, { sessionId });
-    this._emitToClient(client, {
-      method: "Target.attachedToTarget",
-      params: { sessionId, targetInfo: { ...target, attached: true }, waitingForDebugger: false }
-    });
   }
 
   /**

@@ -706,6 +706,22 @@ field is rejected as unknown.
 
 **Tests:** `tests/domain-hints.test.js` + `tests/search.test.js` — the `runScriptExtraction (plan 43)` describe block covers the request-script-wins and managed-over-static precedence rules.
 
+### Owner-Written Browser Descriptions (Plan 45)
+
+**Created:** 2026-09-29 · **Absorbed from:** `plans/45_browser-connection-name-and-llm-description.md`
+
+**What:** the relay extensions gained an optional "Description for AI" field (≤500 chars) that the browser's owner writes for the agent. A non-empty description **overrides** the console-configured `BROWSERS[].prompt` for that browser in `list_browsers` — the person who owns the browser knows which of their machines is the personal laptop. Empty description = "no owner description", and the configured prompt applies as before. The built-in Chromium keeps its position-derived prompt (never a configured one).
+
+**Server side:** `relay_browser_meta` (`src/db.js`) stores `{name, description, updated_at}` per browser name. `RelayServer.init()` calls `initDb()` itself (idempotent) and hydrates the rows, so persistence can never depend on `mcp-server` having called `initDb()` first — that ordering bug silently dropped every write in tests and would have dropped them in any other embedder. `forget()` keeps the row (a forgotten browser can re-pair with its description intact); only `remove()` deletes it. `_statusFor()` reads the description live, so the console's existing status polling surfaces changes with no push mechanism.
+
+**Three-state wire semantics (do not collapse these):** an **absent** `browserDescription` on `navigator-hello` means *keep what you have* (an old extension must not wipe a new one); an explicit **`""`** means *clear it*; a non-empty string replaces it. Both extensions therefore send the field on every hello whenever `typeof browserDescription === "string"` — including `""`. `update_description` is accepted only from an entry that is authenticated **and** `status === "connected"`, so an unauthenticated socket cannot write.
+
+**Two bugs the extension tests caught, both in the durable-pending path:** (1) `resumePendingConnect()` did not commit `pending.browserDescription` to storage before reconnecting, so a suspension between the popup's save and the handshake dropped the description from the hello; (2) the startup restore used `pending.browserDescription || result.browserDescription`, which resurrected a stale value when the pending value was a deliberate empty. The pending flag is the user's *current intent* — prefer it whenever it is present, including when it is `""`.
+
+**Popup behavior worth preserving:** the description field sits **outside** `#connFields`, so unlike name/server it stays editable while connected — that is the whole point, since changing it is how the owner re-points the agent. `setFieldsDisabled(true)` still disables it while connecting/pairing. Blur while connected sends the live frame; blur while disconnected only persists locally for the next hello. The counter is hidden at 0 characters.
+
+**Tests:** `chrome-extension/test/unit-popup.mjs` loads the real `popup.html` + `popup.js` in jsdom (20 assertions: placement, prefill, dirty-guard, validation, live send, explicit-empty clear, summary row). It takes the extension root as `argv[2]`, and `firefox-extension/test/unit-popup.mjs` is a 3-line runner that imports it — one suite, both trees, so the mirrored popups cannot drift. `background.js` needs `importScripts` in the VM sandbox; both harnesses now boot the whole background to cover the resume path (Chrome test 33, Firefox test 33).
+
 ### Report Browser-Tool Failures and Improvement Ideas Instantly
 
 **Created:** 2026-08-21

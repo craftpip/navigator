@@ -30,6 +30,19 @@ var Config = {
     chrome.storage.local.set({ browserName: name }, callback || function() {});
   },
 
+  // The browser's own words to the AI. Authored here, in the popup that the
+  // person who actually uses this browser sees, and read by the model in
+  // list_browsers / Target.getTargets. Empty means "no description".
+  getBrowserDescription: function(callback) {
+    chrome.storage.local.get(['browserDescription'], function(result) {
+      callback(result.browserDescription || '');
+    });
+  },
+
+  saveBrowserDescription: function(description, callback) {
+    chrome.storage.local.set({ browserDescription: description || '' }, callback || function() {});
+  },
+
   getSessionToken: function(callback) {
     chrome.storage.local.get(['sessionToken'], function(result) {
       callback(result.sessionToken || null);
@@ -59,29 +72,36 @@ var Config = {
   // Config.save* chain, so a popup that closes (or a background that
   // suspends) mid-connect still restores to Connecting… / the attempted
   // values on next open, instead of the blank Off state.
-  setPendingConnecting: function(serverUrl, browserName, callback) {
+  setPendingConnecting: function(serverUrl, browserName, browserDescription, callback) {
+    // 3-arg back-compat: older callers pass a callback as the 3rd argument.
+    if (typeof browserDescription === 'function') {
+      callback = browserDescription;
+      browserDescription = '';
+    }
     chrome.storage.local.set({
       _pendingServerUrl: serverUrl || '',
       _pendingBrowserName: browserName || '',
+      _pendingBrowserDescription: browserDescription || '',
       _pendingConnecting: true
     }, callback || function() {});
   },
 
   clearPendingConnecting: function(callback) {
     chrome.storage.local.remove(
-      ['_pendingConnecting', '_pendingServerUrl', '_pendingBrowserName'],
+      ['_pendingConnecting', '_pendingServerUrl', '_pendingBrowserName', '_pendingBrowserDescription'],
       callback || function() {}
     );
   },
 
   getPendingConnecting: function(callback) {
     chrome.storage.local.get(
-      ['_pendingConnecting', '_pendingServerUrl', '_pendingBrowserName'],
+      ['_pendingConnecting', '_pendingServerUrl', '_pendingBrowserName', '_pendingBrowserDescription'],
       function(result) {
         callback({
           pending: !!result._pendingConnecting,
           serverUrl: result._pendingServerUrl || '',
-          browserName: result._pendingBrowserName || ''
+          browserName: result._pendingBrowserName || '',
+          browserDescription: result._pendingBrowserDescription || ''
         });
       }
     );

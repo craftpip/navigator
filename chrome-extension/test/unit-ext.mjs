@@ -243,6 +243,18 @@ let env0;
   await sleep(50);
 }
 
+// 2b. A bare relay host uses Navigator's default port.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.saveServerUrl('10.69.1.164', () => {});
+  env.ConnectionManager.connect();
+  await sleep(20);
+  test('2b. Bare relay host defaults to port 1994', () =>
+    env.State.getWs()?.url === 'wss://10.69.1.164:1994/relay');
+  env.ConnectionManager.disconnect();
+}
+
 // 3. connect() -> hello sent to server
 {
   const [server, client, env] = await startRelay();
@@ -883,6 +895,189 @@ let env0;
     removedWin.join() === '600' && removedTab.length === 0 &&
     c4.result.browserContextIds.join() === 'default,' + lazyId &&
     c5.result.browserContextIds.join() === 'default');
+}
+
+// 29. Browser description (plan 45) — storage, hello carriage, live update.
+{
+  const env = buildEnv();
+  loadExtension(env);
+
+  // 29a. Storage round-trips, defaulting to "".
+  const empty = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('29a. browserDescription defaults to empty string', () => empty === '');
+
+  await new Promise(res => env.Config.saveBrowserDescription("my daily driver for gmail", res));
+  const stored = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('29b. browserDescription round-trips through chrome.storage.local', () =>
+    stored === 'my daily driver for gmail');
+
+  // 29c. The hello carries it, so a navigator that restarted still learns it.
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [server, client] = wireRelay(env, '10.69.1.164:1994');
+  const hello = client._sent.find(m => m.type === 'navigator-hello');
+  test('29c. navigator-hello carries browserDescription', () =>
+    !!hello && hello.browserDescription === 'my daily driver for gmail');
+
+  // 29d. The extension gates the live update on the SOCKET being open, not on
+  //      being authenticated — the server is what enforces auth (and it
+  //      rejects update_description before a PIN/token is accepted; see
+  //      tests/relay-server.test.js). A value edited while merely socket-open
+  //      is still sent; the server decides.
+  const before = client._sent.filter(m => m.type === 'update_description').length;
+  await new Promise(res => env.ConnectionManager.updateDescription('edited', res));
+  const sentCount = client._sent.filter(m => m.type === 'update_description').length;
+  test('29d. updateDescription is sent whenever the socket is open', () =>
+    sentCount === before + 1);
+
+  // 29e. With NO socket at all, nothing is sent but the value still persists,
+  //      so it rides the next hello instead.
+  env.ConnectionManager.disconnect();
+  const afterDisconnect = client._sent.filter(m => m.type === 'update_description').length;
+  await new Promise(res => env.ConnectionManager.updateDescription('while fully offline', res));
+  const offlineStored = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('29e. disconnected: no frame sent, but the value is stored for the next hello', () =>
+    client._sent.filter(m => m.type === 'update_description').length === afterDisconnect &&
+    offlineStored === 'while fully offline');
+}
+
+// 30. Live update over an authenticated, already-connected channel.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('first take', res));
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [server, client] = wireRelay(env, '10.69.1.164:1994');
+  client.other.send(JSON.stringify({ type: 'connected', sessionToken: 'tok-live' }));
+  await sleep(40);
+  test('30a. connected before the live update', () => env.State.isConnected());
+
+  const res = await new Promise(r => env.ConnectionManager.updateDescription('second take', r));
+  const sent = client._sent.find(m => m.type === 'update_description');
+  test('30b. updateDescription sends update_description while connected', () =>
+    res.success === true && !!sent && sent.description === 'second take');
+
+  // The local copy is authoritative for the next hello too.
+  const persisted = await new Promise(r => env.Config.getBrowserDescription(x => r(x)));
+  test('30c. updateDescription also persists locally', () => persisted === 'second take');
+}
+
+// 31. The pending-connecting flag carries the description so a popup that
+//     reopens mid-connect restores what the user typed.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.setPendingConnecting('10.69.1.164:1994', 'Az01-Chrome', 'restored description', () => {});
+  const pending = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
+  test('31. pending-connecting carries browserDescription across SW kill', () =>
+    pending.pending === true && pending.browserDescription === 'restored description');
+
+  // 3-arg legacy form (older caller passing a callback) must still work.
+  env.Config.setPendingConnecting('10.69.1.164:1994', 'Chrome', () => {});
+  const legacy = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
+  test('31b. 3-arg setPendingConnecting (callback 3rd) stays back-compatible', () =>
+    legacy.browserName === 'Chrome' && legacy.browserDescription === '');
+}
+
+// 32. Emptying the field is a real edit, not a no-op. The server treats an
+//     ABSENT browserDescription as "old extension, keep what's stored" (see
+//     tests/relay-server.test.js), so the hello must carry an explicit "" to
+//     clear it. Gating the field on truthiness would strand the old value for
+//     anyone who empties it while offline.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('to be removed', res));
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [server, client] = wireRelay(env, '10.69.1.164:1994');
+  const before = client._sent.find(m => m.type === 'navigator-hello');
+  test('32a. hello carries the saved description first', () =>
+    !!before && before.browserDescription === 'to be removed');
+
+  // User empties the field while disconnected, then reconnects.
+  env.ConnectionManager.disconnect();
+  await new Promise(res => env.Config.saveBrowserDescription('', res));
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [, client2] = wireRelay(env, '10.69.1.164:1994');
+  const cleared = client2._sent.find(m => m.type === 'navigator-hello');
+  test('32b. empty description is sent explicitly so the server clears it', () =>
+    !!cleared && cleared.browserDescription === '');
+}
+
+// 33. background.js startup resume — the description must survive a suspension
+// between the popup's save and the relay handshake. This path lives inside
+// init() in background.js, so the whole script has to run for it to be reached.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const listeners = { installed: [], startup: [], message: [], alarm: [] };
+  env.chrome.runtime.onInstalled = { addListener: (f) => listeners.installed.push(f) };
+  env.chrome.runtime.onStartup = { addListener: (f) => listeners.startup.push(f) };
+  env.chrome.runtime.onMessage = { addListener: (f) => listeners.message.push(f) };
+  env.chrome.alarms.onAlarm = { addListener: (f) => listeners.alarm.push(f) };
+
+  // The user had a description stored, then typed a NEW one and hit Connect:
+  // storage holds the new text only inside the durable pending flag.
+  await new Promise(res => env.Config.saveBrowserDescription('stale old text', res));
+  await new Promise(res => env.Config.setPendingConnecting(
+    'ws://relay', 'maclap2', 'the description typed before suspension', res));
+  const storedDescriptionAsync = () => new Promise(res => env.Config.getBrowserDescription(res));
+
+  let booted = false;
+  try {
+    // background.js is a service worker, so it pulls its modules in with
+    // importScripts; give the sandbox the same module order loadExtension uses.
+    const order = [
+      'utils/config.js', 'utils/logger.js', 'utils/helpers.js',
+      'core/state.js', 'core/debugger.js', 'core/connection-manager.js',
+      'cdp/response.js', 'cdp/handler/local.js', 'cdp/handler/special.js',
+      'cdp/handler/forward.js', 'cdp/index.js',
+      'features/tab-list.js', 'features/tab-isolation.js', 'features/badge.js'
+    ];
+    env.importScripts = (...rels) => {
+      for (const rel of rels) vm.runInContext(readFileSync(`${ROOT}${rel}`, 'utf8'), env, { filename: rel });
+    };
+    vm.runInContext(readFileSync(`${ROOT}background.js`, 'utf8'), env, { filename: 'background.js' });
+    booted = true;
+  } catch (e) { report('33. background.js boots in the harness', false, e); }
+  test('33. background.js boots in the harness', () => booted);
+  test('33a. it registered a startup listener', () => listeners.startup.length === 1);
+
+  // Browser startup: the pending connect is resumed.
+  for (const fn of listeners.startup) fn({});
+  await sleep(60);
+
+  test('33b. resume committed the pending description to storage', async () =>
+    (await storedDescriptionAsync()) === 'the description typed before suspension');
+
+  const client3 = env.State.getWs();
+  const server3 = client3 && new FakeWebSocket('ws://relay');
+  if (client3) { server3.readyState = FakeWebSocket.OPEN; server3.other = client3; client3.other = server3; }
+  const hello = client3 && client3._sent.find(m => m.type === 'navigator-hello');
+  test('33c. the resumed hello carries the pending description, not the stale one', () =>
+    !!hello && hello.browserDescription === 'the description typed before suspension');
+  test('33d. the pending flag is consumed by the resume', async () => {
+    const after = await new Promise(res => env.Config.getPendingConnecting(res));
+    return after.pending === false;
+  });
+}
+
+// 34. An explicitly cleared description in the pending flag must not fall back
+// to the stale stored value (the "no owner description" case is meaningful).
+{
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('stale old text', res));
+  await new Promise(res => env.Config.setPendingConnecting('ws://relay', 'maclap2', '', res));
+  const restored = await new Promise(res => env.Config.getPendingConnecting(res));
+  test('34. a pending clear keeps the empty string instead of the stale value', () =>
+    restored.pending === true && restored.browserDescription === '');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

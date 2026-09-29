@@ -41,6 +41,15 @@
   var probeBtn = $('probeBtn');
   var probeResult = $('probeResult');
   var openInWindowCheckbox = $('openInWindow');
+  var browserDescriptionInput = $('browserDescription');
+  var fieldBrowserDescription = $('field-browserDescription');
+  var browserDescriptionError = $('browserDescriptionError');
+  var descriptionCount = $('descriptionCount');
+  var summaryDescriptionRow = $('summaryDescriptionRow');
+  var summaryDescription = $('summaryDescription');
+
+  // Mirrors the relay server's cap so the popup can refuse before it sends.
+  var DESCRIPTION_MAX = 500;
 
   versionEl.textContent = chrome.runtime.getManifest().version;
 
@@ -48,6 +57,9 @@
   var _urlDirty = false;
   var _browserNameDirty = false;
   var _openInWindowDirty = false;
+  // Set while the user types so the periodic loadState() refresh never
+  // clobbers a half-written description. Reset once the value is committed.
+  var _descriptionDirty = false;
   var _pinBusy = false;
   var _bidiBusy = false;
 
@@ -144,6 +156,36 @@
     serverUrlInput.disabled = disabled;
     browserNameInput.style.opacity = disabled ? '0.6' : '';
     serverUrlInput.style.opacity = disabled ? '0.6' : '';
+    // The description is deliberately NOT locked when merely connected — it
+    // stays editable so blurring it can push a live update. Only the
+    // connecting/pairing busy state disables it.
+    if (browserDescriptionInput) {
+      browserDescriptionInput.disabled = !!disabled;
+      browserDescriptionInput.style.opacity = disabled ? '0.6' : '';
+    }
+  }
+
+  function currentDescription() {
+    return browserDescriptionInput ? String(browserDescriptionInput.value || '') : '';
+  }
+
+  function updateDescriptionCount() {
+    if (!descriptionCount) return;
+    var len = currentDescription().length;
+    descriptionCount.textContent = len ? (len + ' / ' + DESCRIPTION_MAX) : '';
+    if (descriptionCount.parentElement) {
+      descriptionCount.parentElement.classList.toggle('over-limit', len > DESCRIPTION_MAX);
+    }
+  }
+
+  function showDescriptionError(msg) {
+    if (msg) {
+      if (fieldBrowserDescription) fieldBrowserDescription.classList.add('error');
+      if (browserDescriptionError) browserDescriptionError.textContent = msg;
+    } else {
+      if (fieldBrowserDescription) fieldBrowserDescription.classList.remove('error');
+      if (browserDescriptionError) browserDescriptionError.textContent = '';
+    }
   }
 
   // ---- Validation helpers (professional copy) ----
@@ -196,11 +238,30 @@
     return null;
   }
 
+  // The description is OPTIONAL. Empty is a legitimate value ("I have nothing
+  // to add"), so it never blocks connecting — only a non-empty over-long value
+  // or one carrying control characters does.
+  function validateBrowserDescription(value) {
+    var v = String(value == null ? '' : value);
+    if (!v.trim()) return null; // optional
+    if (v.length > DESCRIPTION_MAX) {
+      return 'Description must be ' + DESCRIPTION_MAX + ' characters or fewer (' + v.length + ' now).';
+    }
+    // Allow newlines and tabs; everything else in C0/DEL is meaningless to the
+    // model and corrupts log lines. The server strips these too.
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(v)) {
+      return 'Description contains control characters — please use plain text (new lines and tabs are fine).';
+    }
+    return null;
+  }
+
   function clearFieldErrors() {
     if (fieldBrowserName) fieldBrowserName.classList.remove('error');
     if (fieldServerUrl) fieldServerUrl.classList.remove('error');
+    if (fieldBrowserDescription) fieldBrowserDescription.classList.remove('error');
     if (browserNameError) browserNameError.textContent = '';
     if (serverUrlError) serverUrlError.textContent = '';
+    if (browserDescriptionError) browserDescriptionError.textContent = '';
   }
 
   function showFieldError(fieldEl, errorEl, msg) {
@@ -212,8 +273,10 @@
     clearFieldErrors();
     var bVal = browserNameInput.value;
     var sVal = serverUrlInput.value;
+    var dVal = browserDescriptionInput ? browserDescriptionInput.value : '';
     var bErr = validateBrowserName(bVal);
     var sErr = validateServerUrl(sVal);
+    var dErr = validateBrowserDescription(dVal);
     var hasError = false;
     if (bErr) {
       showFieldError(fieldBrowserName, browserNameError, bErr);
@@ -223,10 +286,15 @@
       showFieldError(fieldServerUrl, serverUrlError, sErr);
       hasError = true;
     }
+    if (dErr) {
+      showFieldError(fieldBrowserDescription, browserDescriptionError, dErr);
+      hasError = true;
+    }
     if (hasError) {
       setError('Please correct the highlighted fields before connecting.');
       if (bErr) browserNameInput.focus();
       else if (sErr) serverUrlInput.focus();
+      else if (dErr && browserDescriptionInput) browserDescriptionInput.focus();
       setStatus('error', 'Please check the form');
       return false;
     }
@@ -250,6 +318,20 @@
     var bName = snapshot.browserName || browserNameInput.value.trim() || 'Firefox';
     var sUrl = snapshot.serverUrl || serverUrlInput.value.trim() || '—';
     if (summaryBrowser) summaryBrowser.textContent = bName;
+    // Description row only when there is one — an empty field adds noise to
+    // the glanceable summary. Truncated for display, full text in the title.
+    var desc = currentDescription();
+    if (summaryDescriptionRow) {
+      if (desc) {
+        summaryDescriptionRow.removeAttribute('hidden');
+        if (summaryDescription) {
+          summaryDescription.textContent = desc.length > 60 ? desc.slice(0, 60) + '…' : desc;
+          summaryDescription.title = desc;
+        }
+      } else {
+        summaryDescriptionRow.setAttribute('hidden', '');
+      }
+    }
     if (summaryServer) {
       var display = String(sUrl).replace(/^wss?:\/\//, '').replace(/^https?:\/\//, '').replace(/\/relay\/?$/, '');
       summaryServer.textContent = display || sUrl;
@@ -443,6 +525,14 @@
           openInWindowCheckbox.checked = !!flag;
         });
       }
+      if (!_descriptionDirty && browserDescriptionInput) {
+        Config.getBrowserDescription(function(desc) {
+          browserDescriptionInput.value = desc || '';
+          updateDescriptionCount();
+        });
+      } else {
+        updateDescriptionCount();
+      }
       if (snapshot.connected) updateConnectedSummary(snapshot);
 
       setBidiStatus(snapshot.bidiConnected, snapshot.bidiError);
@@ -480,10 +570,12 @@
       chrome.runtime.sendMessage({
         type: 'connect',
         serverUrl: serverUrlInput.value.trim(),
-        browserName: browserNameInput.value.trim() || 'Firefox'
+        browserName: browserNameInput.value.trim() || 'Firefox',
+        browserDescription: currentDescription()
       }, function() {
         _urlDirty = false;
         _browserNameDirty = false;
+        _descriptionDirty = false;
         loadState();
       });
     }
@@ -507,6 +599,47 @@
       if (!stillError) setError(null);
     }
   });
+
+  if (browserDescriptionInput) {
+    browserDescriptionInput.addEventListener('input', function() {
+      _descriptionDirty = true;
+      updateDescriptionCount();
+      // Clear the inline error as soon as the user starts fixing it.
+      if (fieldBrowserDescription && fieldBrowserDescription.classList.contains('error')) {
+        showDescriptionError(null);
+        var otherErr = (fieldBrowserName && fieldBrowserName.classList.contains('error')) ||
+          (fieldServerUrl && fieldServerUrl.classList.contains('error'));
+        if (!otherErr) setError(null);
+      }
+    });
+
+    // Commit on blur. While connected this is a LIVE update over the
+    // already-authenticated relay channel — no reconnect, no new PIN. While
+    // disconnected it just persists locally and rides along on the next hello.
+    browserDescriptionInput.addEventListener('blur', function() {
+      var value = currentDescription();
+      var err = validateBrowserDescription(value);
+      if (err) {
+        showDescriptionError(err);
+        return; // never send an invalid value
+      }
+      showDescriptionError(null);
+      _descriptionDirty = false;
+      Config.saveBrowserDescription(value, function() {
+        if (_latestSnapshot && _latestSnapshot.connected) {
+          chrome.runtime.sendMessage({ type: 'update-description', description: value }, function() {
+            if (chrome.runtime.lastError) {
+              // The send failed but the value is already stored locally, so it
+              // will be re-sent in the next hello on reconnect.
+              console.warn('[Popup] Live description update failed:', chrome.runtime.lastError.message);
+            } else {
+              updateConnectedSummary(_latestSnapshot);
+            }
+          });
+        }
+      });
+    });
+  }
 
   probeBtn.addEventListener('click', function() {
     var target = (serverUrlInput.value || '').trim();

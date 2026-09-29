@@ -1295,6 +1295,8 @@ export class BrowserManager {
           : this._isAddOnConnected(entry.name),
         cdpUrl: entry.cdpUrl,
         role: entry.role,
+        // The browser's own words, when it wrote any (relay browsers only).
+        description: entry.description || "",
       };
     }
     return result;
@@ -1318,6 +1320,7 @@ export class BrowserManager {
       connectedAt: entry.connectedAt ?? undefined,
       extensionVersion: entry.extensionVersion ?? undefined,
       bidiOrigin: entry.bidiOrigin ?? undefined,
+      description: entry.description || "",
       wsUrl: relayServer.gatewayWsUrl(entry.name)
     };
   }
@@ -1388,6 +1391,7 @@ export class BrowserManager {
         type: "navigator-cdp",
         plugin: entry.plugin || "auto",
         status: "disconnected",
+        description: entry.description || "",
         cdpUrl: relayServer.gatewayWsUrl(entry.name)
       };
     }
@@ -1417,6 +1421,9 @@ export class BrowserManager {
       status: isConn ? "connected" : live.status === "auth_pending" ? "auth_pending" : "disconnected",
       extensionVersion: live.extensionVersion,
       connectedAt: live.connectedAt || null,
+      // One description per browser, surfaced on each of its tabs so the model
+      // knows which group a target belongs to without a second tool call.
+      description: live.description || entry.description || "",
       puppeteerClients: live.clients && live.clients.size,
       viaPuppeteer: Boolean(conn?.browser?.connected),
       cdpUrl: relayServer.gatewayWsUrl(entry.name)

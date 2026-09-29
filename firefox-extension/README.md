@@ -24,8 +24,13 @@ extensions. This extension:
    `userPromptOpened` → `Page.javascriptDialogOpening`, …) tagged with the CDP
    session id so puppeteer-style clients attach them to the right session.
 4. Reuses the **exact same relay protocol** the Chromium extension uses:
-   PIN pairing with navigator, `navigator-hello`, per-tab session mapping,
-   keepalive — so the server side needed zero changes.
+   PIN pairing with navigator, `navigator-hello`, per-tab session mapping, and
+   keepalive — so no CDP-shaped surface is duplicated in the server. That
+   includes the popup's "Description for AI" field: `navigator-hello.browserDescription`
+   (≤500 chars) plus a live `update_description` frame while connected. An
+   omitted field means "keep the stored value" (older builds), an explicit `""`
+   clears it, and the value is stored per browser name in the server's
+   `relay_browser_meta` so it survives a container restart.
 
 Firefox quirks are either answered locally (no-op `Browser.*`, `SystemInfo.*`,
 `Network.enable`…) or surfacing as clean CDP errors (`-32601`) — never hangs.

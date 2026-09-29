@@ -64,6 +64,7 @@ var ConnectionManager = (function() {
 
     Config.getServerUrl(function(serverUrl) {
       Config.getBrowserName(function(browserName) {
+        Config.getBrowserDescription(function(browserDescription) {
         Config.getSessionToken(function(sessionToken) {
           var rawUrl = options.serverUrl || serverUrl || Config.defaultWsUrl;
           if (!rawUrl) {
@@ -142,6 +143,15 @@ var ConnectionManager = (function() {
                 platform: 'firefox',
                 extensionVersion: chrome.runtime.getManifest().version
               };
+              // Sent on EVERY hello, including a silent token reconnect, so a
+              // description edited while offline still lands on the server.
+              // The check is on TYPE, not truthiness: an empty string is a
+              // deliberate "clear it" (the user emptied the field), and the
+              // server only treats an ABSENT field as "old extension, keep
+              // what's stored". Truthiness here would strand the old value.
+              if (typeof browserDescription === 'string') {
+                msg.browserDescription = browserDescription;
+              }
               // The Remote Agent allow-lists WebSocket origins exactly
               // (scheme/host/port). The extension connects from a
               // "moz-extension://<uuid>" origin — report it so navigator (and
@@ -196,7 +206,24 @@ var ConnectionManager = (function() {
 
           tryNext();
         });
+        });
       });
+    });
+  }
+
+  /**
+   * Push a re-worded description to navigator while staying connected — no
+   * re-PIN, no reconnect. The relay channel is already authenticated by the
+   * session token, so this needs nothing extra. Persists locally first so a
+   * later reconnect re-sends it in the hello even if this call fails.
+   * @param {string} description
+   * @returns {boolean} true when the message went out on a live socket
+   */
+  function updateDescription(description, callback) {
+    Config.saveBrowserDescription(description || '', function() {
+      var ok = send({ type: 'update_description', description: description || '' });
+      Logger.info('[Connection] Description update', ok ? 'sent' : 'queued for next hello');
+      if (callback) callback({ success: ok, queued: !ok });
     });
   }
 
@@ -358,6 +385,7 @@ var ConnectionManager = (function() {
     connect: connect,
     disconnect: disconnect,
     send: send,
+    updateDescription: updateDescription,
     notify: notify,
     addListener: addListener,
     get: get

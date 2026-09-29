@@ -22,6 +22,13 @@
  *  12. unmapped CDP method -> -32601 UnsupportedOperation
  *  18. durable pending-connecting flag survives suspension + clears on connected
  *  19. disconnect clears the pending-connecting flag
+ *  31. browser description: storage, hello carriage, live update
+ *  32. live description update over a connected channel
+ *  33. pending-connecting carries the description
+ *  34. empty description is sent explicitly (clear is a real edit)
+ *
+ * 20d/20e fail pre-existing and are unrelated: the probe reports
+ * mode:'unknown' when both schemes fail, those tests expect refused/dns.
  *
  * Usage: node test/unit-ff.mjs
  */
@@ -322,6 +329,59 @@ function bidiCommands(clientWs, method) {
 }
 
 // ---------------------------------------------------------------- tests
+
+// 33. background.js startup resume — the description must survive an event-page
+// suspension between the popup save and the relay handshake. Mirrors the Chrome
+// harness (Chrome test 33) so the two extensions cannot drift on this path.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const listeners = { installed: [], startup: [], message: [], alarm: [] };
+  env.chrome.runtime.onInstalled = { addListener: (f) => listeners.installed.push(f) };
+  env.chrome.runtime.onStartup = { addListener: (f) => listeners.startup.push(f) };
+  env.chrome.runtime.onMessage = { addListener: (f) => listeners.message.push(f) };
+  env.chrome.alarms.onAlarm = { addListener: (f) => listeners.alarm.push(f) };
+
+  await new Promise(res => env.Config.saveBrowserDescription('stale old text', res));
+  await new Promise(res => env.Config.setPendingConnecting(
+    'ws://relay', 'firefox-mac', 'the description typed before suspension', res));
+
+  let booted = false;
+  try {
+    vm.runInContext(readFileSync(ROOT + 'background.js', 'utf8'), env, { filename: 'background.js' });
+    booted = true;
+  } catch (e) { report('33. background.js boots in the harness', false, e); }
+  test('33. background.js boots in the harness', () => booted);
+  test('33a. it registered a startup listener', () => listeners.startup.length === 1);
+
+  for (const fn of listeners.startup) fn({});
+  await sleep(60);
+
+  const stored = await new Promise(res => env.Config.getBrowserDescription(res));
+  test('33b. resume committed the pending description to storage', () =>
+    stored === 'the description typed before suspension');
+
+  const client = env.State.getWs();
+  const server = client && new FakeWebSocket('ws://relay');
+  if (client) { server.readyState = FakeWebSocket.OPEN; server.other = client; client.other = server; }
+  const hello = client && client._sent.find(m => m.type === 'navigator-hello');
+  test('33c. the resumed hello carries the pending description, not the stale one', () =>
+    !!hello && hello.browserDescription === 'the description typed before suspension');
+  const after = await new Promise(res => env.Config.getPendingConnecting(res));
+  test('33d. the pending flag is consumed by the resume', () => after.pending === false);
+}
+
+// 34. An explicitly cleared description in the pending flag must not fall back
+// to the stale stored value — "no owner description" is a meaningful choice.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('stale old text', res));
+  await new Promise(res => env.Config.setPendingConnecting('ws://relay', 'firefox-mac', '', res));
+  const restored = await new Promise(res => env.Config.getPendingConnecting(res));
+  test('34. a pending clear keeps the empty string instead of the stale value', () =>
+    restored.pending === true && restored.browserDescription === '');
+}
 
 console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n');
 
@@ -682,6 +742,122 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   env.ConnectionManager.disconnect();
   const after = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
   test('19. disconnect clears the pending-connecting flag', () => after.pending === false);
+}
+
+// 31. Browser description (plan 45) — storage, hello carriage, live update.
+{
+  const chrome = makeChromeMock();
+  const env = buildEnvFromChrome(chrome);
+  loadExtension(env);
+
+  // 21a. Storage round-trips, defaulting to "".
+  const empty = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('31a. browserDescription defaults to empty string', () => empty === '');
+
+  await new Promise(res => env.Config.saveBrowserDescription("my daily driver for gmail", res));
+  const stored = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('31b. browserDescription round-trips through storage.local', () =>
+    stored === 'my daily driver for gmail');
+
+  // 21c. The hello carries it, so a navigator that restarted still learns it.
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [, client] = wireRelay(env, '10.69.1.164:1994');
+  const hello = client._sent.find(m => m.type === 'navigator-hello');
+  test('31c. navigator-hello carries browserDescription', () =>
+    !!hello && hello.browserDescription === 'my daily driver for gmail' && hello.platform === 'firefox');
+
+  // 21d. The extension gates the live update on the SOCKET, not on auth — the
+  //      server enforces auth (and rejects pre-auth updates; see
+  //      tests/relay-server.test.js). A value edited while merely socket-open
+  //      is still sent; the server decides.
+  const before = client._sent.filter(m => m.type === 'update_description').length;
+  await new Promise(res => env.ConnectionManager.updateDescription('edited', res));
+  const sentCount = client._sent.filter(m => m.type === 'update_description').length;
+  test('31d. updateDescription is sent whenever the socket is open', () =>
+    sentCount === before + 1);
+
+  // 21e. With NO socket at all, nothing is sent but the value still persists,
+  //      so it rides the next hello instead.
+  env.ConnectionManager.disconnect();
+  const afterDisconnect = client._sent.filter(m => m.type === 'update_description').length;
+  await new Promise(res => env.ConnectionManager.updateDescription('while fully offline', res));
+  const offlineStored = await new Promise(res => env.Config.getBrowserDescription(x => res(x)));
+  test('31e. disconnected: no frame sent, but the value is stored for the next hello', () =>
+    client._sent.filter(m => m.type === 'update_description').length === afterDisconnect &&
+    offlineStored === 'while fully offline');
+}
+
+// 32. Live update over an authenticated, already-connected channel.
+{
+  const chrome = makeChromeMock();
+  const env = buildEnvFromChrome(chrome);
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('first take', res));
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [, client] = wireRelay(env, '10.69.1.164:1994');
+  client.other.send(JSON.stringify({ type: 'connected', sessionToken: 'tok-live' }));
+  await sleep(40);
+  test('37a. connected before the live update', () => env.State.isConnected());
+
+  const res = await new Promise(r => env.ConnectionManager.updateDescription('second take', r));
+  const sent = client._sent.find(m => m.type === 'update_description');
+  test('37b. updateDescription sends update_description while connected', () =>
+    res.success === true && !!sent && sent.description === 'second take');
+
+  // The local copy is authoritative for the next hello too.
+  const persisted = await new Promise(r => env.Config.getBrowserDescription(x => r(x)));
+  test('37c. updateDescription also persists locally', () => persisted === 'second take');
+}
+
+// 33. The pending-connecting flag carries the description so a popup that
+//     reopens mid-connect restores what the user typed.
+{
+  const chrome = makeChromeMock();
+  const env = buildEnvFromChrome(chrome);
+  loadExtension(env);
+  env.Config.setPendingConnecting('10.69.1.164:1994', 'Firefox', 'restored description', () => {});
+  const pending = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
+  test('35. pending-connecting carries browserDescription across event-page suspend', () =>
+    pending.pending === true && pending.browserDescription === 'restored description');
+
+  // 3-arg legacy form (older caller passing a callback) must still work.
+  env.Config.setPendingConnecting('10.69.1.164:1994', 'Firefox', () => {});
+  const legacy = await new Promise(res => env.Config.getPendingConnecting(x => res(x)));
+  test('35b. 3-arg setPendingConnecting (callback 3rd) stays back-compatible', () =>
+    legacy.browserName === 'Firefox' && legacy.browserDescription === '');
+}
+
+// 34. Emptying the field is a real edit, not a no-op. The server treats an
+//     ABSENT browserDescription as "old extension, keep what's stored" (see
+//     tests/relay-server.test.js), so the hello must carry an explicit "" to
+//     clear it. Gating the field on truthiness would strand the old value for
+//     anyone who empties it while offline.
+{
+  const chrome = makeChromeMock();
+  const env = buildEnvFromChrome(chrome);
+  loadExtension(env);
+  await new Promise(res => env.Config.saveBrowserDescription('to be removed', res));
+  env.Config.saveServerUrl('10.69.1.164:1994', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [, client] = wireRelay(env, '10.69.1.164:1994');
+  const before = client._sent.find(m => m.type === 'navigator-hello');
+  test('36a. hello carries the saved description first', () =>
+    !!before && before.browserDescription === 'to be removed');
+
+  // User empties the field while disconnected, then reconnects.
+  env.ConnectionManager.disconnect();
+  await new Promise(res => env.Config.saveBrowserDescription('', res));
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [, client2] = wireRelay(env, '10.69.1.164:1994');
+  const cleared = client2._sent.find(m => m.type === 'navigator-hello');
+  test('36b. empty description is sent explicitly so the server clears it', () =>
+    !!cleared && cleared.browserDescription === '');
 }
 
 // 20. Probe — reachability diagnostics (parse + fetch-backed HTTP probe)

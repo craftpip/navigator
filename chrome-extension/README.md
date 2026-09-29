@@ -58,10 +58,12 @@ docker compose logs -f         # watch startup logs / extension output
 
 | Direction | Message | Purpose |
 |---|---|---|
-| ext → | `{ type: 'navigator-hello', browserName, extensionVersion, sessionToken? }` | handshake on connect |
+| ext → | `{ type: 'navigator-hello', browserName, browserDescription?, extensionVersion, sessionToken? }` | handshake on connect. `browserDescription` is the popup's "Description for AI" (≤500 chars); omitted by older builds, an explicit `""` clears the stored value |
 | ← | `{ type: 'pin_required' }` | server asks for PIN (no/expired token) |
 | ext → | `{ type: 'pin', pin }` | submit 6-digit PIN |
 | ← | `{ type: 'connected', sessionToken }` | paired; token stored for reconnection |
+| ext → | `{ type: 'update_description', description }` | live edit while connected; server rejects unless the entry is authenticated + connected |
+| ← | `{ type: 'description_updated', description }` | server accepted the live edit |
 | ← | `{ type: 'client-connected', clientId }` | navigator (puppeteer) attached |
 | ← | `{ type: 'list_tabs_request' }` | navigator asks for tab list |
 | ext → | `{ type: 'tab_list', tabs: [targetInfo] }` | tab list response |

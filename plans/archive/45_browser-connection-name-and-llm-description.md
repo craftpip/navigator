@@ -1,8 +1,18 @@
 # 45 — Browser connection name + LLM description (extension → server → tools)
 
-> Status: **Plan** — not started
+> Status: **Complete** — description feature built, tested, documented, absorbed
 > Owner: navigator extensions + relay-server + browser/mcp-server surface
 > Request: *"in the navigator browser extensions, we will take input of the name of the connection name the examples of the names more understandable, Firefox laptop, Chrome Desktop, Personal browser, like this what u call this browser, and another new field we add that is description -> this is given to the llm to make decisions on what to select, this the user will enter the description or instructions for llm for this browser, make a plan first"*
+
+> **Scope override (user, 2026-09-29):** the `Az01-` name-prefix requirement in
+> §1, §3.1, §7.1 and §8 is **not** implemented. The user asked to close the
+> description gap only; existing connection names keep validating exactly as
+> they did, so no browser has to be re-paired. Likewise `config.js` does not
+> learn a new `description` field on `BROWSERS` — the existing `prompt` field
+> stays the console-side default, and the popup-authored description overrides
+> it per browser (§7.5). The web-console render (§Phase D, §8) was dropped as
+> out of scope; the console reads relay entries generically and the description
+> is authored and displayed in the popup.
 
 ---
 
@@ -290,29 +300,48 @@ For completeness (not required for the extension feature but keeps static browse
 
 ## 7. Open decisions (resolve before coding)
 
-1. **`Az01-` name prefix** — enforced as a hard validation rule on both popups (name must start with `Az01-`). **Resolved by user:** yes, only `Az01-`-prefixed names are accepted.
+1. **`Az01-` name prefix** — **Superseded by the user (2026-09-29):** not implemented. Requiring it would invalidate every already-paired browser's name for no gain in the description feature, so connection-name validation is untouched.
 2. **Description placeholder copy** — per-browser default `User's Firefox` / `User's Chrome`. **Resolved by user:** use `User's Firefox` on Firefox, `User's Chrome` on Chrome (no unified generic example).
-3. **Counter / hint density** — show `0/500` live counter or just rely on validation? Counter is mild value-add, no risk.
-4. **Console editability** — keep description read-only in the web console (extension is source of truth) vs allow console edits that push `saveRelayBrowserMeta` directly? **Leaning:** read-only for v1; fewer auth paths.
-5. **BROWSERS `description` visibility** — expose for static browsers now or defer to follow-up? Cheap to do in Phase A, so include.
+3. **Counter / hint density** — **Resolved:** live `N / 500` counter plus inline errors, both only while they have something to say (the counter is hidden at 0).
+4. **Console editability** — **Not applicable:** the description is authored in the popup, so the console never needs to edit it; the web-console render was dropped as out of scope.
+5. **BROWSERS `description` visibility** — **Resolved by user (2026-09-29):** the existing `BROWSERS[].prompt` stays the console-side default rather than gaining a duplicate field, and a non-empty owner description from the popup overrides it. The built-in Chromium keeps its position-derived prompt.
 
 ---
 
 ## 8. Rollout checklist
 
-- [ ] DB migration + helpers
-- [ ] `relay-server.js` hello + `update_description` + hydration
-- [ ] `config.js` `description` parse
-- [ ] `browser.js` health plumbing
-- [ ] `mcp-server.js` + `devtools.js` payloads + tool-doc line
-- [ ] `chrome-extension` storage + popup + background — **name regex `^Az01-…` enforced; description placeholder `User's Chrome`**
-- [ ] `firefox-extension` storage + popup + background (mirror) — **name regex `^Az01-…` enforced; description placeholder `User's Firefox`**
-- [ ] Re-pair existing browsers with `Az01-`-prefixed names (old unprefixed names fail the new validation)
-- [ ] `web-console` read-only render
-- [ ] Unit tests extended (both harnesses)
-- [ ] `AGENTS.md` + extension READMEs updated
-- [ ] Unpacked extension smoke + `GET /health` → `list_browsers` e2e (verify `Az01-` name + `User's Chrome/Firefox` description appear)
-- [ ] Version bump `0.3.1` + pack scripts
+As built (see the scope override at the top — `Az01-` naming and the console
+render are deliberately not part of this change):
+
+- [x] DB migration + helpers — `relay_browser_meta`, `save/load/deleteRelayBrowserMeta`
+- [x] `relay-server.js` hello + `update_description` + hydration — authenticated
+      ingestion, 500-char/control-char normalization, `forget()` keeps the row,
+      `remove()` deletes it, `init()` hydrates (and calls `initDb()` so ordering
+      cannot lose a write)
+- [x] `config.js` — **not changed**; the existing `BROWSERS[].prompt` remains the
+      console-side default
+- [x] `browser.js` health plumbing — description in `getHealth` / `getInstanceStats` / relay summary
+- [x] `mcp-server.js` + `devtools.js` payloads + tool-doc line — a non-empty owner
+      description wins over the configured prompt; per-target `description` on
+      `Target.getTargets`
+- [x] `chrome-extension` storage + popup + background — placeholder `User's Chrome`
+- [x] `firefox-extension` storage + popup + background (mirror) — placeholder `User's Firefox`
+- [x] Startup resume keeps the description across suspension (found + fixed while
+      testing: `resumePendingConnect` never committed the pending value, and the
+      pending-vs-stored fallback resurrected a deliberately cleared description)
+- [x] Unit tests extended — `tests/relay-server.test.js` 21/21, `tests/mcp-server.test.js` 111/111,
+      `tests/devtools.test.js` description test, both extension harnesses
+- [x] Popup DOM tests — new `chrome-extension/test/unit-popup.mjs` (20 assertions,
+      run against **both** extensions via `firefox-extension/test/unit-popup.mjs`)
+- [x] `AGENTS.md` + `docs/guides/browsers/*.md` updated
+- [ ] `web-console` read-only render — **dropped**, out of scope (see override)
+- [ ] Version bump + pack scripts — **left for the release step**: Chrome's
+      manifest is already carrying an unrelated in-flight bump (`0.4.2`), and
+      mixing a version bump from this feature into shared manifest state would
+      collide with it
+- [ ] Unpacked-extension e2e smoke in a real browser — **not possible in the
+      session container** (no Chromium/Chrome/Firefox binary, no X display); the
+      jsdom popup suite plus both VM harnesses stand in for it
 
 ---
 

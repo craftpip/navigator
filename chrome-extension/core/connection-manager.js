@@ -65,11 +65,13 @@ var ConnectionManager = (function() {
       else if (url.indexOf('http://') === 0) alt = 'https://' + url.substring(7);
       return alt ? [url, alt] : [url];
     }
-    // Bare host[:port] — strip any path the user pasted
+    // Bare host[:port] — strip any path the user pasted. Navigator's relay
+    // listens on 1994, so entering only a host must still reach that server.
     var hostPort = input.split('/')[0].trim();
     // Remove any trailing colon
     hostPort = hostPort.replace(/:+$/, '');
     if (!hostPort) return [];
+    if (hostPort.indexOf(':') === -1) hostPort += ':1994';
     // Try secured first, then non-secured
     return ['wss://' + hostPort + '/relay', 'ws://' + hostPort + '/relay'];
   }
@@ -83,6 +85,7 @@ var ConnectionManager = (function() {
 
     Config.getServerUrl(function(serverUrl) {
       Config.getBrowserName(function(browserName) {
+        Config.getBrowserDescription(function(browserDescription) {
         Config.getSessionToken(function(sessionToken) {
           var rawUrl = options.serverUrl || serverUrl;
           if (!rawUrl) {
@@ -142,11 +145,19 @@ var ConnectionManager = (function() {
             State.clearHeartbeatTimer();
 
             var opened = false;
+            var advancing = false;
+            function advanceToNextCandidate() {
+              if (advancing) return;
+              advancing = true;
+              clearTimeout(fallbackTimer);
+              if (State.getWs() === ws) State.setWs(null);
+              try { ws.close(); } catch (e) {}
+              tryNext();
+            }
             var fallbackTimer = setTimeout(function() {
               if (!opened && State.getWs() === ws) {
                 Logger.warn('[Connection] Timeout for', wsUrl, '— trying next');
-                try { ws.close(); } catch (e) {}
-                // onclose will trigger tryNext via _handleClose fallback
+                advanceToNextCandidate();
               }
             }, 4000);
 
@@ -166,6 +177,15 @@ var ConnectionManager = (function() {
                   platform: platform,
                   extensionVersion: chrome.runtime.getManifest().version
                 };
+                // Sent on EVERY hello, including a silent token reconnect, so
+                // a description edited while offline still lands on the server.
+                // The check is on TYPE, not truthiness: an empty string is a
+                // deliberate "clear it" (the user emptied the field), and the
+                // server only treats an ABSENT field as "old extension, keep
+                // what's stored". Truthiness here would strand the old value.
+                if (typeof browserDescription === 'string') {
+                  msg.browserDescription = browserDescription;
+                }
                 if (sessionToken) {
                   msg.sessionToken = sessionToken;
                   Logger.info('[Connection] Including session token');
@@ -197,7 +217,10 @@ var ConnectionManager = (function() {
             ws.onerror = function(error) {
               if (State.getWs() !== ws) return;
               Logger.error('[Connection] Error for', wsUrl, ':', error);
-              // Let onclose handle fallback; just mark error
+              if (!opened) {
+                advanceToNextCandidate();
+                return;
+              }
               State.setLastError('WebSocket error for ' + wsUrl);
               notify({ type: 'connection-status-changed' });
             };
@@ -209,7 +232,24 @@ var ConnectionManager = (function() {
 
           tryNext();
         });
+        });
       });
+    });
+  }
+
+  /**
+   * Push a re-worded description to navigator while staying connected — no
+   * re-PIN, no reconnect. The relay channel is already authenticated by the
+   * session token, so this needs nothing extra. Persists locally first so a
+   * later reconnect re-sends it in the hello even if this call fails.
+   * @param {string} description
+   * @returns {boolean} true when the message went out on a live socket
+   */
+  function updateDescription(description, callback) {
+    Config.saveBrowserDescription(description || '', function() {
+      var ok = send({ type: 'update_description', description: description || '' });
+      Logger.info('[Connection] Description update', ok ? 'sent' : 'queued for next hello');
+      if (callback) callback({ success: ok, queued: !ok });
     });
   }
 
@@ -382,6 +422,7 @@ var ConnectionManager = (function() {
     connect: connect,
     disconnect: disconnect,
     send: send,
+    updateDescription: updateDescription,
     notify: notify,
     addListener: addListener,
     get: get

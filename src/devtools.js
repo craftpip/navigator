@@ -780,6 +780,10 @@ async function listTargets() {
     .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)));
   for (const entry of relayEntries) {
     const tabs = relayServer.getEntry(entry.name)?.tabs || [];
+    // One description per browser, repeated on each of its tabs: it tells the
+    // model which of the user's browsers a target belongs to, without a
+    // second list_browsers call. Omitted entirely when the browser wrote none.
+    const description = (relayServer.getEntry(entry.name)?.description || entry.description || "").trim();
     for (const t of tabs) {
       if (!t || !t.targetId || seen.has(t.targetId)) continue;
       if (t.type && t.type !== "page") continue;
@@ -788,6 +792,7 @@ async function listTargets() {
         targetId: t.targetId,
         backend: entry.name,
         ownership: targetOwnership(manager, entry.name),
+        ...(description ? { description } : {}),
         url: t.url || "",
         title: t.title || "",
         viewport: { width: "auto", height: "auto" },

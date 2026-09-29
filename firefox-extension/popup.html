@@ -28,6 +28,18 @@ body { width: 360px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
 .field.error .field-error { display: block; }
 .field-hint { font-size: 11px; color: #666; margin-top: 4px; line-height: 1.4; }
 .field.error .field-hint { display: none; }
+.field-optional { color: #666; font-weight: normal; }
+.field-count { color: #555; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.field-hint.over-limit .field-count { color: #ff6b6b; }
+
+/* The description textarea inherits the input palette; only the sizing and
+   vertical resize differ. */
+.field textarea { width: 100%; background: #1f1f28; border: 1px solid #33333f; border-radius: 6px; padding: 8px 10px; color: #e8e8ec; font-size: 13px; font-family: inherit; line-height: 1.45; outline: none; resize: vertical; min-height: 64px; max-height: 140px; transition: border-color 0.15s, background 0.15s; }
+.field textarea:focus { border-color: #4a9eff; }
+.field textarea::placeholder { color: #5a5a68; }
+.field textarea:disabled { opacity: 0.6; }
+.field.error textarea { border-color: #f44336; background: rgba(244,67,54,0.07); }
+.field.error textarea:focus { border-color: #f44336; box-shadow: 0 0 0 2px rgba(244,67,54,0.15); }
 
 .connected-summary { background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.32); border-radius: 8px; padding: 13px 13px 11px; margin-bottom: 12px; display: none; }
 .connected-summary.visible { display: block; }
@@ -139,6 +151,7 @@ body { position: relative; }
     <div class="connected-summary" id="connectedSummary" aria-live="polite">
       <div class="summary-title"><span class="status-dot connected"></span> Connected to Navigator</div>
       <div class="summary-row"><span class="summary-label">Browser</span><span class="summary-value" id="summaryBrowser">—</span></div>
+      <div class="summary-row" id="summaryDescriptionRow" hidden><span class="summary-label">Description</span><span class="summary-value" id="summaryDescription">—</span></div>
       <div class="summary-row"><span class="summary-label">Server</span><span class="summary-value" id="summaryServer">—</span></div>
       <div class="summary-row"><span class="summary-label">Status</span><span class="summary-value" id="summaryStatus">Connected</span></div>
     </div>
@@ -160,6 +173,19 @@ body { position: relative; }
       <button id="probeBtn" class="probe-btn" type="button">Test connection</button>
       <div class="probe-result" id="probeResult"></div>
     </div>
+    </div>
+
+    <!-- Kept OUT of #connFields on purpose: that block is hidden while
+         connected, and the description must stay editable then — blurring it
+         pushes a live update to an already-authenticated relay channel. -->
+    <div class="field" id="field-browserDescription">
+      <label for="browserDescription">Description for AI <span class="field-optional">(optional)</span></label>
+      <textarea id="browserDescription" rows="3" maxlength="500" placeholder="User's Firefox" spellcheck="true"></textarea>
+      <div class="field-hint">
+        <span id="descriptionHint">Instructions for the AI. When you have multiple browsers, the AI reads this to choose the right one.</span>
+        <span id="descriptionCount" class="field-count"></span>
+      </div>
+      <div class="field-error" id="browserDescriptionError" role="alert"></div>
     </div>
 
     <label class="field toggle-field">

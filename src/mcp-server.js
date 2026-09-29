@@ -2342,7 +2342,7 @@ function getToolsListResponse(allowedTools = null) {
       {
         name: "list_browsers",
         description:
-          "List all configured browser backends with their roles, connection status, type, and ownership. ownership \"user\" = a `navigator-cdp` relay browser — that is the USER's real, visible, NON-headless browser window; everything the agent does there (tabs, clicks, navigation, screenshots input) appears on the user's screen, so the user can see it. ownership \"agent\" = navigator-owned browsers (builtin Chromium, plain `cdp` add-ons like cloakbrowser/lightpanda) that are headless/invisible to the user. Use to discover available browsers and know whether activity is user-visible before routing devtools calls.",
+          "List all configured browser backends with their roles, connection status, type, and ownership. ownership \"user\" = a `navigator-cdp` relay browser — that is the USER's real, visible, NON-headless browser window; everything the agent does there (tabs, clicks, navigation, screenshots input) appears on the user's screen, so the user can see it. ownership \"agent\" = navigator-owned browsers (builtin Chromium, plain `cdp` add-ons like cloakbrowser/lightpanda) that are headless/invisible to the user. Use to discover available browsers and know whether activity is user-visible before routing devtools calls. The Prompt column is the browser's own guidance to you: for a relay browser it is written by the user in that browser's extension popup (\"this is my personal laptop, prefer it for Gmail\"), otherwise it is the operator's configured hint. When several browsers are available, honour the prompt — pick the one whose prompt best matches the task instead of guessing by name.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -3239,6 +3239,14 @@ async function handleToolCallInner(name, args = {}) {
         b.prompt = builtinBrowserPrompt(index + 1, ordered.length);
       }
     });
+    // A relay browser's OWN description wins over the console-configured
+    // prompt: the browser owner wrote it, and it is the one who knows which of
+    // their browsers is the personal laptop. The configured prompt stays the
+    // fallback for add-ons that have no popup of their own.
+    for (const b of ordered) {
+      const own = (effectiveByName.get(b.name)?.description || "").trim();
+      if (own) b.prompt = own;
+    }
     const tabsByBrowser = new Map(
       (await manager.getInstanceStats()).map((s) => [s.backend, s.tabs])
     );

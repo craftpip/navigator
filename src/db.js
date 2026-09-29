@@ -139,6 +139,11 @@ const MIGRATIONS = [
      plugin TEXT NOT NULL DEFAULT 'auto',
      first_seen_at INTEGER NOT NULL
    );`,
+  `CREATE TABLE IF NOT EXISTS relay_browser_meta (
+     name TEXT PRIMARY KEY,
+     description TEXT NOT NULL DEFAULT '',
+     updated_at INTEGER NOT NULL
+   );`,
 ];
 
 function applyMigration(db, migration) {
@@ -209,6 +214,27 @@ export function loadKnownRelayBrowsers() {
 export function deleteKnownRelayBrowser(name) {
   if (!db) return false;
   return getDb().prepare("DELETE FROM known_relay_browsers WHERE name = ?").run(name).changes > 0;
+}
+
+// User-authored, LLM-facing description for a paired relay browser. Kept in a
+// sibling table rather than on relay_sessions because the token (pairing proof,
+// rotates rarely) and the description (edited freely, survives re-pairing) have
+// different lifecycles.
+export function saveRelayBrowserMeta(name, description, updatedAt = Date.now()) {
+  if (!db) return;
+  getDb()
+    .prepare("INSERT OR REPLACE INTO relay_browser_meta (name, description, updated_at) VALUES (?, ?, ?)")
+    .run(name, description || "", updatedAt);
+}
+
+export function loadRelayBrowserMetas() {
+  if (!db) return [];
+  return getDb().prepare("SELECT name, description, updated_at FROM relay_browser_meta").all();
+}
+
+export function deleteRelayBrowserMeta(name) {
+  if (!db) return false;
+  return getDb().prepare("DELETE FROM relay_browser_meta WHERE name = ?").run(name).changes > 0;
 }
 
 export function incrementUsageTotal(key, amount = 1) {

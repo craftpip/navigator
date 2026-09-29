@@ -5,6 +5,12 @@ import path from "node:path";
 
 vi.mock("../src/browser.js", () => ({
   getBrowserManager: vi.fn(),
+  // list_browsers renders an ownership column from this; a relay (navigator-cdp)
+  // browser is the user's real window, everything else is agent-owned.
+  browserOwnership: (type) => (type === "navigator-cdp" ? "user" : "agent"),
+  // The inbuilt row never takes a configured prompt — it gets this instead.
+  builtinBrowserPrompt: (position, total) =>
+    `Built-in Chromium — browser #${position} of ${total} in the execution order.`,
   resolveBrowserParam: async ({ browser = "" } = {}, config = null, manager = null) => {
     const mgr = manager || (await getBrowserManager());
     const page = await mgr.newPage({ browser });
@@ -2237,6 +2243,82 @@ describe("mcp-server HTTP endpoints", () => {
       } finally {
         browserMod.getBrowserManager.mockResolvedValue(makeMockManager());
         fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("list_browsers prompt precedence (plan 45)", () => {
+    it("a relay browser's own description wins over the configured BROWSERS prompt; empty falls back to it", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      // Ask the mock for its CURRENT manager — earlier suites reset the mock to
+      // a fresh instance, so results[0] would be a stale, unused manager.
+      const manager = await browserMod.getBrowserManager();
+      const originalBrowsers = manager.config.browsers;
+      const originalAddOns = manager._effectiveAddOns;
+
+      // The console-configured prompt is the default, shown whenever the
+      // browser owner has not written a description of their own.
+      const configured = { name: "laptop", role: ["default"], type: "navigator-cdp", plugin: "chrome", addOn: true, prompt: "console default prompt" };
+      manager.config.browsers = [...originalBrowsers, configured];
+      // The description reaches list_browsers through the effective add-on
+      // entry (BrowserManager._effectiveAddOns -> relayServer.getStatusEntries),
+      // so that entry is the seam to drive.
+      const relayEntry = { name: "laptop", type: "navigator-cdp", role: ["default"], status: "connected", paired: true, connected: true, configured: true, description: "" };
+      manager._effectiveAddOns = () => [
+        { name: "cloakbrowser", type: "cdp", role: ["default"], cdpUrl: "http://cloak:9222", status: "available", configured: true },
+        relayEntry,
+      ];
+      const isPaired = vi.spyOn(relayServer, "isPaired").mockReturnValue(true);
+      // list_browsers asks the manager whether a cdp add-on is connected; the
+      // shared mock manager has no such method, so stub it for this test only.
+      const hadIsConnected = "_isAddOnConnected" in manager;
+      manager._isAddOnConnected = () => true;
+
+      const rowFor = (text) => String(text).split("\n").find((l) => l.includes("**laptop**")) || "";
+
+      try {
+        // 1. No owner description -> the configured prompt is shown.
+        let res = await mcpPost({
+          jsonrpc: "2.0", id: 90, method: "tools/call",
+          params: { name: "list_browsers", arguments: {} },
+        });
+        expect(res.status).toBe(200);
+        let text = res.body.result.content[0].text;
+        expect(rowFor(text)).toContain("console default prompt");
+
+        // 2. The owner typed a description in the popup -> it wins.
+        relayEntry.description = "my personal laptop, logged into Gmail";
+        res = await mcpPost({
+          jsonrpc: "2.0", id: 91, method: "tools/call",
+          params: { name: "list_browsers", arguments: {} },
+        });
+        text = res.body.result.content[0].text;
+        expect(rowFor(text)).toContain("my personal laptop, logged into Gmail");
+        expect(rowFor(text)).not.toContain("console default prompt");
+
+        // 3. Whitespace-only is still "no description" — the fallback stays.
+        relayEntry.description = "   ";
+        res = await mcpPost({
+          jsonrpc: "2.0", id: 92, method: "tools/call",
+          params: { name: "list_browsers", arguments: {} },
+        });
+        text = res.body.result.content[0].text;
+        expect(rowFor(text)).toContain("console default prompt");
+
+        // 4. A multi-line description is flattened to one table cell.
+        relayEntry.description = "line one\nline two";
+        res = await mcpPost({
+          jsonrpc: "2.0", id: 93, method: "tools/call",
+          params: { name: "list_browsers", arguments: {} },
+        });
+        text = res.body.result.content[0].text;
+        expect(rowFor(text)).toContain("line one line two");
+      } finally {
+        isPaired.mockRestore();
+        if (!hadIsConnected) delete manager._isAddOnConnected;
+        manager._effectiveAddOns = originalAddOns;
+        manager.config.browsers = originalBrowsers;
       }
     });
   });

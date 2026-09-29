@@ -23,6 +23,14 @@ function listen(server) {
 }
 
 async function ephemeralRelay() {
+  // Each test starts from a clean persistence slate — the same state a fresh
+  // navigator has. Without this, rows written by an earlier test (known
+  // browsers, sessions, descriptions) are hydrated into this relay and leak
+  // into its status entries.
+  const { deleteKnownRelayBrowser, deleteRelaySession, loadKnownRelayBrowsers, loadRelaySessions } = await import("../src/db.js");
+  for (const k of loadKnownRelayBrowsers()) deleteKnownRelayBrowser(k.name);
+  for (const s of loadRelaySessions()) deleteRelaySession(s.name);
+
   const server = http.createServer(() => {});
   server.on("error", () => {});
   const port = await listen(server);
@@ -261,6 +269,208 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(relay.remove("ghost")).toBe(true);
     expect(relay.getStatusEntries([]).map((e) => e.name)).not.toContain("ghost");
     expect(relay._knownBrowsers.has("ghost")).toBe(false);
+  });
+});
+
+describe("browser description (plan 45) — auth gate, hello, live update, lifecycle", () => {
+  it("setDescription normalizes CRLF, strips control chars, trims, caps 500", async () => {
+    const { relay } = await ephemeralRelay();
+    // Unauthenticated in-memory set is fine here: setDescription is the
+    // validated entry point both the hello and update paths funnel through.
+    // CRLF folds to LF, C0 controls (except tab/LF) and DEL are dropped, and
+    // the ends are trimmed. Line structure is PRESERVED — list_browsers
+    // flattens newlines when it renders the table cell.
+    const messy = relay.setDescription("normalize", "  my\r\ndaily \u0000driver  ");
+    expect(messy.ok).toBe(true);
+    expect(messy.description).toBe("my\ndaily driver");
+    expect(relay.getDescription("normalize")).toBe("my\ndaily driver");
+
+    // Exactly 500 is allowed; 501 is not.
+    expect(relay.setDescription("cap", "y".repeat(500)).ok).toBe(true);
+    const tooLong = relay.setDescription("cap", "y".repeat(501));
+    expect(tooLong.ok).toBe(false);
+    expect(tooLong.error).toMatch(/500/);
+    // The rejected write must not clobber the good one.
+    expect(relay.getDescription("cap")).toBe("y".repeat(500));
+  });
+
+  it("does NOT apply a description from an unauthenticated hello (no PIN accepted yet)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const ws = await open(`${wsBase}/relay`);
+    // Attacker-style hello: knows the name, claims a description, never pairs.
+    ws.send(JSON.stringify({
+      type: "navigator-hello",
+      browserName: "victim",
+      platform: "chrome",
+      browserDescription: "hijacked by an unauthenticated peer"
+    }));
+    await nextMessage(ws, (m) => m.type === "pin_required");
+    // Auth is still pending — the description must NOT have been written.
+    expect(relay.getDescription("victim")).toBe("");
+    expect(relay.getStatusEntries([]).find((e) => e.name === "victim")?.description).toBe("");
+    ws.close();
+  });
+
+  it("ignores update_description before authentication, applies it once connected", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const ws = await open(`${wsBase}/relay`);
+    ws.send(JSON.stringify({ type: "navigator-hello", browserName: "late", platform: "chrome" }));
+    await nextMessage(ws, (m) => m.type === "pin_required");
+    // Rejected: not connected yet. No ack, no write.
+    ws.send(JSON.stringify({ type: "update_description", description: "too early" }));
+    await new Promise((r) => setTimeout(r, 120));
+    expect(relay.getDescription("late")).toBe("");
+
+    // Pair it for real.
+    const pin = relay._entries.get("late").pendingPin.pin;
+    ws.send(JSON.stringify({ type: "pin", pin }));
+    await nextMessage(ws, (m) => m.type === "connected");
+
+    // Now the same message is honoured, and acked.
+    ws.send(JSON.stringify({ type: "update_description", description: "my daily driver" }));
+    const acked = await nextMessage(ws, (m) => m.type === "description_updated");
+    expect(acked.description).toBe("my daily driver");
+    expect(relay.getDescription("late")).toBe("my daily driver");
+    ws.close();
+  });
+
+  it("applies the hello-carried description only after a valid token reconnect", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "roamer");
+    expect(relay.getDescription("roamer")).toBe("");
+    ws.close();
+
+    // Silent token reconnect that also carries a description edited while offline.
+    const re = await open(`${wsBase}/relay`);
+    re.send(JSON.stringify({
+      type: "navigator-hello",
+      browserName: "roamer",
+      platform: "chrome",
+      sessionToken: token,
+      browserDescription: "the laptop I take everywhere"
+    }));
+    await nextMessage(re, (m) => m.type === "connected");
+    expect(relay.getDescription("roamer")).toBe("the laptop I take everywhere");
+    re.close();
+  });
+
+  it("applies the hello description on first-time PIN pairing", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const ws = await open(`${wsBase}/relay`);
+    ws.send(JSON.stringify({
+      type: "navigator-hello",
+      browserName: "fresh",
+      platform: "chrome",
+      browserDescription: "first pair, description included"
+    }));
+    await nextMessage(ws, (m) => m.type === "pin_required");
+    expect(relay.getDescription("fresh")).toBe("");
+    const pin = relay._entries.get("fresh").pendingPin.pin;
+    ws.send(JSON.stringify({ type: "pin", pin }));
+    await nextMessage(ws, (m) => m.type === "connected");
+    expect(relay.getDescription("fresh")).toBe("first pair, description included");
+    ws.close();
+  });
+
+  it("survives disconnect + re-pair, is deleted only by remove()", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "keepme");
+    relay.setDescription("keepme", "still me after re-pairing");
+    expect(relay.getDescription("keepme")).toBe("still me after re-pairing");
+
+    // forget() drops the pairing but is NOT "forget who this browser is".
+    expect(relay.forget("keepme")).toBe(true);
+    expect(relay.isPaired("keepme")).toBe(false);
+    expect(relay.getDescription("keepme")).toBe("still me after re-pairing");
+
+    // Re-pair with a brand new token; the description is still ours.
+    const again = await pairExtension(relay, wsBase, "keepme");
+    expect(relay.getDescription("keepme")).toBe("still me after re-pairing");
+    expect(again.token).not.toBe(token);
+    ws.close();
+    again.ws.close();
+
+    // remove() is the full delete — the description goes with the row.
+    expect(relay.remove("keepme")).toBe(true);
+    expect(relay.getDescription("keepme")).toBe("");
+  });
+
+  it("rejects a >500 char description and echoes the limit", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "chatty");
+    ws.send(JSON.stringify({ type: "update_description", description: "x".repeat(501) }));
+    const err = await nextMessage(ws, (m) => m.type === "description_error");
+    expect(err.error).toMatch(/500/);
+    expect(relay.getDescription("chatty")).toBe("");
+    ws.close();
+  });
+
+  it("an old extension (no browserDescription field) leaves an existing description intact", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "legacy");
+    relay.setDescription("legacy", "written by the new popup");
+    ws.close();
+
+    // Reconnect with no browserDescription key at all (old extension build).
+    const re = await open(`${wsBase}/relay`);
+    re.send(JSON.stringify({ type: "navigator-hello", browserName: "legacy", platform: "chrome", sessionToken: token }));
+    await nextMessage(re, (m) => m.type === "connected");
+    expect(relay.getDescription("legacy")).toBe("written by the new popup");
+    re.close();
+  });
+
+  it("an explicit empty browserDescription CLEARS the description (new popup emptied the field)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "wiper");
+    relay.setDescription("wiper", "no longer accurate");
+    ws.close();
+
+    // Present-but-empty is the "user cleared it" signal and must wipe the
+    // value. This is the exact counterpart of the previous test: absent
+    // field = keep, empty field = clear. Both extensions send the field
+    // unconditionally (typeof check, not truthiness) to make this reachable.
+    const re = await open(`${wsBase}/relay`);
+    re.send(JSON.stringify({
+      type: "navigator-hello",
+      browserName: "wiper",
+      platform: "chrome",
+      sessionToken: token,
+      browserDescription: ""
+    }));
+    await nextMessage(re, (m) => m.type === "connected");
+    expect(relay.getDescription("wiper")).toBe("");
+    re.close();
+
+    // And the same over the live path.
+    const { ws: back } = await pairExtension(relay, wsBase, "wiper");
+    relay.setDescription("wiper", "typed again");
+    back.send(JSON.stringify({ type: "update_description", description: "" }));
+    const acked = await nextMessage(back, (m) => m.type === "description_updated");
+    expect(acked.description).toBe("");
+    expect(relay.getDescription("wiper")).toBe("");
+    back.close();
+  });
+
+  it("persists a description to SQLite and hydrates it into a fresh RelayServer (survives a navigator restart)", async () => {
+    const { relay } = await ephemeralRelay();
+    // setDescription is the single write path for both the hello and the live
+    // update, so writing through it exercises the DB round-trip too.
+    relay.setDescription("persisted", "the studio machine");
+    const { loadRelayBrowserMetas, deleteRelayBrowserMeta } = await import("../src/db.js");
+    const rows = loadRelayBrowserMetas();
+    expect(rows.find((r) => r.name === "persisted")?.description).toBe("the studio machine");
+    expect(typeof rows.find((r) => r.name === "persisted")?.updated_at).toBe("number");
+
+    // A brand new server instance (what a container restart gives us) starts
+    // with an empty in-memory map and must pick the description back up.
+    const fresh = new RelayServer();
+    expect(fresh.getDescription("persisted")).toBe("");
+    fresh.init({ server: http.createServer(() => {}), host: "127.0.0.1", port: 0 });
+    expect(fresh.getDescription("persisted")).toBe("the studio machine");
+
+    // remove() is the only thing that drops the row from disk.
+    expect(deleteRelayBrowserMeta("persisted")).toBe(true);
+    expect(loadRelayBrowserMetas().find((r) => r.name === "persisted")).toBeUndefined();
   });
 });
 
