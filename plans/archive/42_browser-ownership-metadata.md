@@ -1,6 +1,6 @@
 # 42 — Browser Ownership Metadata (Agent vs User Browsers)
 
-**Status:** Implemented — 2026-08-28 (ownership helper, list_browsers, per-target ownership, tool descriptions, tests)
+**Status:** Complete — validated 2026-09-29 (ownership helper, list_browsers, per-target ownership, tool descriptions, tests all live; absorbed into `docs/architecture/browser-runtime.md`, `docs/guides/browsers/overview.md`, `docs/reference/browsers/browser-array.md`; stale duplicate removed from `plans/`)
 **Created:** 2026-08-28
 
 ## Problem
