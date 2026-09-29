@@ -25,11 +25,11 @@ Decisions only I can make. Deliberately **not** `- [ ]` lines and **not** in
 action on its own recognizance — your job is to surface these, not to guess.
 Each one should be a single reply away from done.
 
+- **jsdom test harness is dead repo-wide.** `tests/setup.js` imports `node:fs`/`node:os`/`node:path`, and under vitest 4.1.10 + `environment: "jsdom"` *any* node builtin import in a setup file aborts collection with `Error: No such built-in module: node:`. Every `// @vitest-environment jsdom` test fails to run — including the in-flight `tests/modal-dismiss.test.jsx`. Bisected: no-imports setup passes; `node:fs`, bare `fs`, `await import("node:fs")` and `createRequire` all fail. `globalThis.process` *is* available, so the fix could drop the imports — but then the per-file `mkdtemp` isolation becomes a fixed shared dir (SQLite cross-file contention), which is your call, not mine. Options: (a) fixed shared `test.env` path, (b) split setup — DB isolation only for `environment: "node"`, (c) leave broken. Plan 49's own 7-case unit test (`tests/console-driver-collapse.test.jsx`) is written and held back until this is resolved.
 - (empty — items get appended here as they come up)
 
 ## Queue
 
-- [ ] plans/49_browser-drivers-collapsible-tabs.md — validate (`Planned`, 12 unticked). Done → absorb into `docs/` + archive; else run the plan. NOTE: number 49 is used twice — see the next line.
 - [ ] plans/49_browser-extension-security-hardening.md — validate (`Draft 2026-09-06`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/50_request-activity-ui-changes.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/51_relay-timeout-and-close.md — validate (`Planned`, 8 unticked). Same rule: done → absorb into `docs/` + archive; else run the plan.
@@ -49,3 +49,4 @@ Each one should be a single reply away from done.
 - [x] plans/44_popup-validation-connected-ux.md — absorbed 2026-09-29
 - [x] plans/45_browser-connection-name-and-llm-description.md — absorbed 2026-09-29
 - [x] plans/46_more-devtools-window-focus.md — validated + absorbed 2026-09-29
+- [x] plans/49_browser-drivers-collapsible-tabs.md — absorbed 2026-09-29 (missing `.driver-toggle-chevron` element rendered + live-verified)

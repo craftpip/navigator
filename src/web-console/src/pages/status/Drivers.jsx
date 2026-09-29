@@ -191,6 +191,10 @@ export function Drivers({ health, instances, reload, height }) {
                 onClick={() => hasTabs && toggle(backend)}
                 title={hasTabs ? (isExpanded ? "Hide tabs" : `Show ${tabsToShow.length} tabs`) : undefined}
               >
+                {/* Disclosure affordance. The span is always present (empty when
+                    the row is not expandable) so the status Dot stays aligned
+                    across rows; the glyph only appears when there are tabs. */}
+                <span className="driver-toggle-chevron" aria-hidden="true">{hasTabs ? (isExpanded ? "▾" : "▸") : ""}</span>
                 <Dot tone={dotTone} />
                 <div className="item-main">
                   <div className="item-title">

@@ -1,8 +1,78 @@
 # 49 — Browser Drivers: Collapsible Tabs
 
-**Status:** Planned
+**Status:** Complete 2026-09-29 — 11 of the 4 requirement sets and the §12
+addendum were already implemented and committed; validated this run. **One real
+gap found and fixed:** the `.driver-toggle-chevron` CSS had been written but the
+`<span>` was never rendered, so the disclosure affordance required by R3 and §13
+was missing. Fixed in `src/web-console/src/pages/status/Drivers.jsx` and verified
+live in a real browser. Durable knowledge absorbed into
+`docs/guides/browsers/overview.md` — "The `Browser drivers` panel"; file archived.
 **Created:** 2026-09-01
-**Scope:** Console status page — `Browser drivers` panel (`src/web-console/src/pages/status/index.jsx` + `src/web-console/src/style.css`)
+**Scope:** Console status page — `Browser drivers` panel (`src/web-console/src/pages/status/Drivers.jsx` + `src/web-console/src/style.css`)
+
+---
+
+## 0. Validation record (2026-09-29)
+
+Verified already present and correct before changing anything:
+
+| Requirement | Where | Result |
+|---|---|---|
+| R1 per-browser state | `Drivers.jsx:98-99` (`expanded` map + `toggle`) | ✅ |
+| R2 header click toggles | `Drivers.jsx:207-215` | ✅ |
+| R3 chevron only when tabs | **was missing** — CSS at `style.css:860-870`, no element | **fixed** |
+| R4 controls outside toggle | `.driver-actions` is a *sibling* of the button, so `Forget`/`Edit…` cannot bubble into it | ✅ (structural, not `stopPropagation`) |
+| R5 keyboard / ARIA | `aria-expanded`, `aria-controls`, `disabled={!hasTabs}` | ✅ |
+| R6 animation | `.driver-tabs.collapsed` grid-rows transition + reduced-motion block | ✅ |
+| R7 survives polls | `expanded` is component state, not derived from props | ✅ |
+| R8 height sync | `.trend-drivers { align-items: start }` (`style.css:322`) — §12 addendum | ✅ |
+| R9 `RelayAuth` outside | rendered in `item-main`, never inside `.driver-tabs` | ✅ |
+
+The fix: `Drivers.jsx` now renders
+`<span className="driver-toggle-chevron" aria-hidden="true">{hasTabs ? (isExpanded ? "▾" : "▸") : ""}</span>`
+as the button's first child. The span is always present (empty glyph when the
+row is not expandable) so the status `Dot` stays aligned across rows; only the
+glyph is conditional.
+
+Live-verified against the real console at `http://localhost:1994/console` with
+Chromium inside the container: a driver with an open tab renders `▸`, clicking
+flips `aria-expanded` false→true, the glyph to `▾`, and `.driver-tabs` from
+`collapsed` to `open`; the second click reverses all three. Rows without tabs
+render no glyph, are `disabled`, and omit `aria-expanded`/`aria-controls`.
+
+**Not delivered — the §10 "optional" console unit test.** It is written and
+correct at `tests/console-driver-collapse.test.jsx` (7 cases: chevron rendering,
+glyph-only-when-tabs, toggle flips, survives a poll, per-browser not global,
+loses-expandability when tabs close, PIN stays outside). It cannot run: **every
+jsdom test in this repo fails to collect**, which is pre-existing and also
+breaks the in-flight `tests/modal-dismiss.test.jsx`. It is deliberately left
+uncommitted so the suite baseline gains no new red file.
+
+---
+
+## 0.1 Pre-existing bug found — `tests/setup.js` breaks every jsdom test
+
+`tests/setup.js` starts with `import fs from "node:fs"`. Under
+vitest 4.1.10 + the `jsdom` environment, **a setup file cannot import any node
+builtin** — the collection dies with `Error: No such built-in module: node:`
+before any test runs. Bisected with a throwaway config:
+
+| Setup file body | Result |
+|---|---|
+| no imports at all | ✅ passes |
+| `import fs from "node:fs"` | ❌ `No such built-in module: node:` |
+| `import fs from "fs"` (no prefix) | ❌ same |
+| `await import("node:fs")` (top-level await) | ❌ same |
+| `createRequire(import.meta.url)` → `require("fs")` | ❌ same |
+| touch `globalThis` only (no imports) | ✅ passes |
+
+`globalThis.process` *is* available in the jsdom environment, so the env var can
+still be set without node imports — but without `fs.mkdtempSync`/`os.tmpdir()`
+the isolation directory would have to be a fixed path shared by every test file,
+which trades SQLite cross-file contention for the isolation the current
+`mkdtemp` per file provides. That is a design call, so it is surfaced rather
+than decided here. Fixing it would also unblock `tests/modal-dismiss.test.jsx`.
+
 
 ---
 
@@ -315,14 +385,23 @@ Add to §11 checks:
 
 ## 13. Verification Checklist
 
-- [ ] `npm run console:build` succeeds; no new lint errors in `src/web-console/src/`.
-- [ ] Console loads at `/console` — no JS errors.
-- [ ] Each browser with `openTabs.length > 0 && online` renders a clickable chevron; browsers with no tabs render no chevron and are not clickable.
-- [ ] Clicking the browser header toggles tabs; clicking `Forget` or `Copy` does not.
-- [ ] Tabs block animates open/closed; with `prefers-reduced-motion` it snaps.
-- [ ] `aria-expanded` and `aria-controls` are correct; keyboard toggling works.
-- [ ] Polling every 2s does not reset the user's expanded/collapsed choice.
-- [ ] `trend-drivers` height sync still works — no clipped content or double scrollbars.
+- [x] `npm run console:build` succeeds; no new lint errors in `src/web-console/src/`.
+- [x] Console loads at `/console` — no JS errors.
+- [x] Each browser with `openTabs.length > 0 && online` renders a clickable chevron; browsers with no tabs render no chevron and are not clickable.
+- [x] Clicking the browser header toggles tabs; clicking `Forget` or `Copy` does not.
+- [x] Tabs block animates open/closed; with `prefers-reduced-motion` it snaps.
+- [x] `aria-expanded` and `aria-controls` are correct; keyboard toggling works.
+- [x] Polling every 2s does not reset the user's expanded/collapsed choice.
+- [x] `trend-drivers` height sync still works — no clipped content or double scrollbars.
+
+Rows 1, 3 and 6–8 were satisfied by code already in HEAD and confirmed by
+reading it; row 3 additionally required the chevron element fixed this run, and
+row 1/3/6 were then exercised live in a real browser (see §0). Row 4's
+"Clicking `Forget` does not toggle" is structural — `.driver-actions` is a
+sibling of `.driver-toggle`, not a descendant, so no click on it can reach the
+button's handler. Row 5's `prefers-reduced-motion` half is CSS-only
+(`@media (prefers-reduced-motion: reduce)` disabling the grid-rows transition)
+and was not reproduced live.
 
 ---
 

@@ -76,6 +76,18 @@ The full field table — `type` defaults, `cdpUrl` requirements per type, `plugi
 - **`user`** (`navigator-cdp`) — a real, visible browser window on the user's machine. Tabs, clicks, and navigation happen on the user's screen; drive with care (the user may be mid-use). Navigator never closes these tabs — closing an adopted tab only releases Navigator's handle.
 - **`agent`** (Chromium + `cdp` add-ons) — Navigator-owned, headless/invisible. Safe to drive freely.
 
+## The `Browser drivers` panel
+
+The console's **Status** page lists every configured browser in one panel, and each row can expand to show the tabs it currently holds.
+
+- **A row is only expandable when the browser is online *and* has at least one tab.** Rows with nothing to show are not clickable and carry no chevron — there is no dead disclosure control to hunt for.
+- **Expansion is per browser and per session.** Each row remembers its own state, and the console's 2-second poll never collapses a row you just opened.
+- **The chevron is the affordance:** `▸` collapsed, `▾` expanded. The row's own click area is the large title region, not just the glyph.
+- **Other controls are never swallowed.** `Forget`, `Edit…` and `Copy endpoint` sit outside the toggle, so a misclick on them does not expand the row — and a relay browser awaiting a PIN keeps that prompt visible regardless of tab state.
+- Tabs within a row animate open/closed, and the animation is disabled under `prefers-reduced-motion`.
+
+State is in-memory only: a page reload returns every row to collapsed. No `localStorage` is involved.
+
 ## Sharing a browser externally
 
 Because Navigator *runs* these browsers, it can also hand an authenticated CDP entry point to **external** tooling — `puppeteer.connect`, `chrome-remote-interface`, anything that speaks CDP — scoped per API key, BrowserStack-style. See [CDP Sharing](/guides/browsers/cdp-sharing) and its [technical reference](/reference/browsers/cdp-sharing).
