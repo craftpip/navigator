@@ -1,7 +1,34 @@
 # 46 — More Devtools: Window/Tab Focus + Raw CDP Passthrough
 
-**Status:** Proposed
+**Status:** Complete 2026-09-29 — all 4 requirements were already implemented and
+committed; validated this run (4/4 window/passthrough tests pass), durable knowledge
+absorbed into `docs/guides/devtools/overview.md`, `docs/guides/dev-tools.md`, and
+`docs/guides/devtools/tabs.md`, file archived. One known pre-existing failure
+(`tests/devtools.test.js:181`, the stale raw-JSON `Target.getTargets` formatter
+assertion from plan 42) is unrelated to this plan and is tracked in `infinite.md`.
 **Created:** 2026-08-29
+
+## Validation checklist
+
+- [x] 5 tools exist in `devtoolsToolDefinitions` — verified 24 tools total
+      (was 19), names `Target.activateTarget`, `Browser.getWindowForTarget`,
+      `Browser.setWindowBounds`, `Browser.focusWindow`, `Target.sendCommand`
+- [x] Backend dispatch — `sendWindowCommand()` routes to a browser-level CDP
+      session (built-in Chromium + `cdp` add-ons) vs `relayServer.sendCdpCommand()`
+      for `navigator-cdp`; covered by 2 tests
+- [x] `Browser.focusWindow` = activateTarget then setWindowBounds({focused:true}) — covered
+- [x] `Target.sendCommand` page-level passthrough — covered
+- [x] Real window geometry in the Chrome extension (no `1920x1080` stub) —
+      `chrome.windows.get` / `chrome.windows.update` in `cdp/handler/special.js`
+- [x] Firefox BiDi equivalents — `browsingContext.activate` +
+      `browsingContext`-resolved window id in `firefox-extension/cdp/handler/special.js`
+- [x] Method inventory for unknown domains — `KNOWN_CDP_DOMAINS` +
+      `augmentCdpError()` name the supported surface instead of leaking a bare
+      protocol error
+- [x] Ownership guardrails in every window tool description
+- [x] Docs absorbed; the "19 tools" count corrected to 24 in both guides
+- [ ] Live smoke on a real user browser — not possible in this environment
+      (no Chromium/Chrome/Firefox binary and no X display), same as plan 45
 
 ## Problem
 

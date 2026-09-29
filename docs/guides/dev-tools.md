@@ -197,6 +197,8 @@ Tool names follow Puppeteer's naming convention — this keeps them familiar for
 | DOM | `DOM.getDocument` · `DOM.querySelector` · `DOM.querySelectorAll` · `DOM.getOuterHTML` · `DOM.scrollIntoViewIfNeeded` |
 | Interaction | `Input.dispatchMouseEvent` · `Input.insertText` · `Input.dispatchKeyEvent` |
 | Runtime & Network | `Runtime.evaluate` · `Runtime.getConsoleMessages` · `Network.getRequests` |
+| Window & Focus | `Target.activateTarget` · `Browser.focusWindow` · `Browser.getWindowForTarget` · `Browser.setWindowBounds` |
+| Raw CDP | `Target.sendCommand` |
 
 ## Tips
 
@@ -204,11 +206,13 @@ Tool names follow Puppeteer's naming convention — this keeps them familiar for
 - **Prefer CSS selectors** over XPath — easier to read and maintain
 - **Check `Network.getRequests`** when a page isn't loading as expected — it shows failed requests
 - **Use `Runtime.evaluate`** for anything the other tools can't express
+- **Reach for `Target.sendCommand`** only when no dedicated tool covers the CDP method — it works on every backend, but it bypasses navigator's own safety classification
+- **Window tools act on the user's screen** — on a relay browser (`ownership: "user"`), `Browser.focusWindow`/`setWindowBounds` move a window they can see
 - **Tabs auto-close after 5 minutes** of inactivity (hardcoded `INACTIVITY_TIMEOUT_MS = 300_000`) — any tool call resets the timer, so unclosed targets are always cleaned up
 
 ## Next Steps
 
-- [DevTools Overview](/guides/devtools/overview) — All 19 tools in detail
+- [DevTools Overview](/guides/devtools/overview) — All 24 tools in detail
 - [DOM Inspection](/guides/devtools/dom) — Read page structure
 - [Interaction](/guides/devtools/interaction) — Click, type, and scroll
 - [Network & Console](/guides/devtools/network) — Monitor requests

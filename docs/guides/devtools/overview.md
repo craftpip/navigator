@@ -1,6 +1,6 @@
 # DevTools Overview
 
-19 CDP tools for interacting with live web pages — create persistent tabs, inspect DOM, click buttons, type text, and monitor network requests.
+24 CDP tools for interacting with live web pages — create persistent tabs, inspect DOM, click buttons, type text, monitor network requests, focus the user's window, and reach any CDP method the backend supports.
 
 ## Available Tools
 
@@ -41,6 +41,42 @@
 | `Runtime.evaluate` | Run JavaScript in the page |
 | `Runtime.getConsoleMessages` | Read console output |
 | `Network.getRequests` | View network requests |
+
+### Window & Focus
+These act on the window that hosts a tab, not the page. On a relay browser
+(`ownership: "user"` in `list_browsers`) that is the user's real, visible,
+non-headless window — focusing, moving, or resizing it happens on their screen.
+
+| Tool | Description |
+|------|-------------|
+| `Target.activateTarget` | Bring a tab to the front of its window |
+| `Browser.focusWindow` | Both steps at once: activate the tab, then raise the window |
+| `Browser.getWindowForTarget` | The tab's `windowId` and real bounds (`left`/`top`/`width`/`height`/`windowState`) |
+| `Browser.setWindowBounds` | Move, resize, minimize/maximize, or focus the window |
+
+`Browser.setWindowBounds` takes any subset of
+`{left, top, width, height, windowState, focused}`; `windowState` is one of
+`normal`, `minimized`, `maximized`, `fullscreen`. `focused: true` is the
+window-level focus, whereas `Target.activateTarget` is the tab-level one — on a
+relay browser they are two visibly different actions, which is why
+`Browser.focusWindow` does both.
+
+### Raw CDP Passthrough
+| Tool | Description |
+|------|-------------|
+| `Target.sendCommand` | Send any CDP method to the target's session |
+
+`Target.sendCommand` is the escape hatch: methods navigator has no dedicated
+tool for (`Page.getLayoutMetrics`, `Emulation.setDeviceMetricsOverride`,
+`DOM.resolveNode`, …) are a client-side call, not a server change. It routes
+correctly per backend — a CDP session on built-in Chromium and add-ons, the
+in-process relay path for `navigator-cdp` browsers. An unknown method or domain
+comes back as a readable error naming the supported CDP domains rather than a
+bare protocol error.
+
+**Care:** raw commands bypass navigator's own read/write classification. Prefer
+a dedicated tool when one exists, and treat a raw mutating command the way you
+would treat a real user action on an `ownership: "user"` browser.
 
 ## Example: Testing a Login Form
 

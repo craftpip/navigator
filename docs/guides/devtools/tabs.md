@@ -2,6 +2,10 @@
 
 Manage persistent browser tabs and navigate them. These 7 tools cover the tab lifecycle and history — all responses are JSON.
 
+The window hosting a tab has its own four tools (`Target.activateTarget`,
+`Browser.focusWindow`, `Browser.getWindowForTarget`, `Browser.setWindowBounds`)
+— see [DevTools Overview](/guides/devtools/overview#window--focus).
+
 ## Target.createTarget
 
 Create a persistent tab. Provide `url`, `ref_id`, and optional `viewport`. Tabs auto-close after 5 minutes of inactivity.
