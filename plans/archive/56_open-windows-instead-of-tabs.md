@@ -1,8 +1,20 @@
 # 56 — "Open Windows Instead of Tabs" checkbox (Chrome + Firefox extensions)
 
-**Status:** Implemented 2026-09-12 — all checklist items done. Chrome + Firefox extensions, relay pass-through, unit suites green, packed, manual Chromium smoke passed (both checkbox states).
+**Status:** Complete — validated 2026-09-29: implementation committed (`1d2253e`), absorbed into `docs/guides/browsers/chrome-extension.md`, `docs/guides/browsers/firefox-extension.md`, `docs/reference/browsers/extensions.md` + the AGENTS.md Project Learnings entry. Re-validated: `unit-ext.mjs` 50/50, `unit-ff.mjs` 55 pass (2 pre-existing 20d/20e Probe failures, unrelated), `tests/relay-server.test.js` 21/21, full vitest 756 pass / 1 pre-existing plan-37 SVG failure / 1 pre-existing jsdom-harness suite error.
 **Created:** 2026-09-12
 **Scope:** `chrome-extension/`, `firefox-extension/`, plus small `src/relay-server.js` pass-through. No devtools or web-console changes required for the core feature.
+
+**Progress:**
+
+- [x] 1. Chrome: config + popup checkbox
+- [x] 2. Chrome: `createWindowTab` + `targetCreateTarget` wiring + cdpWindows registry
+- [x] 3. Chrome: closeTarget window-aware + `tab-list.js` windowId/context + context handlers
+- [x] 4. Chrome unit suite — 50 pass, 0 fail
+- [x] 5. Firefox: config + popup checkbox + `targetCreateTarget` force-window + session-manager window flag (skip isolate)
+- [x] 6. Firefox: context handlers + unit suite — 55 pass, 2 pre-existing failures (20d/20e Probe)
+- [x] 7. Relay: `getBrowserContexts` pass-through + `browserContextId` threading — 21/21 pass
+- [x] 8. Full manual smoke on Chromium (both checkbox states)
+- [x] 9. Absorbed into `docs/` + AGENTS.md learnings
 
 ---
 

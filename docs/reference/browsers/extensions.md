@@ -42,6 +42,7 @@ The gateway speaks browser-level CDP to puppeteer and translates every command i
 - **MV3 service worker** — the SW goes dormant in seconds and no alarm reliably wakes it. If the SW target is not findable (e.g. `/json/list` shows no `service_worker`), relaunch Chromium with a fresh profile. The extension ID is path-derived and not stable across rebuilds — discover it each run, never hardcode.
 - Automation-created tabs are grouped under **"Navigator: \<browserName\>"** (collapsed, blue) so they don't clutter the user's tab bar.
 - **Open in window** — the popup's option maps `Target.createTarget` to `chrome.windows.create` (real OS window, `window-<id>` context), and `closeTarget` closes the window when it's the last CDP-created tab. When off, behavior is byte-for-byte tabs + mock contexts.
+- **Window browser contexts are lazy on both extensions** — `Target.createBrowserContext` returns a `window-<ts>-<rand>` id and creates no window; the window appears on the *next* `createTarget` carrying that id. Eager creation made puppeteer's `context.newPage()` open two windows (one from the context, one from the target).
 
 ## Firefox (`firefox-extension/`)
 

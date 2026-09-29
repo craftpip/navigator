@@ -48,7 +48,7 @@ A non-empty description **overrides** the console-configured `BROWSERS[].prompt`
 - **`ownership: "user"`** — it's your real, visible Chrome. `list_browsers` and `Target.getTargets` show it as such, and tool descriptions warn to drive only when you're not mid-use.
 - **Tabs grouped** — automation-created tabs are grouped under **"Navigator: \<browserName\>"** (collapsed, blue) so they don't clutter your regular tab bar.
 - **Your tabs are never closed by Navigator** — closing an adopted tab only releases Navigator's handle; the real tab stays open.
-- **Open in window** — the popup has an "open new windows instead of tabs" option; `Target.createTarget` then opens a real OS window.
+- **Open in window** — the popup has an "open new windows instead of tabs" option; `Target.createTarget` then opens a real OS window, and `Target.createBrowserContext` returns a `window-…` id that opens its window on the next `createTarget`.
 
 ## Driving it
 
