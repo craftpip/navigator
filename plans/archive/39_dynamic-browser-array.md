@@ -1,7 +1,24 @@
 # Plan 39: Dynamic Browser Array
 
 **Created:** 2026-08-26
-**Status:** Draft v2
+
+## Status: Complete (2026-09-29)
+
+Functionally complete and live-validated 2026-09-29. Every phase shipped; the body's "Missing / TODO" list is stale — each item is implemented (`browser` param on the four page tools, serving-browser tagging, domain-hint `browserEngine`, docs, console). The plan text lags the implementation in three places, superseded by later plans: roles gate routing (plan 48, not "informational"), the entry schema grew `type`/`plugin`/`prompt` (plans 40/42/48/55), and the "CUT" API-key browser allow-list shipped (plan 57). Durable knowledge is absorbed into `docs/guides/browsers/*`, `docs/architecture/browser-runtime.md`, and `AGENTS.md`.
+
+**Priority:** Normal
+
+- [x] Phase 1: config layer (`parseBrowsersEnv`, ensure Chromium)
+- [x] Phase 2: add-on routing in `newPage()`
+- [x] Phase 3: backend abstraction removed (partially re-expanded by plan 48: drivers keep a `backend` label, `pool: "shared"` remains)
+- [x] Phase 4: consolidated engine model (12 clean route ids, no `_cb`/`_ch`/`_lp`)
+- [x] Phase 5: health, stats, lifecycle
+- [x] Phase 6: tool routing — `resolveBrowserParam`, devtools `browser` param, `list_browsers`, health `browsers[]`
+- [x] Phase 7: deployment + cleanup (compose, `.env`, Dockerfile, console)
+- [x] Phase 8 / 8a: console `BROWSERS` editor + env-var cleanup
+- [x] Phase 8b: `browser` param on page tools, `- Browser:` output tagging, domain-hint `browserEngine`
+- [x] Live validation — CloakBrowser CDP add-on matrix (§12)
+- [x] Docs absorbed + console rebuilt
 
 ## Goal
 

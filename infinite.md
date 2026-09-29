@@ -34,16 +34,16 @@ Each one should be a single reply away from done.
 - [ ] plans/49_browser-extension-security-hardening.md — blocked 2026-09-29: needs your call on the v2-only break sequencing (see `## Needs your call` + plan §9). Validated 0/6, nothing implemented.
 - [ ] plans/50_request-activity-ui-changes.md — blocked 2026-09-29: plan is a "never specified" placeholder; needs you to pick A / B / D. Validated: **C is already shipped**, A absent, B partial (see plan §6).
 - [ ] plans/51_relay-timeout-and-close.md — code + tests committed (d6bbe99); **blocked**: live verify needs a paired relay browser, all `navigator-cdp` browsers offline
-- [ ] plans/53_loading-spinners.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
-- [ ] plans/57_mcp-browser-permissions.md — validate (`Plan`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
+- [~] plans/57_mcp-browser-permissions.md — started 2026-09-29 (validate)
 - [ ] plans/59_llm_browser_tool_reliability_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/60_configuration_lifecycle_integrity_audit.md — validate (`proposed`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/61_wedged-relay-target-purge.md — validate (`proposed`, 10 unticked). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/69_cdp_relay_test_hardening.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
-- [ ] plans/archive/39_dynamic-browser-array.md — **priority Normal** (user 2026-09-29). Functionally `Complete` — validated 2026-09-29 (all 5 "Missing / TODO" items implemented; plan-39 test area 294/294 pass; `list_browsers` + `web_fetch(browser:)` + lazy add-on connect confirmed live). Only 3 housekeeping gaps left. **Where to continue:** (1) delete the stale duplicate `plans/39_dynamic-browser-array.md` — 941-line pre-plan-48 copy still sitting in `plans/`, missing the role-supersession note the archived copy carries; (2) `README.md` still documents the env vars plan 39 deleted — lines 21, 99, 423-424 name `BROWSER_BACKEND` / `DEVTOOLS_BROWSER_BACKEND`; replace with `BROWSERS` + the `browser` tool param; (3) the archived file's status header still reads `**Status:** Draft v2` with no `[x]` checklist — set to `Complete` per the item-file convention. Optional while in there: `tests/devtools.test.js:181` is a stale test asserting the pre-plan-42 raw-JSON `Target.getTargets` format (plan 42 replaced it with the ownership-grouped markdown render). Not plan-39 scope, but it is the only non-SVG failure in the suite.
 - [ ] plans/14_request-activity-trend-graph.md — **priority Low** (user 2026-09-29: "can be done later, not in priority"). `In progress`: server + core chart built; remaining gaps are the engine selector, legend toggles, tooltip/tap readout, empty state, 3 test cases, and the `Browser.` devtools category bug.
 
 ## Done
+
+- [x] plans/archive/39_dynamic-browser-array.md — absorbed 2026-09-29 (all 3 housekeeping gaps closed: stale `plans/39_…` duplicate deleted, `README.md` env list replaced with `BROWSERS` + the `browser` tool param, archived file set to `Complete` with an `[x]` checklist; also fixed the stale `tests/devtools.test.js` `Target.getTargets` format assertion — full suite 755 pass / 1 pre-existing plan-37 SVG failure / 1 known jsdom-harness suite error.)
 
 - [x] plans/archive/52_live-feed-api-key-pill.md — absorbed 2026-09-29 (already implemented; verified live end-to-end: server attribution 18/21 searches + 97/100 page ops, console renders 90 adjacent backend+key pill pairs, standalone key pill where the backend pill is suppressed, and nothing for unauthenticated rows. Documented in `docs/operations/operations-and-configuration.md` §"API key attribution in the activity feed".)
 

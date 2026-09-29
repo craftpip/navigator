@@ -195,11 +195,29 @@ describe("formatDevtoolsToolResponse", () => {
 
   it("includes tool name and JSON payload", async () => {
     const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
-    const result = formatDevtoolsToolResponse("Target.getTargets", { count: 2, targets: [] });
+    const result = formatDevtoolsToolResponse("Runtime.evaluate", { count: 2 });
     const text = result.content[0].text;
-    expect(text).toContain("Target.getTargets");
+    expect(text).toContain("Runtime.evaluate");
     expect(text).toContain('"count"');
     expect(text).toContain("2");
+  });
+
+  it("renders Target.getTargets grouped by ownership (plan 42)", async () => {
+    const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
+    const result = formatDevtoolsToolResponse("Target.getTargets", {
+      targets: [
+        { targetId: "T-USER", title: "User tab", url: "https://example.com/user", ownership: "user", backend: "maclap2" },
+        { targetId: "T-AGENT", title: "Agent tab", url: "https://example.com/agent", ownership: "agent", backend: "chromium" },
+      ],
+    });
+    const text = result.content[0].text;
+    expect(text).toContain("Target.getTargets");
+    expect(text).toContain("## user — 1 target");
+    expect(text).toContain("## agent — 1 target");
+    expect(text).toContain("**maclap2** — User tab");
+    expect(text).toContain("**chromium** — Agent tab");
+    expect(text).toContain("targetId: `T-USER`");
+    expect(text).not.toContain("```json");
   });
 
   it("handles empty payload", async () => {

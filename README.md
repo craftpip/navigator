@@ -18,7 +18,7 @@ It is built for HTTP MCP first, which makes it easy to run once and connect many
 ## What Makes It Nice To Use
 
 - Real browser-backed search instead of a thin scraper
-- Multiple search engines and multiple browser/backend routes
+- Multiple search engines and multiple browser routes
 - Route-level circuit breakers so one failing route does not poison every request
 - A strong `web_fetch` tool that returns clean, readable content
 - A screenshot tool that can return base64, a local file path, or a download link
@@ -96,7 +96,7 @@ Storage capability does not change the default response. Request `output: "file"
 
 The server is easy to start, but it also exposes a lot of tuning knobs for real-world use:
 
-- browser backend selection
+- browser selection (`BROWSERS`) and per-call routing
 - engine selection and fallback behavior
 - timeouts and navigation strategy
 - browser profile persistence
@@ -420,8 +420,7 @@ The most important environment variables are:
 - `CHROME_PROFILE_DIR`: Chrome profile subdirectory, default `Default`
 - `PRELAUNCH_BROWSER`: prelaunch browser at startup
 - `BROWSER_OP_TIMEOUT_MS`: browser operation timeout in milliseconds
-- `BROWSER_BACKEND`: default backend for page operations
-- `DEVTOOLS_BROWSER_BACKEND`: backend for the browser-testing tools; defaults to `BROWSER_BACKEND`
+- `BROWSERS`: JSON array of the browsers Navigator may use — the built-in Chromium plus any external CDP add-ons (`"type":"cdp"` with a `cdpUrl`) or paired relay browsers (`"type":"navigator-cdp"`), each with the `role`s it serves. Array order is the fallback chain for the page tools and devtools; `web_search` always runs on the built-in Chromium. Tools that accept a `browser` param pin a call to one entry — an unreachable name errors instead of silently rerouting.
 - `SEARCH_ROUTE_WARMUP_ENGINES`: browser routes to open and keep warm at startup
 - `SEARCH_ENABLED_ENGINES`: routes eligible for automatic `select_best` scheduling
 - `POST_PROCESSOR_MODELS`: JSON array to configure post-processor models, e.g. `[{"id":"reader_lm","label":"reader-lm-0.5b","model":"jinaai/reader-lm-0.5b","baseUrl":"http://host.docker.internal:8000/v1"}]`. Each entry accepts an optional `"kind"`: `"chat"` (default — OpenAI-compatible `/chat/completions`), `"mineru"` (POST `{html}` to `<baseUrl>/extract`), or `"api"` (custom endpoint with `body`/`outputField`/`outputType`). Per-entry `timeoutMs`/`maxInputChars`/`maxTokens` override defaults. Per-entry `inputs` (`["html"]`, `["html","text"]`, etc.) declares which payloads the model accepts (for post-processor dropdown labeling). (Legacy names: `AI_EXTRACTOR_MODELS`, `READER_LM_MODELS`)
