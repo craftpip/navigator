@@ -1,8 +1,11 @@
 # 50 — Request Activity: UI Changes
 
-**Status:** Planned
+**Status:** Planned — re-validated 2026-09-29 against the current console. **C is
+already the shipped state**, A is absent, B is partial. The plan cannot be
+actioned without the user picking one, because the original request never
+described the change (§2). Moved to `## Needs your call`; nothing implemented.
 **Created:** 2026-09-01
-**Scope:** Console status page — `Request activity` trend card (`src/web-console/src/pages/status/index.jsx` + `src/web-console/src/style.css`)
+**Scope:** Console status page — `Request activity` trend card (`src/web-console/src/pages/status/ActivityChart.jsx` + `src/web-console/src/style.css`)
 
 ---
 
@@ -68,3 +71,22 @@ No server change — pure console UI.
 
 1. **What is the actual desired change?** Options A–D in §2 — which one matches the intent behind the title?
 2. **If A (collapsible):** persist collapsed state across reloads via `localStorage`, or in-memory per-session only?
+
+---
+
+## 6. Validation record (2026-09-29)
+
+Checked `RequestActivityTrend` (`src/web-console/src/pages/status/ActivityChart.jsx:85-116`)
+against every candidate in §2. Note the component has since moved out of
+`pages/status/index.jsx` into `ActivityChart.jsx` — the §4 file table is stale.
+
+| Option | Current state | Evidence |
+|---|---|---|
+| **A. Collapsible chart** | **Not implemented** | No `expanded` state, no collapsible region, no `requestActivity:expanded` key. `ActivityLineChart` renders unconditionally at `ActivityChart.jsx:111-113`. |
+| **B. Controls refinement** | **Partial** | The range control is already a segmented row with `aria-pressed` (`:99-105`). But there is **no engine filter** and **no legend toggles** — the legend is static `<span>`s (`:106-108`), and `REQUEST_SERIES` is rendered unconditionally. So only the range half of plan 14's §Console Design ever shipped. |
+| **C. Summary → header** | **Already shipped** | `total / succeeded / failed` already sit in the heading row next to `<h2>Request activity</h2>` (`:89-97`), inside `.request-trend-heading`. **Choosing C changes nothing.** |
+| **D. No change** | n/a | The default if none of the above is what was meant. |
+
+The one-line answer: **C is the current reality, so the real choice is A, the
+engine-filter/legend half of B, or D.** If B is picked, "B" means adding the
+missing engine filter and legend toggles — the segmented range already exists.
