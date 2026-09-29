@@ -29,7 +29,6 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [ ] plans/46_more-devtools-window-focus.md — validate (`Proposed`, no checklist). Done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/49_browser-drivers-collapsible-tabs.md — validate (`Planned`, 12 unticked). Done → absorb into `docs/` + archive; else run the plan. NOTE: number 49 is used twice — see the next line.
 - [ ] plans/49_browser-extension-security-hardening.md — validate (`Draft 2026-09-06`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
 - [ ] plans/50_request-activity-ui-changes.md — validate (`Planned`, no checklist). Same rule: done → absorb into `docs/` + archive; else run the plan.
@@ -49,3 +48,4 @@ Each one should be a single reply away from done.
 - [x] plans/43_script-hint.md — absorbed 2026-09-29
 - [x] plans/44_popup-validation-connected-ux.md — absorbed 2026-09-29
 - [x] plans/45_browser-connection-name-and-llm-description.md — absorbed 2026-09-29
+- [x] plans/46_more-devtools-window-focus.md — validated + absorbed 2026-09-29
