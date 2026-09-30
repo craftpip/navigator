@@ -925,6 +925,73 @@ describe("browserOpenAndExtract", () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
+  // ---- plan 59 §9a group 5: web_fetch honesty ---------------------------
+  describe("readiness honesty (plan 59 §9a)", () => {
+    it("surfaces a missed hint waitForSelector as a warning and marks the result partial", async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "browser-search-readiness-"));
+      const hintsPath = path.join(tempDir, "domain-hints.json");
+      await fs.writeFile(hintsPath, JSON.stringify([{
+        domain: "example.com",
+        pathPattern: "/**",
+        default: { waitForSelector: [".never-there"], format: "text" }
+      }]));
+      const html = `<!doctype html><html><head><title>P</title></head><body>
+        <main><p>Some body copy.</p></main></body></html>`;
+
+      const manager = makeExtractionManager({ hintsPath, html });
+      const basePage = await manager.newPage();
+      basePage.waitForSelector = vi.fn().mockRejectedValue(new Error("Waiting failed: selector not found"));
+      manager.newPage = vi.fn().mockResolvedValue(basePage);
+      mockGetBrowserManager.mockResolvedValue(manager);
+
+      try {
+        const { browserOpenAndExtract } = await import("../src/search.js");
+        const result = await browserOpenAndExtract({
+          url: "https://example.com/x",
+          includeSeoAnalysis: false
+        });
+
+        // The page still extracts, but the model must be able to tell that the
+        // hint's readiness gate was never satisfied.
+        expect(result.ok).not.toBe(false);
+        expect(result.partial).toBe(true);
+        expect((result.warnings || []).join(" ")).toMatch(/never-there/);
+        expect(result.text).toContain("Some body copy.");
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not mark the result partial when the hint selector resolves", async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "browser-search-ready-ok-"));
+      const hintsPath = path.join(tempDir, "domain-hints.json");
+      await fs.writeFile(hintsPath, JSON.stringify([{
+        domain: "example.com",
+        pathPattern: "/**",
+        default: { waitForSelector: [".present"], format: "text" }
+      }]));
+      const html = `<!doctype html><html><head><title>P</title></head><body>
+        <main class="present"><p>Ready.</p></main></body></html>`;
+
+      const manager = makeExtractionManager({ hintsPath, html });
+      const basePage = await manager.newPage();
+      basePage.waitForSelector = vi.fn().mockResolvedValue({});
+      manager.newPage = vi.fn().mockResolvedValue(basePage);
+      mockGetBrowserManager.mockResolvedValue(manager);
+
+      try {
+        const { browserOpenAndExtract } = await import("../src/search.js");
+        const result = await browserOpenAndExtract({
+          url: "https://example.com/x",
+          includeSeoAnalysis: false
+        });
+        expect(result.partial).toBeUndefined();
+        expect(result.text).toContain("Ready.");
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe("browserOpenAndExtract with flow hints", () => {

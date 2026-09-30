@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildSvg, escapeXml, isTransparentColor, clampRadius, measureTextWidth, wrapTextToWidth, appendEllipsis } from "../src/svg.js";
-import { JSDOM } from "jsdom";
+import { buildSvg, escapeXml, isTransparentColor, clampRadius, measureTextWidth, wrapTextToWidth, appendEllipsis, svgExtractor, capturePageAsSvg, withStageDeadline, SvgStageTimeoutError } from "../src/svg.js";
+import { JSDOM, VirtualConsole } from "jsdom";
 
 describe("text layout helpers", () => {
   it("measureTextWidth: mono is exact 0.6em/char, proportional uses glyph buckets", () => {
@@ -221,4 +221,95 @@ describe("svg.js independent transformer", () => {
     expect(svg).toContain('<clipPath id="clip-1"');
     expect(svg).toContain('clip-path="url(#clip-1)"');
   });
+});
+
+describe("svgExtractor viewportOnly (plan 65)", () => {
+  function domWithFold() {
+    const belowFold = Array.from({ length: 30 }, (_, i) => `<h2>Below fold section ${i}</h2>`).join("");
+    const dom = new JSDOM(`<!doctype html><html><body>
+      <header><nav><a href="https://example.com/guides">Guides index</a></nav></header>
+      <main><article><h1>Viewport title</h1><p>Intro paragraph with more than eight characters of text.</p></article></main>
+      ${belowFold}
+    </body></html>`, {
+      url: "https://example.com/",
+      runScripts: "outside-only",
+      virtualConsole: new VirtualConsole()
+    });
+    dom.window.Element.prototype.getBoundingClientRect = function () {
+      const tag = this.tagName.toLowerCase();
+      if (tag === "header" || tag === "nav" || tag === "a") return { x: 0, y: 10, width: 200, height: 20 };
+      if (tag === "main" || tag === "article" || tag === "h1" || tag === "p") return { x: 0, y: 100, width: 500, height: 60 };
+      if (tag === "h2") {
+        const h2s = Array.from(dom.window.document.querySelectorAll("h2"));
+        return { x: 0, y: 2000 + h2s.indexOf(this) * 100, width: 500, height: 30 };
+      }
+      return { x: 0, y: 0, width: 0, height: 0 };
+    };
+    return dom;
+  }
+
+  function extract(dom, limit, opts) {
+    const args = opts === undefined ? `${limit}` : `${limit}, ${JSON.stringify(opts)}`;
+    return dom.window.eval(`(${svgExtractor.toString()})(${args})`);
+  }
+
+  it("collects page-wide by default, including below-fold headings", () => {
+    const data = extract(domWithFold(), 60);
+    expect(data.elements.length).toBeGreaterThan(5);
+    expect(data.elements.some((e) => e.rect.y > 2000)).toBe(true);
+  });
+
+  it("viewportOnly spends the budget on in-viewport elements", () => {
+    const data = extract(domWithFold(), 60, { viewportOnly: true });
+    expect(data.elements.length).toBeGreaterThanOrEqual(3);
+    expect(data.elements.every((e) => e.rect.y < 768 + 50)).toBe(true);
+    expect(data.elements.some((e) => e.tagName === "h1")).toBe(true);
+    expect(data.elements.some((e) => e.tagName === "a")).toBe(true);
+  });
+});
+
+describe("svg stage deadlines (plan 59 §9a)", () => {
+  // A page whose document.fonts.ready never settles used to hang web_page_svg
+  // forever: page.evaluate is not covered by setDefaultTimeout, protocolTimeout
+  // is never set, and the hang skipped the caller's finally page close.
+  it("rejects a never-settling stage with a named, retry-safe timeout error", async () => {
+    const never = new Promise(() => {});
+    const err = await withStageDeadline("dom_extract", 40, () => never).then(
+      () => null,
+      (e) => e
+    );
+    expect(err).toBeInstanceOf(SvgStageTimeoutError);
+    expect(err.code).toBe("SVG_STAGE_TIMEOUT");
+    expect(err.stage).toBe("dom_extract");
+    expect(err.timeoutMs).toBe(40);
+    expect(err.retrySafe).toBe(true);
+    expect(err.message).toContain("dom_extract");
+  });
+
+  it("passes a stage through when it settles in time and clears its timer", async () => {
+    const value = await withStageDeadline("fonts", 5000, async () => "ok");
+    expect(value).toBe("ok");
+    // A stage that finishes just inside its budget must win the race, and the
+    // timer must be cleared so it cannot fire against a settled promise.
+    const settled = await withStageDeadline("fonts", 200, () =>
+      new Promise((r) => setTimeout(() => r("slow-but-ok"), 5))
+    );
+    expect(settled).toBe("slow-but-ok");
+  });
+
+  it("capturePageAsSvg degrades to rect synthesis when fonts stall (no hang)", async () => {
+    const page = {
+      evaluate: async (fn) => {
+        const src = String(fn);
+        if (src.includes("document.fonts")) return new Promise(() => {}); // never settles
+        return {
+          title: "t", url: "https://example.com/", viewportWidth: 100, viewportHeight: 50,
+          pageWidth: 100, pageHeight: 50, bodyBg: "#fff", htmlBg: "#fff",
+          scrollX: 0, scrollY: 0, elements: []
+        };
+      }
+    };
+    const cap = await capturePageAsSvg(page, { elementLimit: 5, fontTimeoutMs: 30 });
+    expect(typeof cap.svg).toBe("string");
+  }, 20000);
 });

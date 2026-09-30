@@ -1033,14 +1033,22 @@ export class BrowserManager {
       // can be adopted by raw CDP target id.
       return Boolean(b.cdpUrl) && (typeof this._isAddOnConnected !== "function" || this._isAddOnConnected(b.name));
     });
+    // Track the most specific per-candidate failure so the caller can report
+    // WHY adoption failed (backend + reason) instead of a bare "unknown
+    // targetId", which is indistinguishable from a genuinely wrong id.
+    let lastFailure = null;
     for (const entry of candidates) {
       let browser;
       try {
         browser = await this._ensureAddOnConnection(entry);
       } catch {
+        lastFailure = { backend: entry.name, reason: "backend connect failed" };
         continue;
       }
-      if (!browser || !browser.connected) continue;
+      if (!browser || !browser.connected) {
+        lastFailure = { backend: entry.name, reason: "backend not connected" };
+        continue;
+      }
 
       const gotBackend = typeof entry.name === "string" && entry.name;
 
@@ -1052,7 +1060,10 @@ export class BrowserManager {
           gotBackend,
           tid
         );
-        if (!res || !res.found || !res.attached) continue;
+        if (!res || !res.found || !res.attached) {
+          lastFailure = { backend: gotBackend, reason: res?.reason || "attach not available" };
+          continue;
+        }
       }
 
       // There is no public `Target.id()` in puppeteer v24 — the target id lives
@@ -1085,7 +1096,7 @@ export class BrowserManager {
       }
     }
 
-    return null;
+    return lastFailure ? { page: null, backend: lastFailure.backend, failure: lastFailure.reason } : null;
   }
 
   async _newChromiumPage() {
@@ -1466,6 +1477,44 @@ export class BrowserManager {
   }
 
   async _navigatorCdpStat(entry) {
+    // A relay tab refresh is bounded at GATEWAY_WAIT_MS (3s), but list_browsers
+    // is a discovery call the model makes to decide WHERE to work. Blocking it
+    // for 3s per relay browser is the single worst latency in the tool, so
+    // fail fast like the other stat paths and report a degraded-but-truthful
+    // stat instead of an empty one.
+    let timer;
+    try {
+      return await Promise.race([
+        this._navigatorCdpStatUnbounded(entry),
+        new Promise((resolve) => {
+          timer = setTimeout(() => {
+            const live = relayServer.getEntry(entry.name);
+            resolve({
+              backend: entry.name,
+              connected: relayServer.isConnected(entry.name),
+              tabs: 0,
+              openTabs: [],
+              pid: null,
+              type: "navigator-cdp",
+              plugin: entry?.plugin || "auto",
+              status: relayServer.isConnected(entry.name) ? "connected" : "disconnected",
+              description: live?.description || entry?.description || "",
+              extensionVersion: live?.extensionVersion,
+              connectedAt: live?.connectedAt || null,
+              cdpUrl: relayServer.gatewayWsUrl(entry.name),
+              timedOut: true,
+              note: "tab list refresh exceeded 750ms — browser state is real, tab list may be incomplete"
+            });
+          }, 750);
+          timer.unref?.();
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async _navigatorCdpStatUnbounded(entry) {
     const live = relayServer.getEntry(entry.name);
     if (!live) {
       return {

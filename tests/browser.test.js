@@ -570,6 +570,47 @@ describe("BrowserManager", () => {
     });
   });
 
+  describe('getInstanceStats: navigator-cdp fail-fast (plan 59 §9a)', () => {
+    it('returns a degraded-but-trueful stat instead of blocking on a slow relay refresh', async () => {
+      const { relayServer } = await import('../src/relay-server.js');
+      relayServer._entries.set('SlowRelay', {
+        name: 'SlowRelay', plugin: 'auto', status: 'connected',
+        ws: { OPEN: 1, readyState: 1 }, connectedAt: 1787900000000,
+        tabs: [{ targetId: 'S1', url: 'https://example.com/', title: 'Example' }],
+        tabIdToTarget: new Map(), clients: new Map(), tabWaiters: [],
+        sessionForTarget: new Map(), extSessionToTarget: new Map(),
+        lastActivity: Date.now()
+      });
+      // A refresh that never settles — the real GATEWAY_WAIT_MS is 3s, the
+      // fail-fast is 750ms. Without the race, getInstanceStats blocks 3s.
+      const refreshSpy = vi.spyOn(relayServer, 'refreshTabList')
+        .mockImplementation(() => new Promise(() => {}));
+      try {
+        const config = makeConfig({
+          browsers: [
+            { name: 'chromium', role: ['default'], cdpUrl: undefined, addOn: false },
+            { name: 'SlowRelay', role: ['default'], type: 'navigator-cdp', plugin: 'auto', addOn: true }
+          ]
+        });
+        const manager = new BrowserManager(config);
+        const started = Date.now();
+        const stats = await manager.getInstanceStats();
+        const elapsed = Date.now() - started;
+        const slow = stats.find((s) => s.backend === 'SlowRelay');
+        expect(slow).toBeDefined();
+        // Truthful about connectivity even in the degraded path.
+        expect(slow.connected).toBe(true);
+        expect(slow.timedOut).toBe(true);
+        expect(slow.note).toMatch(/tab list refresh exceeded/i);
+        // Bounded: must not have waited the 3s gateway timeout.
+        expect(elapsed).toBeLessThan(2000);
+      } finally {
+        refreshSpy.mockRestore();
+        relayServer._entries.delete('SlowRelay');
+      }
+    });
+  });
+
   describe("getInstanceStats: relay browser tabs reach the cross-browser listing", () => {
     it("reports live registry tabs, not the empty status projection", async () => {
       const { relayServer } = await import("../src/relay-server.js");
@@ -586,6 +627,14 @@ describe("BrowserManager", () => {
         sessionForTarget: new Map(), extSessionToTarget: new Map(),
         lastActivity: Date.now()
       });
+      // The fake ws accepts sends but never answers `list_tabs_request`, so the
+      // real refresh would sit in the GATEWAY_WAIT_MS round-trip and the stat's
+      // 750ms fail-fast would return a degraded result. This test is about the
+      // URL/type FILTER, not the round-trip, so resolve the refresh from the
+      // cached registry immediately.
+      const refreshSpy = vi
+        .spyOn(relayServer, "refreshTabList")
+        .mockImplementation(async (name) => relayServer._entries.get(name)?.tabs.slice() ?? []);
       try {
         const config = makeConfig({
           browsers: [
@@ -603,6 +652,7 @@ describe("BrowserManager", () => {
         expect(chrome.extensionVersion).toBe("0.3.0");
       } finally {
         relayServer._entries.delete("Chrome");
+        refreshSpy.mockRestore();
       }
     });
   });

@@ -1671,3 +1671,289 @@ describe("truncateLongUrl + capped network URLs (plan 68)", () => {
     expect(filtered.shown).toBe(1);
   });
 });
+
+describe("lightpanda single-tab eviction safety (plan 59 §9a)", () => {
+  let getBrowserManager;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    getBrowserManager = (await import("../src/browser.js")).getBrowserManager;
+  });
+
+  // The eviction scan used to consider every lightpanda target, including a
+  // tab adopted from the user's own browser. On the single-tab backend that
+  // silently closed a real user tab just to open an agent page.
+  it("never evicts an adopted lightpanda tab when opening a new one", async () => {
+    const { getTargetState } = await import("../src/devtools.js");
+    const adoptedPage = {
+      goto: vi.fn(),
+      url: vi.fn().mockReturnValue("https://user.example/"),
+      title: vi.fn().mockResolvedValue("User tab"),
+      isClosed: vi.fn().mockReturnValue(false),
+      close: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+    };
+    const freshPage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "lightpanda",
+        defaultBackend: "lightpanda",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+        browsers: [
+          { name: "chromium", role: ["default", "devtools"], addOn: false },
+          { name: "lightpanda", role: ["devtools"], cdpUrl: "http://127.0.0.1:9222", addOn: true },
+        ],
+      },
+      newPage: vi.fn().mockResolvedValue(freshPage),
+      attachToExistingTarget: vi.fn().mockResolvedValue({ page: adoptedPage, backend: "lightpanda" }),
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "lightpanda", type: "cdp", cdpUrl: "http://127.0.0.1:9222", status: "connected" },
+      ]),
+    });
+
+    // Adopt the user's real tab first, then ask for a new lightpanda target.
+    const adopted = await getTargetState("user-lightpanda-tab");
+    expect(adopted.adopted).toBe(true);
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", { browser: "lightpanda" });
+
+    expect(adoptedPage.close).not.toHaveBeenCalled();
+    expect(created.targetId).toBeTruthy();
+    // The user's tab is still drivable after the agent opened its own page.
+    const stillThere = await getTargetState("user-lightpanda-tab");
+    expect(stillThere.targetId).toBe("user-lightpanda-tab");
+  });
+
+  it("still evicts an agent-owned lightpanda tab (the eviction is not disabled)", async () => {
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const freshPage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("about:blank"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      on: vi.fn(),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true,
+        devtoolsBackend: "lightpanda",
+        defaultBackend: "lightpanda",
+        navWaitUntil: "domcontentloaded",
+        browserOpTimeoutMs: 60000,
+        browsers: [
+          { name: "chromium", role: ["default", "devtools"], addOn: false },
+          { name: "lightpanda", role: ["devtools"], cdpUrl: "http://127.0.0.1:9222", addOn: true },
+        ],
+      },
+      newPage: vi.fn().mockResolvedValue(freshPage),
+      attachToExistingTarget: vi.fn(),
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "lightpanda", type: "cdp", cdpUrl: "http://127.0.0.1:9222", status: "connected" },
+      ]),
+    });
+
+    await handleDevtoolsToolCall("Target.createTarget", { browser: "lightpanda", targetId: "agent-lp-1" });
+    await handleDevtoolsToolCall("Target.createTarget", { browser: "lightpanda", targetId: "agent-lp-2" });
+
+    // The first agent target must be gone from the registry after eviction,
+    // and the newest one must survive.
+    const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+    expect(listing.targets.some((t) => t.targetId === "agent-lp-1")).toBe(false);
+    expect(listing.targets.some((t) => t.targetId === "agent-lp-2")).toBe(true);
+  });
+});
+
+// ---- plan 59 §9a groups 7-10 -------------------------------------------
+describe("plan 59 §9a: discovery freshness, nav visibility, attach cause, output budget", () => {
+  let getBrowserManager;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    getBrowserManager = (await import("../src/browser.js")).getBrowserManager;
+  });
+
+  it("group 7: marks relay tab rows stale/offline when the browser is not connected", async () => {
+    const { relayServer } = await import("../src/relay-server.js");
+    const originalGetEntry = relayServer.getEntry;
+    const originalIsPaired = relayServer.isPaired;
+    const originalIsConnected = relayServer.isConnected;
+    const entry = {
+      name: "user-browser",
+      type: "navigator-cdp",
+      status: "disconnected",
+      tabs: [{ targetId: "relay-offline-1", url: "https://mail.example/", title: "Inbox", type: "page" }],
+    };
+    relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    relayServer.isPaired = () => true;    // still paired (registry kept)
+    relayServer.isConnected = () => false; // but the browser is NOT reachable
+
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },
+      _effectiveAddOns: vi.fn().mockReturnValue([{ name: "user-browser", type: "navigator-cdp", status: "disconnected" }]),
+    });
+
+    try {
+      const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+      const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+      const row = listing.targets.find((t) => t.targetId === "relay-offline-1");
+      expect(row).toBeDefined();
+      // The row must not be sold as drivable.
+      expect(row.connected).toBe(false);
+      expect(row.stale).toMatch(/offline/i);
+    } finally {
+      relayServer.getEntry = originalGetEntry;
+      relayServer.isPaired = originalIsPaired;
+      relayServer.isConnected = originalIsConnected;
+    }
+  });
+
+  it("group 7: a connected relay row is not marked stale", async () => {
+    const { relayServer } = await import("../src/relay-server.js");
+    const originalGetEntry = relayServer.getEntry;
+    const originalIsPaired = relayServer.isPaired;
+    const originalIsConnected = relayServer.isConnected;
+    const entry = {
+      name: "user-browser",
+      type: "navigator-cdp",
+      status: "connected",
+      tabs: [{ targetId: "relay-live-1", url: "https://mail.example/", title: "Inbox", type: "page" }],
+    };
+    relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    relayServer.isPaired = () => true;
+    relayServer.isConnected = () => true;
+
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium" },
+      _effectiveAddOns: vi.fn().mockReturnValue([{ name: "user-browser", type: "navigator-cdp", status: "connected" }]),
+    });
+
+    try {
+      const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+      const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+      const row = listing.targets.find((t) => t.targetId === "relay-live-1");
+      expect(row.connected).toBe(true);
+      expect(row.stale).toBeUndefined();
+    } finally {
+      relayServer.getEntry = originalGetEntry;
+      relayServer.isPaired = originalIsPaired;
+      relayServer.isConnected = originalIsConnected;
+    }
+  });
+
+  it("group 8: a failed detached navigation is visible in the target summary", async () => {
+    const page = {
+      isClosed: () => false,
+      url: () => "about:blank",
+      title: async () => "",
+      on: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      goto: vi.fn().mockRejectedValue(new Error("net::ERR_NAME_NOT_RESOLVED")),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    getBrowserManager.mockResolvedValue({
+      config: {
+        enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium",
+        navWaitUntil: "load", browserOpTimeoutMs: 60000,
+      },
+      newPage: vi.fn().mockResolvedValue(page),
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", {
+      url: "https://does-not-resolve.invalid/",
+      targetId: "navfail-1",
+    });
+    // let the detached goto's rejection handler run
+    await new Promise((r) => setTimeout(r, 10));
+
+    const listing = await handleDevtoolsToolCall("Target.getTargets", {});
+    const row = listing.targets.find((t) => t.targetId === "navfail-1");
+    expect(row).toBeDefined();
+    expect(row.navigation).toBeDefined();
+    expect(row.navigation.status).toBe("error");
+    expect(row.navigation.error).toMatch(/ERR_NAME_NOT_RESOLVED/);
+  });
+
+  it("group 10: caps the getTargets markdown render with an omission notice", async () => {
+    const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
+    const targets = Array.from({ length: 120 }, (_, i) => ({
+      targetId: `t${i}`,
+      backend: "chromium",
+      ownership: "agent",
+      url: `https://example.com/${i}`,
+      title: `Page ${i}`,
+    }));
+    const out = formatDevtoolsToolResponse("Target.getTargets", { count: 120, targets });
+    const text = out.content[0].text;
+    expect(text).toMatch(/output budget: showed \d+ of 120 targets; \d+ omitted/);
+    // Bounded, not unbounded.
+    const rendered = (text.match(/targetId: `/g) || []).length;
+    expect(rendered).toBeLessThanOrEqual(50);
+    // The JSON payload itself stays complete.
+    expect(targets.length).toBe(120);
+  });
+
+  it("group 10: does not add an omission notice below the cap", async () => {
+    const { formatDevtoolsToolResponse } = await import("../src/devtools.js");
+    const targets = Array.from({ length: 5 }, (_, i) => ({
+      targetId: `t${i}`, backend: "chromium", ownership: "agent", url: `https://example.com/${i}`, title: `P${i}`,
+    }));
+    const out = formatDevtoolsToolResponse("Target.getTargets", { count: 5, targets });
+    expect(out.content[0].text).not.toMatch(/output budget/);
+  });
+
+  it("group 9: an attach failure reports the backend and cause, not just 'Unknown targetId'", async () => {
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true },
+      _effectiveAddOns: vi.fn().mockReturnValue([
+        { name: "user-browser", type: "navigator-cdp", status: "connected" },
+      ]),
+      // The relay knows the tab but could not attach it — the failure class
+      // that used to be discarded into a bare "Unknown targetId".
+      attachToExistingTarget: vi.fn().mockResolvedValue({
+        page: null,
+        backend: "user-browser",
+        failure: "extension did not respond with a sessionId",
+      }),
+    });
+
+    const { getTargetState } = await import("../src/devtools.js");
+    let message = "";
+    try {
+      await getTargetState("unknown-tab-9");
+    } catch (error) {
+      message = String(error?.message || error);
+    }
+    expect(message).toMatch(/Unknown targetId/);
+    expect(message).toMatch(/user-browser/);
+    expect(message).toMatch(/extension did not respond with a sessionId/);
+  });
+
+  it("group 9: a genuinely unknown id still reports no spurious backend", async () => {
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      attachToExistingTarget: vi.fn().mockResolvedValue(null),
+    });
+
+    const { getTargetState } = await import("../src/devtools.js");
+    let message = "";
+    try {
+      await getTargetState("nope-9");
+    } catch (error) {
+      message = String(error?.message || error);
+    }
+    expect(message).toMatch(/Unknown targetId: nope-9/);
+    expect(message).not.toMatch(/attach to/);
+  });
+});

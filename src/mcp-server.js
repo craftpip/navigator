@@ -229,7 +229,10 @@ function getCachedToolResult(toolName, args) {
     return null;
   }
   cacheCounters.hits += 1;
-  return entry.value;
+  // Stamp age on the way out so a cached read is visibly different from a
+  // fresh one — a model that cannot tell them apart will treat a 10-minute-old
+  // page as current.
+  return { value: entry.value, storedAt: entry.storedAt, ageMs: Date.now() - entry.storedAt };
 }
 
 function setCachedToolResult(toolName, args, value) {
@@ -239,6 +242,7 @@ function setCachedToolResult(toolName, args, value) {
   const key = getCacheKey(args);
   bucket.set(key, {
     value,
+    storedAt: Date.now(),
     expiresAt: Date.now() + toolCacheTtlMs
   });
   while (bucket.size > MAX_TOOL_CACHE_ENTRIES) {
@@ -246,6 +250,48 @@ function setCachedToolResult(toolName, args, value) {
     if (!oldestKey) break;
     bucket.delete(oldestKey);
   }
+}
+
+/**
+ * A payload containing any failure is a transient failure, not a result.
+ * Caching it makes a one-off DNS blip permanent for the whole TTL: every
+ * retry replays the same error without touching the network.
+ *
+ * Failures surface in two shapes: per-item `{ ok: false }` (web_fetch) and a
+ * top-level `errors` array (web_search, where partial results still return).
+ */
+function cacheableResult(value) {
+  if (!value) return false;
+  if (Array.isArray(value.errors) && value.errors.length) return false;
+  const results = Array.isArray(value?.results) ? value.results : Array.isArray(value) ? value : null;
+  if (!results) return Boolean(value);
+  return results.every((item) => !item || item.ok !== false);
+}
+
+/** Prepend a visible provenance line to a replayed (cached) response. */
+function withCacheStamp(payload, ageMs) {
+  const header = `*(cached result — retrieved ${formatCacheAge(ageMs)} ago; pass bypassCache: true to fetch fresh)*`;
+  if (typeof payload === "string") return `${header}\n\n${payload}`;
+  // MCP content shape: { content: [{ type: "text", text }] }
+  if (payload && Array.isArray(payload.content)) {
+    const idx = payload.content.findIndex((c) => c && c.type === "text" && typeof c.text === "string");
+    if (idx !== -1) {
+      const content = [...payload.content];
+      content[idx] = { ...content[idx], text: `${header}\n\n${content[idx].text}` };
+      return { ...payload, content, cached: true, cacheAgeMs: ageMs };
+    }
+  }
+  if (Array.isArray(payload)) return [header, ...payload];
+  if (payload && typeof payload === "object") return { ...payload, cached: true, cacheAgeMs: ageMs };
+  return payload;
+}
+
+function formatCacheAge(ageMs) {
+  const s = Math.max(0, Math.round((ageMs || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.round(m / 60)}h`;
 }
 
 function pruneToolCacheBucket(bucket) {
@@ -1836,6 +1882,9 @@ function formatOpenPageResponse(payload) {
         lines.push(`- ⚠ ${warning}`);
       }
     }
+    if (entry?.partial) {
+      lines.push(`- ⚠ PARTIAL: the page did not reach the state this hint expected — treat the text below as incomplete`);
+    }
     if (entry?.error) {
       lines.push(`- Error: ${entry.error}`);
       return;
@@ -2492,7 +2541,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     if (cached) {
       timer.step("cache_hit", mark);
       timer.end({ cacheHit: true, status: "ok" });
-      return cached;
+      return withCacheStamp(cached.value, cached.ageMs);
     }
     mark = timer.step("cache_miss", mark);
     const queries = parseQueryList(args.queries);
@@ -2517,8 +2566,13 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     mark = timer.step("browser_search", mark);
     const response = formatSearchResponse(decorateSearchPayload(results));
     mark = timer.step("format_response", mark);
-    await setCachedToolResult(name, getCacheArgs(args), response);
-    timer.step("cache_store", mark);
+    // Judge the RAW search payload, not the formatted response: `results` here
+    // is what browserSearch returned, so its `errors` array and per-item state
+    // are still visible. The formatted string has already lost them.
+    if (cacheableResult(results)) {
+      await setCachedToolResult(name, getCacheArgs(args), response);
+      timer.step("cache_store", mark);
+    }
     timer.end({ cacheHit: false, status: "ok" });
     return response;
   }
@@ -2571,10 +2625,13 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     const cached = bypassCache || hasRequestScript || !cacheable ? null : await getCachedToolResult(name, cacheKeyArgs);
     if (cached) {
       const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
-      const truncated = truncateResultsText(cached, maxChars);
+      const truncated = truncateResultsText(cached.value, maxChars);
       timer.step("cache_hit", mark);
       timer.end({ cacheHit: true, status: "ok" });
-      return formatOpenPageResponse(truncated);
+      const formatted = formatOpenPageResponse(truncated);
+      return typeof formatted === "string"
+        ? withCacheStamp(formatted, cached.ageMs)
+        : { ...formatted, cached: true, cacheAgeMs: cached.ageMs };
     }
     mark = timer.step("cache_miss", mark);
     const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
@@ -2584,7 +2641,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
       openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "", ...(hasRequestScript ? { requestScript, requestScriptOptions } : {}), allowedMcpBrowsers })
     );
     mark = timer.step("open_targets", mark);
-    if (!hasRequestScript && cacheable) {
+    if (!hasRequestScript && cacheable && cacheableResult(fullResult)) {
       await setCachedToolResult(name, cacheKeyArgs, fullResult);
       timer.step("cache_store", mark);
     }
@@ -3270,7 +3327,18 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
         } catch (error) {
           console.error(`🟥 web_page_svg batch error for ${targetUrl}: ${String(error?.message || error)}`);
           if (error?.stack) console.error(`🟥 stack: ${String(error.stack).slice(0,2000)}`);
-          return { ok: false, url: targetUrl, ref_id: rememberLink(targetUrl), error: String(error?.message || error) };
+          // A stage deadline (font settle / DOM extract / PDF) names the stage
+          // that gave up, so the LLM can retry narrowly instead of guessing.
+          const detail = [];
+          if (error?.stage) detail.push(`stage: ${error.stage}`);
+          if (error?.timeoutMs) detail.push(`after ${error.timeoutMs}ms`);
+          if (typeof error?.retrySafe === "boolean") detail.push(`retrySafe: ${error.retrySafe}`);
+          return {
+            ok: false,
+            url: targetUrl,
+            ref_id: rememberLink(targetUrl),
+            error: String(error?.message || error) + (detail.length ? ` (${detail.join(", ")})` : ""),
+          };
         } finally {
           if (!page.isClosed()) await page.close().catch(() => {});
         }

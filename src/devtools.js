@@ -291,6 +291,7 @@ export async function getTargetState(targetId) {
   // Not yet adopted — try to adopt the existing browser-origin tab by its
   // exact targetId so the user can drive any of their open tabs directly.
   const manager = await getBrowserManager();
+  let lastAttachError = "";
   try {
     const adopted = await manager.attachToExistingTarget(tid);
     if (adopted && adopted.page && !adopted.page.isClosed()) {
@@ -299,10 +300,16 @@ export async function getTargetState(targetId) {
       touchTab(state.backend, state.targetId);
       return state;
     }
-  } catch {
-    // fall through to "unknown targetId"
+    if (adopted && adopted.failure) {
+      lastAttachError = `attach to "${adopted.backend}" failed: ${adopted.failure}`;
+    }
+  } catch (error) {
+    // fall through to "unknown targetId" — but preserve the root cause so the
+    // thrown message distinguishes "wrong id" from "browser/attach problem"
+    lastAttachError = error?.message || String(error || "");
   }
-  throw new Error(`Unknown targetId: ${targetId}. Pass a targetId from Target.getTargets (origin:"browser") to drive your open tab directly, or create one with Target.createTarget.`);
+  const base = `Unknown targetId: ${targetId}. Pass a targetId from Target.getTargets (origin:"browser") to drive your open tab directly, or create one with Target.createTarget.`;
+  throw new Error(lastAttachError ? `${base} (${lastAttachError})` : base);
 }
 
 /**
@@ -453,6 +460,11 @@ function operationIsReadOnly(name, args) {
 
 const DEVTOOLS_TIMEOUT_CODE = "DEVTOOLS_OPERATION_TIMEOUT";
 
+// Max targets rendered in the Target.getTargets markdown reply. The underlying
+// payload is uncapped (a real browser can hold hundreds of tabs); this only
+// bounds the text the model pays context for.
+const MAX_GETTARGETS_RENDERED = 50;
+
 export class DevtoolsOperationTimeoutError extends Error {
   constructor({ operation, targetId, backend, timeoutMs, retrySafe }) {
     const detail = retrySafe
@@ -470,10 +482,6 @@ export class DevtoolsOperationTimeoutError extends Error {
     this.stage = "operation";
     this.retrySafe = retrySafe === true;
   }
-}
-
-function isDevtoolsOperationTimeout(error) {
-  return error?.code === DEVTOOLS_TIMEOUT_CODE;
 }
 
 async function devtoolsOperationTimeoutMs(targetId = "") {
@@ -511,8 +519,21 @@ function buildTargetSummary(state) {
     viewport: state.viewport,
     createdAt: state.createdAt,
     lastActiveAt: state.lastActiveAt,
-    consoleMessageCount: state.consoleMessages.length
+    consoleMessageCount: state.consoleMessages.length,
+    ...(state.navigation ? { navigation: state.navigation } : {})
   };
+}
+
+/**
+ * Record the outcome of a detached navigation so it is visible in target
+ * summaries without a separate console call. `navigation` carries the last
+ * settled state: `{ status: "ok" }` on success or `{ status: "error",
+ * error }` when goto failed after the tool already returned.
+ */
+function recordNavigation(state, status, errorText) {
+  state.navigation = errorText
+    ? { status, error: truncate(errorText) }
+    : { status };
 }
 
 async function refreshTitle(state) {
@@ -713,8 +734,11 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
     ? String(args.browser).trim().toLowerCase()
     : "";
   if (explicitBrowser === "lightpanda") {
+    // Never evict an adopted target: those are real tabs in a user's browser, and
+    // releasing a devtools handle must never close one. Only agent-owned pages
+    // this server created are fair game for the single-tab eviction.
     const existing = [...targetsById.values()]
-      .filter((s) => String(s.backend).toLowerCase() === "lightpanda" && s.page && !s.page.isClosed());
+      .filter((s) => String(s.backend).toLowerCase() === "lightpanda" && !s.adopted && s.page && !s.page.isClosed());
     if (existing.length >= 1) {
       const oldest = existing[0];
       try { await oldest.page.close(); } catch {}
@@ -759,12 +783,18 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
       waitUntil: manager.config.navWaitUntil,
       timeout: manager.config.browserOpTimeoutMs
     }).then(
-      () => refreshTitle(state),
-      (error) => recordConsoleMessage(state, {
-        type: "navigationerror",
-        text: truncate(error?.message || String(error)),
-        timestamp: new Date().toISOString()
-      })
+      () => {
+        refreshTitle(state);
+        recordNavigation(state, "ok");
+      },
+      (error) => {
+        recordConsoleMessage(state, {
+          type: "navigationerror",
+          text: truncate(error?.message || String(error)),
+          timestamp: new Date().toISOString()
+        });
+        recordNavigation(state, "error", error?.message || String(error));
+      }
     );
   }
   return { ...buildTargetSummary(state), url, navigating: url !== "about:blank", ...(rollbackNotes?.length ? { rollbackNotes } : {}) };
@@ -792,6 +822,12 @@ async function listTargets() {
     .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)));
   for (const entry of relayEntries) {
     const tabs = relayServer.getEntry(entry.name)?.tabs || [];
+    // The server keeps the last tab list for a paired-but-disconnected relay
+    // so the dashboard can show it. Discovery must not sell those cached rows
+    // as drivable: driving them will hang on the extension round-trip. Mark
+    // every row one way or the other — the tab's presence alone is not proof
+    // the browser is reachable right now.
+    const connected = relayServer.isConnected(entry.name);
     // One description per browser, repeated on each of its tabs: it tells the
     // model which of the user's browsers a target belongs to, without a
     // second list_browsers call. Omitted entirely when the browser wrote none.
@@ -809,6 +845,8 @@ async function listTargets() {
         title: t.title || "",
         viewport: { width: "auto", height: "auto" },
         origin: "browser",
+        connected,
+        stale: connected ? undefined : "relay browser is offline — this tab is a cached listing and cannot be driven until it reconnects",
         lastActiveAt: null,
         closesInMs: null,
         autoClose: false
@@ -1035,6 +1073,7 @@ async function navigatePage(args = {}) {
       timeout: opTimeoutMsForOwnership(liveState.ownership, manager.config)
     });
     await refreshTitle(liveState);
+    recordNavigation(liveState, "ok");
     return { ...buildTargetSummary(liveState), created: false };
   }, { retryable: false, operation: "Page.navigate" });
 }
@@ -1072,6 +1111,7 @@ async function reloadPage(args = {}) {
   }
 
   await refreshTitle(state);
+  recordNavigation(state, "ok");
   return { ...buildTargetSummary(state), reloaded: true, ignoreCache: cacheToggled };
 
   }, { retryable: false, operation: "Page.reload" });}
@@ -1090,6 +1130,7 @@ async function goHistory(args = {}, direction) {
     ? await state.page.goForward(options)
     : await state.page.goBack(options);
   await refreshTitle(state);
+  recordNavigation(state, "ok");
   const navigated = Boolean(response) || state.page.url() !== before;
   return { ...buildTargetSummary(state), direction, navigated };
 
@@ -2866,13 +2907,23 @@ export function formatDevtoolsToolResponse(name, payload) {
       if (targets.length) groups.push([ownership, targets]);
     }
     const lines = [name];
+    let rendered = 0;
     for (const [ownership, targets] of groups) {
       lines.push("", `## ${ownership} — ${targets.length} target${targets.length === 1 ? "" : "s"}`);
       targets.forEach((t, index) => {
+        // Cap the render so a browser with many open tabs cannot flood the
+        // context. The JSON `count`/`targets` payload still carries everything;
+        // the notice says how many were omitted.
+        if (rendered >= MAX_GETTARGETS_RENDERED) return;
+        rendered += 1;
         lines.push(`${index + 1}. **${t.backend}** — ${t.title || t.url || "(untitled)"}`);
         lines.push(`   url: ${t.url || "about:blank"}`);
         lines.push(`   targetId: \`${t.targetId}\``);
       });
+    }
+    const omitted = payload.targets.length - rendered;
+    if (omitted > 0) {
+      lines.push("", `*(output budget: showed ${rendered} of ${payload.targets.length} targets; ${omitted} omitted. Close unused targets with Target.closeTarget, or filter by browser with Target.createTarget browser:"<name>".)*`);
     }
     return {
       content: [

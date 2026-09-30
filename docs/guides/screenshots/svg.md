@@ -65,6 +65,10 @@ Each `<g>` carries:
 
 Text layout is computed at build time via per-glyph em-bucket measurement — `wrap`/`ellipsis`/`line-clamp` are resolved before emitting, and per-word browser Range rects pin positions for `letterSpacing`/CJK.
 
+## Deadlines
+
+`web_page_svg` never hangs. Every stage runs under `withStageDeadline` (`src/svg/deadline.js`): fonts 5s, dimensions 10s, extract+PDF+snapshot 20s. A font timeout degrades to fallback metrics instead of failing; a PDF timeout falls back to bounded rect synthesis. A stage that exceeds its budget rejects with an SVG-stage-timeout error naming the `stage`, the elapsed time, and `retrySafe`, so a stuck page cannot leak a tab or a page slot.
+
 ## Examples
 
 ### Single page, full document

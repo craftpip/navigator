@@ -652,6 +652,10 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
       page.setDefaultTimeout(6000);
       expect((await browser.pages()).length).toBe(1);
 
+      const session = await page.createCDPSession();
+      await session.send("Network.enable");
+      expect(await page.evaluate(() => 1 + 1)).toBe(42);
+
       const frameUrlBefore = page.url();
       expect(frameUrlBefore).toBe("about:blank");
 
@@ -689,6 +693,29 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
     const ack = await nextMessage(gw, (m) => m.id === 2, 8000);
     expect(ack.result.targetId).toBe(attached.params.targetInfo.targetId);
     expect(ack.error).toBeUndefined();
+    gw.close();
+  });
+
+  it("preserves sessionId for session-scoped Target.setAutoAttach", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "auto-attach-session-browser");
+    new FakeExtension(ws);
+    const gw = await open(`${wsBase}/browser/auto-attach-session-browser`);
+    flushAll(gw);
+
+    gw.send(JSON.stringify({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } }));
+    const attached = await nextMessage(gw, (m) => m.method === "Target.attachedToTarget", 8000);
+    await nextMessage(gw, (m) => m.id === 1, 8000);
+
+    gw.send(JSON.stringify({
+      id: 2,
+      method: "Target.setAutoAttach",
+      params: { autoAttach: true, flatten: true },
+      sessionId: attached.params.sessionId
+    }));
+    const reply = await nextMessage(gw, (m) => m.id === 2, 8000);
+    expect(reply.error).toBeUndefined();
+    expect(reply.sessionId).toBe(attached.params.sessionId);
     gw.close();
   });
 
@@ -796,4 +823,74 @@ describe("routing: auth_pending navigator-cdp is never a routing candidate (reso
 
     cleanups.push(() => relayServer._entries.delete("pending-browser"));
   });
+});
+
+
+describe("attach failure reason identity (plan 59 §9a)", () => {
+  // The reason used to live in a single `relayServer._attachFailure` slot that
+  // was written by whichever attach failed and read-and-cleared by whichever
+  // waiter woke first, so two concurrent attaches could report each other's
+  // failure. The client socket below IS the extension: it answers the
+  // relay's Target.attachToTarget frames itself.
+  function attachResponder(ws, handlers) {
+    ws.on("message", (data) => {
+      let msg;
+      try { msg = JSON.parse(String(data)); } catch { return; }
+      if (typeof msg.id !== "number" || typeof msg.method !== "string") return;
+      if (msg.method !== "Target.attachToTarget") return;
+      const h = handlers[msg.params?.targetId];
+      if (typeof h !== "function") return;
+      h(msg.id);
+    });
+  }
+
+  it("two concurrent failed attaches each keep their own reason (out-of-order replies)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "attach-race");
+    const entry = relay._entries.get("attach-race");
+    entry.tabs = [
+      { targetId: "tab-A", type: "page", title: "A", url: "https://a.example/" },
+      { targetId: "tab-B", type: "page", title: "B", url: "https://b.example/" },
+    ];
+    // tab-B is answered FIRST, tab-A second — the inverse of request order.
+    attachResponder(ws, {
+      "tab-B": (id) => setTimeout(() => ws.send(JSON.stringify({
+        id, error: { code: -32000, message: "reason-for-B" } })), 0),
+      "tab-A": (id) => setTimeout(() => ws.send(JSON.stringify({
+        id, error: { code: -32000, message: "reason-for-A" } })), 40),
+    });
+
+    const [a, b] = await Promise.all([
+      relay._ensureTargetSession(entry, { targetId: "tab-A" }),
+      relay._ensureTargetSession(entry, { targetId: "tab-B" }),
+    ]);
+
+    expect(a.sessionId).toBeNull();
+    expect(b.sessionId).toBeNull();
+    expect(a.reason).toContain("reason-for-A");
+    expect(b.reason).toContain("reason-for-B");
+    expect(a.reason).not.toContain("reason-for-B");
+    expect(b.reason).not.toContain("reason-for-A");
+  }, 20000);
+
+  it("the shared attach-failure slot no longer exists on the relay", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    await pairExtension(relay, wsBase, "attach-slot");
+    expect(relay._attachFailure).toBeUndefined();
+  }, 20000);
+
+  it("a successful attach resolves { sessionId, reason: null }", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "attach-ok");
+    const entry = relay._entries.get("attach-ok");
+    entry.tabs = [{ targetId: "tab-OK", type: "page", title: "OK", url: "https://ok.example/" }];
+    attachResponder(ws, {
+      "tab-OK": (id) => setTimeout(() => ws.send(JSON.stringify({
+        id, result: { sessionId: "sess-1" } })), 0),
+    });
+
+    const res = await relay._ensureTargetSession(entry, { targetId: "tab-OK" });
+    expect(res.sessionId).toBe("sess-1");
+    expect(res.reason).toBeNull();
+  }, 20000);
 });

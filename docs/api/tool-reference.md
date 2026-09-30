@@ -9,6 +9,7 @@ Tools may be absent from `tools/list` and reject calls when named in `DISABLE_TO
 - Search and fetch results receive positive numeric reference IDs. Use a returned `ref_id` to open a result instead of repeating its URL where the tool accepts it.
 - A fetched page's links render as normal Markdown destinations, for example `[documentation](88)`. Call `web_page_links` with that inline link ID to resolve its URL, then fetch the same link reference.
 - `web_search` and `web_fetch` cache results in process memory for five minutes (up to 200 entries per tool). `bypassCache: true` refreshes a result. Fetch excludes `maxChars` from its cache key, so a cache entry retains the length requested by the first caller, up to 200,000 characters.
+- **Cache transparency:** only complete, successful results are cached. A payload is considered cacheable when it has no top-level `errors` and no per-item failure (`ok: false`) — a transient engine outage or a fetch that returned partial pages is never replayed as a good answer. A replayed result is stamped with its age in the response text (`*(cached result — retrieved N ago; pass bypassCache: true to fetch fresh)*`), so a cache hit is indistinguishable-proof from a live fetch. `bypassCache` returns an unmarked, fresh response.
 - Reference mappings are bounded in memory and persisted in SQLite for lookup across restarts. Search/fetch caches and counters are not persistent.
 - Page and DevTools operations use `BROWSER_OP_TIMEOUT_MS`. Persistent DevTools targets close after five minutes without interaction.
 
@@ -43,6 +44,8 @@ Input: `queries` is a non-empty string array. Optional `limit` defaults to `5`; 
 Input: provide exactly one target mode, `urls: string[]` or `ref_ids: number[]`. Optional `maxChars` controls returned text length; `bypassCache` refreshes the cached page result.
 
 The response contains an entry for each page with readable text, extracted tables, page metadata, and a page reference. Tables are extracted and rendered as structured Markdown by default; the page's extractor (Readability, HTML-to-Markdown, text, or an AI model) decides how tables are rendered, and `table`/`table_json`/`table_csv` extractors return tables-only output. `maxChars` is applied when reading the structured result, after cache lookup; large tables may still make the complete response exceed the requested text length and a truncation notice is added.
+
+A page is honestly marked when extraction had to proceed before the page was fully ready: if a domain hint's `waitForSelector` never appears or stabilization fails, the response is flagged `partial: true` and carries a `- ⚠ PARTIAL: …` line naming the missed selector instead of looking like a complete extraction. Read the `warnings` list to see exactly which readiness gate was not satisfied.
 
 ```json
 {"urls":["https://example.com/article"],"maxChars":8000}

@@ -213,20 +213,39 @@ var CDPSessionManager = (function() {
 
   /**
    * Best-effort BiDi context lookup for a tab: getTree + URL match.
-   * Refined in Phase 2 (index/window correlation verified on real Firefox).
+   *
+   * This must NEVER guess. A wrong context binding is not a transient mistake:
+   * it is persisted in _contextTabs/_tabContexts, so every later command aimed
+   * at this tab is silently executed against somebody else's page — the user
+   * watches one tab while the agent drives another. Guessing was especially
+   * easy to hit because two tabs on the same URL (or a tab whose URL differs
+   * from the context's after a redirect/normalization) both fell through to
+   * "first free top-level context".
+   *
+   * So we only bind when the evidence is unambiguous:
+   *   - an exact URL match, ignoring the fragment, and
+   *   - exactly one unclaimed candidate.
+   * Anything else returns null. An unresolved context is not lost: it stays
+   * visible through getUnpairedContexts() and the caller reports "context
+   * unknown" instead of driving the wrong tab.
    */
   function discoverContextForTab(tab) {
     return BidiClient.send('browsingContext.getTree', {}).then(function(tree) {
       var tops = (tree && tree.contexts) || [];
+      if (!Array.isArray(tops) || tops.length === 0) return null;
       var wantUrl = (tab.url || '').split('#')[0];
-      var pool = tops.filter(function(c) {
+      if (!wantUrl) return null; // no URL to correlate on — never guess
+
+      var matches = tops.filter(function(c) {
         return wantUrl && (c.url || '').split('#')[0] === wantUrl;
       });
-      if (pool.length === 0) pool = tops;
-      // Prefer contexts not already mapping a tab.
-      var free = pool.filter(function(c) { return !tabIdForContext(c.context); });
-      var pick = (free.length ? free : pool)[0];
-      if (!pick) return null;
+      if (matches.length === 0) return null; // NO fallback to the whole tree
+
+      var free = matches.filter(function(c) { return !tabIdForContext(c.context); });
+      // Ambiguous among free contexts, or already claimed: refuse to bind.
+      if (free.length !== 1) return null;
+
+      var pick = free[0];
       if (pick.context) {
         addContextMapping(pick.context, tab.id);
         _knownContexts.add(pick.context);

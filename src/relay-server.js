@@ -795,7 +795,7 @@ export class RelayServer {
       this._pendingCommands.delete(id);
       if (pending.timer) clearTimeout(pending.timer);
       if (pending.marker === "attach") {
-        pending.resolve(null);
+        pending.resolve({ sessionId: null, reason: `browser "${entry.name}" disconnected while attaching target ${pending.targetId}` });
         continue;
       }
       if (pending.reject) {
@@ -1149,7 +1149,7 @@ export class RelayServer {
           continue;
         }
       }
-      const sessionId = await this._ensureTargetSession(cur, info);
+      const { sessionId } = await this._ensureTargetSession(cur, info);
       if (sessionId) {
         if (cur.clients.has(client.id)) {
           client.tabs.set(targetId, { ...info });
@@ -1175,12 +1175,18 @@ export class RelayServer {
   /**
    * Attach a target (manual or auto). Idempotent per target: the extension
    * attaches once per target; every gateway client shares that session.
-   * Resolves to the extension sessionId (or null on failure).
+   * Resolves to `{ sessionId, reason }` — `sessionId` is the extension session
+   * (null on failure) and `reason` is the failure text for *this* attach.
+   *
+   * The reason travels with the result instead of a shared `this._attachFailure`
+   * slot: concurrent attaches (a createTarget ack racing a manual attach, or two
+   * gateway clients attaching different tabs) used to overwrite each other's
+   * reason, so one target's failure was reported against another target.
    */
   _ensureTargetSession(entry, targetInfo) {
     const targetId = targetInfo.targetId;
     const existing = entry.sessionForTarget.get(targetId);
-    if (existing) return Promise.resolve(existing);
+    if (existing) return Promise.resolve({ sessionId: existing, reason: null });
 
     return new Promise((resolve) => {
       const globalId = this._nextCommandId++;
@@ -1193,8 +1199,7 @@ export class RelayServer {
       setTimeout(() => {
         if (this._pendingCommands.has(globalId)) {
           this._pendingCommands.delete(globalId);
-          this._attachFailure = "attach timed out";
-          resolve(null);
+          resolve({ sessionId: null, reason: `attach timed out after ${GATEWAY_WAIT_MS}ms` });
         }
       }, GATEWAY_WAIT_MS);
     });
@@ -1206,11 +1211,9 @@ export class RelayServer {
       this._reply(client, id, null, { code: -32000, message: `Target ${params.targetId} not found` });
       return;
     }
-    const sessionId = await this._ensureTargetSession(entry, target);
+    const { sessionId, reason } = await this._ensureTargetSession(entry, target);
     if (!sessionId) {
-      const reason = this._attachFailure || "unknown extension error";
-      this._attachFailure = null;
-      this._reply(client, id, null, { code: -32000, message: `Failed to attach target ${params.targetId}: ${reason}` });
+      this._reply(client, id, null, { code: -32000, message: `Failed to attach target ${params.targetId}: ${reason || "unknown extension error"}` });
       return;
     }
     const sessions = clientSessions(client);
@@ -1255,9 +1258,9 @@ export class RelayServer {
     if (!target) {
       return { found: false, attached: false, reason: "target not found" };
     }
-    const sessionId = await this._ensureTargetSession(entry, target);
+    const { sessionId, reason } = await this._ensureTargetSession(entry, target);
     if (!sessionId) {
-      return { found: true, attached: false, reason: this._attachFailure || "attach failed" };
+      return { found: true, attached: false, reason: reason || "attach failed" };
     }
     for (const client of [...entry.clients.values()]) {
       if (!client.ws || client.ws.readyState !== client.ws.OPEN) continue;
@@ -1304,7 +1307,7 @@ export class RelayServer {
       // chrome.debugger.attach on them.
       const u = (target.url || "").toLowerCase();
       if (u.startsWith("chrome://") || u.startsWith("chrome-extension://")) continue;
-      const sessionId = await this._ensureTargetSession(entry, target);
+      const { sessionId } = await this._ensureTargetSession(entry, target);
       if (!sessionId) continue;
       sessions.set(target.targetId, sessionId);
       this._emitToClient(client, {
@@ -1355,10 +1358,12 @@ export class RelayServer {
         const targetId = pending.targetId;
         entry.sessionForTarget.set(targetId, msg.result.sessionId);
         entry.extSessionToTarget.set(msg.result.sessionId, targetId);
-        pending.resolve(msg.result.sessionId);
+        pending.resolve({ sessionId: msg.result.sessionId, reason: null });
       } else {
-        this._attachFailure = msg.error?.message || "unexpected extension reply";
-        pending.resolve(null);
+        pending.resolve({
+          sessionId: null,
+          reason: msg.error?.message || "unexpected extension reply (no sessionId)"
+        });
       }
       return;
     }
@@ -1585,11 +1590,9 @@ export class RelayServer {
         if (!target) {
           throw new Error(`Target ${targetId} not found in browser "${entryName}" — run Target.getTargets first`);
         }
-        const sid = await this._ensureTargetSession(entry, target);
+        const { sessionId: sid, reason } = await this._ensureTargetSession(entry, target);
         if (!sid) {
-          const reason = this._attachFailure || "unknown extension error";
-          this._attachFailure = null;
-          throw new Error(`Failed to attach target ${targetId}: ${reason}`);
+          throw new Error(`Failed to attach target ${targetId}: ${reason || "unknown extension error"}`);
         }
         sessionId = sid;
       }

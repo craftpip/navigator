@@ -22,7 +22,7 @@ It is also the **single enforcement point for per-key browser permissions**. Whe
 - Add-on `cdp` browsers are connected lazily and reused; a `disconnected` event clears the cached connection so the next call reconnects. Navigator never launches or closes add-ons — the user owns that external CDP process.
 - Relay (`navigator-cdp`) connections come from the extensions themselves over `/relay`; pairing is token-based and persists across navigator restarts.
 - `prelaunchBrowser` starts the default browser on server start and warms browser engines. API engines are never warmed.
-- Browser instance health includes connection state, PID, spawned-process count, and tabs.
+- Browser instance health includes connection state, PID, spawned-process count, and tabs. Instance statistics are bounded per browser: the `navigator-cdp` path races its tab-list refresh against a 750 ms fail-fast and, on timeout, reports real connectivity plus `timedOut` and a note rather than blocking discovery toward the 3 s relay wait — so `/stats`, `list_browsers`, and `getInstanceStats()` cannot hang on a slow or unresponsive relay tab refresh.
 
 ## Relay Gateway (`navigator-cdp`)
 
@@ -59,6 +59,8 @@ auth_pending ──valid PIN──→ connected ──disconnect──→ discon
 - a **pre-declared** `navigator-cdp` entry keeps its configured roles and order, and takes its status from the registry;
 - a **dynamic** registration (an extension whose name is not in `BROWSERS`) gets `role: ["default"]` and is appended after the configured add-ons, editable later from the console;
 - an entry whose extension has not dialled in is reported `disconnected` and is skipped for routing, so calls fall through to Chromium like any other unavailable add-on.
+
+Staleness is surfaced rather than hidden: `Target.getTargets` marks each relay row with `connected` plus a `stale` explanation when the paired browser is offline, so a cached tab listing is never sold as a drivable tab. The whole list render is capped at 50 rows with an explicit omission notice; the underlying JSON payload stays complete.
 
 ### Observability
 
@@ -107,5 +109,7 @@ Storage capability is controlled by `ENABLE_SCREENSHOT_PATH` and `ENABLE_SCREENS
 - Console and network buffers retain up to 200 entries each.
 - Operations refresh the target timer.
 - A cleanup timer closes targets after five minutes idle and retains a short-lived record so callers receive a useful inactivity error.
+
+Target summaries expose the **navigation outcome**: `createTarget` / `Page.navigate` / `reload` / `goHistory` record `navigation: {status, error?}` so a failed load (e.g. `ERR_NAME_NOT_RESOLVED`) is visible in the summary rather than only in the console buffer. A failed attach to an **adopted user-browser tab** also stops being a blank `Unknown targetId`: the error names the backend and the reason (`attach to "<backend>" failed: <failure>`) so a browser/attach problem is distinguishable from a genuinely wrong ID.
 
 `DOM.getDocument` returns an LLM-oriented summary of landmarks and interactive elements with selectors, XPath, attributes, geometry, and visibility. Runtime evaluation serializes results safely, limiting arrays/objects and recursive depth. Input tools require a valid CSS selector or XPath and `Input.insertText` clears the existing editable value before typing.

@@ -846,7 +846,7 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   await sleep(30);
   const [, client] = wireRelay(env, '10.69.1.164:1994');
   const before = client._sent.find(m => m.type === 'navigator-hello');
-  test('36a. hello carries the saved description first', () =>
+  test('31a. hello carries the saved description first', () =>
     !!before && before.browserDescription === 'to be removed');
 
   // User empties the field while disconnected, then reconnects.
@@ -856,7 +856,7 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   await sleep(30);
   const [, client2] = wireRelay(env, '10.69.1.164:1994');
   const cleared = client2._sent.find(m => m.type === 'navigator-hello');
-  test('36b. empty description is sent explicitly so the server clears it', () =>
+  test('31b. empty description is sent explicitly so the server clears it', () =>
     !!cleared && cleared.browserDescription === '');
 }
 
@@ -1123,6 +1123,78 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   test('30. activate/close on a window target hit browsingContext.activate/close', () =>
     !!targetId && activates.length === 1 && activates[0].params.context === targetId &&
     closes.length === 1 && closes[0].params.context === targetId && closes[0].params.promptUnload === false);
+}
+
+// 59. discoverContextForTab must never guess. A guessed context binding is
+//     PERSISTED, so the agent would silently drive a different tab than the one
+//     the target names — for the rest of the session. It used to fall back to
+//     "first free top-level context" whenever the URL filter came up empty or
+//     ambiguous, which is exactly the two-tabs-on-the-same-URL case.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.BidiClient.connect(env.Config.defaultBidiUrl);
+  attachBidi(env);
+  await sleep(80); // the fake socket only answers after the event loop settles
+  const SM = env.CDPSessionManager;
+
+  // Guard against a vacuous block: if getTree never round-trips, every
+  // "returns null" assertion below would pass for the wrong reason.
+  const tree = await env.BidiClient.send('browsingContext.getTree', {});
+  const treeLive = !!(tree && Array.isArray(tree.contexts) && tree.contexts.length === 2);
+  test('59z. the fake getTree round-trips (block is not vacuous)', () => treeLive);
+
+  // The fake getTree above serves ctx-1=about:blank, ctx-2=example.com.
+  // No URL match at all -> must return null instead of grabbing ctx-1.
+  const noMatch = await SM.discoverContextForTab({ id: 90, url: 'https://elsewhere.test/page' });
+  test('59a. no URL match resolves to null, never a guessed context', () =>
+    noMatch === null && SM.contextIdForTab(90) === null);
+
+  // Two contexts on the same URL -> ambiguous -> refuse to bind either.
+  env.BidiClient.send = async () => ({
+    contexts: [
+      { context: 'ctx-dup-1', parent: null, url: 'https://dup.test', children: [] },
+      { context: 'ctx-dup-2', parent: null, url: 'https://dup.test', children: [] }
+    ]
+  });
+  const ambiguous = await SM.discoverContextForTab({ id: 91, url: 'https://dup.test' });
+  test('59b. ambiguous same-URL match is refused, nothing is bound', () =>
+    ambiguous === null && SM.contextIdForTab(91) === null);
+
+  // A missing tab URL gives no correlation evidence at all.
+  env.BidiClient.send = async () => ({
+    contexts: [{ context: 'ctx-x', parent: null, url: 'https://a.test', children: [] }]
+  });
+  const noUrl = await SM.discoverContextForTab({ id: 92, url: '' });
+  test('59c. tab without a URL is never bound to a context', () =>
+    noUrl === null && SM.contextIdForTab(92) === null);
+
+  // The happy path still works: one unique free match binds.
+  env.BidiClient.send = async () => ({
+    contexts: [
+      { context: 'ctx-ok-1', parent: null, url: 'https://one.test', children: [] },
+      { context: 'ctx-ok-2', parent: null, url: 'https://two.test', children: [] }
+    ]
+  });
+  const unique = await SM.discoverContextForTab({ id: 93, url: 'https://two.test' });
+  test('59d. a unique unclaimed URL match still binds', () =>
+    unique === 'ctx-ok-2' && SM.contextIdForTab(93) === 'ctx-ok-2' && SM.tabIdForContext('ctx-ok-2') === 93);
+
+  // Once claimed, the same URL cannot be stolen by a second tab.
+  env.BidiClient.send = async () => ({
+    contexts: [{ context: 'ctx-ok-2', parent: null, url: 'https://two.test', children: [] }]
+  });
+  const steal = await SM.discoverContextForTab({ id: 94, url: 'https://two.test' });
+  test('59e. an already-claimed context is never re-bound to another tab', () =>
+    steal === null && SM.tabIdForContext('ctx-ok-2') === 93 && SM.contextIdForTab(94) === null);
+
+  // Fragments are ignored when correlating (same document, different #hash).
+  env.BidiClient.send = async () => ({
+    contexts: [{ context: 'ctx-frag', parent: null, url: 'https://frag.test/page', children: [] }]
+  });
+  const frag = await SM.discoverContextForTab({ id: 95, url: 'https://frag.test/page#section-2' });
+  test('59f. a fragment-only URL difference still correlates', () =>
+    frag === 'ctx-frag' && SM.contextIdForTab(95) === 'ctx-frag');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -2382,6 +2382,10 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
         debugLog("new_page", t);
         const withPageTimeout = (label, task) => operation.step(label, task);
         const withOperationDeadline = (label, task) => operation.wait(label, task);
+        // Readiness problems the hint declared but the page did not satisfy.
+        // Never thrown — they change the RESULT's trustworthiness, not its
+        // shape — but they must not vanish either.
+        const readinessWarnings = [];
 
         try {
           t = performance.now();
@@ -2404,16 +2408,29 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             : hint?.default?.waitForSelector
               ? [hint.default.waitForSelector]
               : [];
+          // A hint's waitForSelector states "this element carries the content".
+          // Silently ignoring a miss means we extract a half-rendered page and
+          // still report success, so the model cannot tell a short article from
+          // a page that never loaded. Record it and surface it as a warning.
           if (waitSelectors.length) {
             t = performance.now();
             try {
-              await withPageTimeout("wait_for_selectors", () => Promise.all(
+              const settled = await withPageTimeout("wait_for_selectors", () => Promise.allSettled(
                 waitSelectors.map((sel) =>
                   page.waitForSelector(sel, { timeout: Math.min(operationTimeoutMs, 20000) })
                 )
               ));
+              for (const [i, outcome] of settled.entries()) {
+                if (outcome.status !== "rejected") continue;
+                const sel = waitSelectors[i];
+                if (sel === "section" || sel === "html" || sel === "body") continue;
+                readinessWarnings.push(
+                  `hint waitForSelector "${sel}" never appeared within ${Math.min(operationTimeoutMs, 20000)}ms — the page may be incomplete (${String(outcome.reason?.message || outcome.reason).slice(0, 160)})`
+                );
+              }
             } catch (error) {
               if (operation.signal.aborted) throw error;
+              readinessWarnings.push(`waitForSelector failed: ${String(error?.message || error).slice(0, 160)}`);
             }
             debugLog("wait_for_selector", t);
           }
@@ -2426,7 +2443,17 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
           const flowLeadsWithWait = hint?.flow?.[0]?.action === "wait" && hint.flow[0].stabilizeStrategy !== "none";
           t = performance.now();
           if (!flowLeadsWithWait) {
-            await withPageTimeout("stabilize_page", () => stabilizePage(page, hint, manager.config));
+            try {
+              await withPageTimeout("stabilize_page", () => stabilizePage(page, hint, manager.config));
+            } catch (error) {
+              // Losing the stabilization wait usually means dynamic content
+              // never settled. Say so instead of returning a half-built page
+              // as if it were complete.
+              if (operation.signal.aborted) throw error;
+              readinessWarnings.push(
+                `page did not stabilize before extraction (${String(error?.message || error).slice(0, 160)}) — content may be incomplete`
+              );
+            }
           }
           debugLog("stabilize_page", t);
 
@@ -2650,6 +2677,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             finalText = `${hintNote}\n\n${finalText}`;
           }
 
+          const mergedWarnings = [...(extracted.warnings || []), ...pageStateWarnings, ...readinessWarnings];
           const result = {
             ...extracted,
             text: finalText,
@@ -2658,9 +2686,10 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
             ...(captureHtml ? { html } : {}),
             browser: usedBrowser,
             ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {}),
-            ...(pageStateWarnings.length
-              ? { warnings: [...(extracted.warnings || []), ...pageStateWarnings] }
-              : {})
+            ...(mergedWarnings.length ? { warnings: [...new Set(mergedWarnings)] } : {}),
+            // A declared-but-missing selector means this text is a best-effort
+            // read of a page that never finished loading.
+            ...(readinessWarnings.length ? { partial: true } : {})
           };
 
           if (debug) {

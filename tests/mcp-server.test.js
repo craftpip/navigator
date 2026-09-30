@@ -2628,6 +2628,91 @@ describe("mcp-server HTTP endpoints", () => {
       expect(res.status).toBe(200);
     });
   });
+
+  // ---- cache transparency (plan 59 §9a) ---------------------------------
+  // Two separate defects: a failure payload was cached for the full TTL (one
+  // DNS blip became permanent), and a replayed response was byte-identical to
+  // a fresh one, so a model could not tell a 10-minute-old page from current.
+  describe("cache transparency (plan 59)", () => {
+    it("never caches a result that contains a failed item", async () => {
+      const searchMod = await import("../src/search.js");
+      const query = `cache failure ${Date.now()}`;
+      searchMod.browserSearch.mockReset();
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query,
+        results: [{ title: "Fine", url: "https://ok.example.com", snippet: "ok" }],
+        errors: ["transient network error"],
+      }));
+
+      const r1 = await mcpPost({
+        jsonrpc: "2.0", id: 80, method: "tools/call",
+        params: { name: "web_search", arguments: { query } },
+      });
+      expect(r1.status).toBe(200);
+
+      // A second call must hit the network again, not replay the failure.
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query,
+        results: [{ title: "Recovered Result", url: "https://ok.example.com", snippet: "ok" }],
+      }));
+      const r2 = await mcpPost({
+        jsonrpc: "2.0", id: 81, method: "tools/call",
+        params: { name: "web_search", arguments: { query } },
+      });
+      expect(r2.body.result.content[0].text).toContain("Recovered Result");
+    });
+
+    it("marks a replayed response as cached with its age", async () => {
+      const searchMod = await import("../src/search.js");
+      const query = `cache stamp ${Date.now()}`;
+      searchMod.browserSearch.mockReset();
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query,
+        results: [{ title: "Stamped Result", url: "https://stamped.example.com", snippet: "s" }],
+      }));
+
+      const r1 = await mcpPost({
+        jsonrpc: "2.0", id: 82, method: "tools/call",
+        params: { name: "web_search", arguments: { query } },
+      });
+      const freshText = r1.body.result.content[0].text;
+      expect(freshText).toContain("Stamped Result");
+      expect(freshText).not.toMatch(/cached result/i);
+
+      searchMod.browserSearch.mockReset();
+      const r2 = await mcpPost({
+        jsonrpc: "2.0", id: 83, method: "tools/call",
+        params: { name: "web_search", arguments: { query } },
+      });
+      const cachedText = r2.body.result.content[0].text;
+      expect(searchMod.browserSearch).not.toHaveBeenCalled(); // really a cache hit
+      expect(cachedText).toMatch(/cached result/i);
+      expect(cachedText).toMatch(/retrieved \d+[smh] ago/);
+      expect(cachedText).toContain("bypassCache");
+    });
+
+    it("bypassCache skips the cache and returns an unmarked fresh response", async () => {
+      const searchMod = await import("../src/search.js");
+      const query = `bypass stamp ${Date.now()}`;
+      searchMod.browserSearch.mockReset();
+      searchMod.browserSearch.mockResolvedValue(makeMockSearchPayload({
+        query,
+        results: [{ title: "Bypass Result", url: "https://bypass.example.com", snippet: "b" }],
+      }));
+
+      await mcpPost({
+        jsonrpc: "2.0", id: 84, method: "tools/call",
+        params: { name: "web_search", arguments: { query } },
+      });
+      const r2 = await mcpPost({
+        jsonrpc: "2.0", id: 85, method: "tools/call",
+        params: { name: "web_search", arguments: { query, bypassCache: true } },
+      });
+      const text = r2.body.result.content[0].text;
+      expect(text).toContain("Bypass Result");
+      expect(text).not.toMatch(/cached result/i);
+    });
+  });
 });
 
 describe("logToolError", () => {
