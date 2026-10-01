@@ -4759,7 +4759,8 @@ async function maybeStartHttpServer(managerOverride) {
     relayServer.init({
       server,
       host: relayHost,
-      port: manager.config.mcpApiPort
+      port: manager.config.mcpApiPort,
+      configuredBrowsers: manager.config.browsers
     });
   }
 

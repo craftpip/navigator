@@ -469,6 +469,35 @@ let env0;
     !after.connected && after.token === 'tok-prior' && after.ws === null);
 }
 
+// 14b. Server-initiated forget (close code 4004) is NOT the PIN-expiry case:
+//      the extension must drop its stored token and stop, with no auto-reconnect
+//      loop — otherwise a forgotten browser keeps reconnecting with stale
+//      pairing material (plan 60 B2).
+{
+  const [server, client, env] = await startRelay();
+  env.Config.saveSessionToken('tok-forgotten', () => {});
+  env.State.setSessionToken('tok-forgotten');
+  env.State.setConnected(true);
+  await sleep(20);
+
+  client.onclose({ code: 4004, reason: 'forget' });
+  await sleep(30);
+
+  const after = {
+    pairing: env.State.isPairing(),
+    pinRequired: env.State.isPinRequired(),
+    connecting: env.State.isConnecting(),
+    connected: env.State.isConnected(),
+    token: env.State.getSessionToken(),
+    reconnectTimer: env.State.getReconnectTimer(),
+    lastError: env.State.getLastError()
+  };
+  test('14b. Forgot-browser (4004) clears token and does not auto-reconnect', () =>
+    !after.pairing && !after.pinRequired && !after.connecting &&
+    !after.connected && after.token === null && !after.reconnectTimer &&
+    /forgotten/i.test(String(after.lastError)));
+}
+
 // 15. Target.activateTarget / Target.closeTarget resolve CDP target ids to
 //     real tab ids (hex chrome.debugger ids, not numeric tab ids) — the old
 //     parseInt(targetId) bug rounded hex ids into a random tab.

@@ -98,7 +98,7 @@ export class RelayServer {
     this._heartbeat = null;
   }
 
-  init({ server, host, port }) {
+  init({ server, host, port, configuredBrowsers }) {
     if (!server) throw new Error("relay init requires the HTTP server");
     this._server = server;
     if (host) this._host = host;
@@ -118,12 +118,34 @@ export class RelayServer {
 
     // Restore persisted pairings so a navigator restart does not force a
     // re-PIN — the extension reconnects with the same session token.
+    // Plan 60 B1: a persisted pairing is only authorized for names that the
+    // CURRENT configuration still declares navigator-cdp. A token for a
+    // browser removed from BROWSERS is kept in the DB but not restored into
+    // the token map, so it cannot silently route traffic after a restart —
+    // it presents as recoverable unmanaged state (known, unpaired) until the
+    // user explicitly re-PINs (plan 60 §5 restart row). When no browsers
+    // config is supplied (standalone relay tests), legacy restore-all applies.
+    const relayNameAllowlist = new Set(
+      (configuredBrowsers || [])
+        .filter((b) => b && b.type === "navigator-cdp")
+        .map((b) => b.name)
+    );
+    const restoreAllowed = configuredBrowsers ? (name) => relayNameAllowlist.has(name) : () => true;
     try {
       const sessions = loadRelaySessions();
+      let restored = 0;
+      let retained = 0;
       for (const s of sessions) {
-        this._tokenToName.set(s.session_token, s.name);
+        if (restoreAllowed(s.name)) {
+          this._tokenToName.set(s.session_token, s.name);
+          restored++;
+        } else {
+          retained++;
+        }
       }
-      if (sessions.length) log(`restored ${sessions.length} persisted relay session(s)`);
+      if (restored || retained) {
+        log(`restored ${restored} persisted relay session(s)` + (retained ? `, retained ${retained} unconfigured pairing(s) un-authorized` : ""));
+      }
     } catch (e) {
       log(`restore relay sessions skipped: ${String(e && e.message)}`);
     }
@@ -218,7 +240,13 @@ export class RelayServer {
       found = true;
       try {
         if (entry.ws && entry.ws.readyState === entry.ws.OPEN) {
-          entry.ws.close(4000, "forget");
+          // Distinct close code 4004 = "this browser was forgotten by the
+          // server" — NOT 4000 ("PIN wrong/expired"), which the extensions
+          // treat as "revert to your previous pairing and keep the token".
+          // A forgotten browser must drop its stored pairing material and
+          // stop, otherwise it reconnects with a token the server no longer
+          // honors (plan 60 B2).
+          entry.ws.close(4004, "forget");
         }
       } catch {}
       this._teardownEntry(entry);

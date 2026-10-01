@@ -270,6 +270,16 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(relay.getStatusEntries([]).map((e) => e.name)).not.toContain("ghost");
     expect(relay._knownBrowsers.has("ghost")).toBe(false);
   });
+
+  it("forget closes an open socket with 4004 (distinct from PIN-expiry 4000, plan 60 B2)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "forget-me");
+    // A 4000 close means "PIN wrong/expired — keep your pairing". A server-initiated
+    // forget must use a DIFFERENT code so the extension drops its stored token.
+    expect(relay.forget("forget-me")).toBe(true);
+    const closeCode = await nextClose(ws);
+    expect(closeCode).toBe(4004);
+  });
 });
 
 describe("browser description (plan 45) — auth gate, hello, live update, lifecycle", () => {
@@ -471,6 +481,42 @@ describe("browser description (plan 45) — auth gate, hello, live update, lifec
     // remove() is the only thing that drops the row from disk.
     expect(deleteRelayBrowserMeta("persisted")).toBe(true);
     expect(loadRelayBrowserMetas().find((r) => r.name === "persisted")).toBeUndefined();
+  });
+
+  it("restores persisted pairings only for names still configured navigator-cdp (plan 60 B1)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "configured-relay");
+    ws.close();
+
+    // A brand new server instance (a navigator restart). The persisted pairing
+    // is authorized only when the fresh server's BROWSERS config still names
+    // the browser as navigator-cdp; otherwise the row is kept but the token is
+    // NOT restored, so a removed relay cannot silently route traffic again.
+    const retained = new RelayServer();
+    retained.init({
+      server: http.createServer(() => {}),
+      host: "127.0.0.1",
+      port: 0,
+      configuredBrowsers: [{ name: "something-else", type: "navigator-cdp" }]
+    });
+    expect(retained._tokenToName.has(token)).toBe(false);
+    expect(retained._tokenToName.size).toBe(0);
+
+    const authorized = new RelayServer();
+    authorized.init({
+      server: http.createServer(() => {}),
+      host: "127.0.0.1",
+      port: 0,
+      configuredBrowsers: [{ name: "configured-relay", type: "navigator-cdp" }]
+    });
+    expect(authorized._tokenToName.get(token)).toBe("configured-relay");
+
+    // Without any browser config (standalone embedder), legacy restore-all
+    // still applies so the relay does not silently drop pairings it knows
+    // nothing about.
+    const legacy = new RelayServer();
+    legacy.init({ server: http.createServer(() => {}), host: "127.0.0.1", port: 0 });
+    expect(legacy._tokenToName.get(token)).toBe("configured-relay");
   });
 });
 

@@ -176,7 +176,7 @@ var ConnectionManager = (function() {
               State.setWs(null);
               State.clearHeartbeatTimer();
               State.setConnecting(false);
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004) {
                 Logger.info('[Connection] Falling back to next candidate');
                 State.setConnecting(true);
                 tryNext();
@@ -276,6 +276,24 @@ var ConnectionManager = (function() {
       notify({ type: 'pin-required' });
       var t1 = setTimeout(function() { ConnectionManager.connect(); }, 300);
       State.setReconnectTimer(t1);
+      return;
+    }
+    if (event.code === 4004) {
+      // The server forgot this browser — drop our stored token and stop
+      // without an auto-reconnect loop; the user connects explicitly to
+      // re-pair (plan 60 B2).
+      Logger.warn('[Connection] This browser was forgotten by the server');
+      State.setConnecting(false);
+      State.setConnected(false);
+      State.setPairing(false);
+      State.setPinRequired(false);
+      State.setPinError(null);
+      Config.clearSessionToken(function() {
+        State.setSessionToken(null);
+        State.setLastError('This browser was forgotten by navigator — connect again to re-pair');
+      });
+      ClearPending();
+      notify({ type: 'connection-status-changed' });
       return;
     }
     if (event.code === 4000) {

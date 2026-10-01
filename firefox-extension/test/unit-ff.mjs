@@ -498,6 +498,31 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
     sent === false);
 }
 
+// 5e. Server-initiated forget (close code 4004) is NOT the PIN-expiry case:
+//     the extension must drop its stored token and stop, with no reconnect
+//     attempt — otherwise a forgotten browser reconnects with stale material
+//     (plan 60 B2).
+{
+  const [server, client, env] = await startRelay();
+  env.Config.saveSessionToken('tok-forgotten', () => {});
+  env.State.setSessionToken('tok-forgotten');
+  env.State.setConnected(true);
+  await sleep(20);
+
+  let reconnects = 0;
+  const originalConnect = env.ConnectionManager.connect;
+  env.ConnectionManager.connect = function() { reconnects++; return originalConnect.apply(this, arguments); };
+
+  client.onclose({ code: 4004, reason: 'forget' });
+  await sleep(40);
+
+  test('5e. Forgot-browser (4004) clears token, no auto-reconnect, forgotten error', () =>
+    env.State.getSessionToken() === null &&
+    !env.State.isConnected() &&
+    reconnects === 0 &&
+    /forgotten/i.test(String(env.State.getLastError())));
+}
+
 // 6. Browser.getVersion is Firefox-branded LOCAL
 {
   const env = buildEnv();

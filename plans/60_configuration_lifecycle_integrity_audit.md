@@ -1,7 +1,24 @@
 # 60 - Configuration lifecycle integrity audit
 
-**Status:** proposed
+**Status:** In progress — browser/relay lifecycle slice (§10 step 1). Fixed: B1, B2, B3, B4, B8, B9 (B3/B4/B8/B9 on 2026-09-18; B1/B2 on 2026-10-01). Open: B5, B6, B7, B9-deep. Not started: K1–K7 (API keys), S1–S12 (search/models), H1–H7 (hints/caches/process).
 **Scope:** Every console-managed resource whose configuration, runtime registry, durable storage, derived routing/status state, or UI representation can disagree.
+
+## Progress checklist
+
+- [x] B1 — startup restores only config-authorized `navigator-cdp` relay pairings
+- [x] B2 — server-initiated Forget clears the extension pairing (distinct close code 4004)
+- [x] B3 — same-name `cdp` → `navigator-cdp` type change invalidates the stale connection (2026-09-18)
+- [x] B4 — inactivity cleanup releases adopted user tabs, never closes them (2026-09-18)
+- [x] B8 — removal/type-change releases devtools target state (2026-09-18)
+- [x] B9 (partial) — navigator-owned shared CDP browsers closed on removal/retype (2026-09-18)
+- [ ] B5 — rename delete-plus-create migration
+- [ ] B6 — persisted forget tombstone / unmanaged-discovery policy
+- [ ] B7 — dynamic relay name collision with configured plain-CDP
+- [ ] B9-deep — raw `cdp-share.js` upstream proxy pipe registry cleanup (with K4)
+- [ ] K1–K7 — API key / permission lifecycle
+- [ ] S1–S12 — search engine / model lifecycle
+- [ ] H1–H7 — hints / cache / process lifecycle
+- [ ] Absorb into `docs/` and archive
 
 ## 1. Problem
 
@@ -146,7 +163,7 @@ For every resource/transition pair:
 | `BROWSERS` | Reset to default | Env key removed | Default browser array hot-applied | Removed relay sessions deleted | Removed relays do not reappear as dynamic drivers | `tests/mcp-server.test.js` | Fixed 2026-09-18 through the shared browser lifecycle boundary. |
 | `BROWSERS` | Revert backup | Backup restored | Restored browser array hot-applied | Relays absent from the restored array are deleted | Driver panel matches restored config | `tests/mcp-server.test.js` | Fixed 2026-09-18; reverts previously only rewrote `.env` and left runtime state stale. |
 | `BROWSERS` | External edit | `.env` remains canonical | Next `/console/config` refresh validates and hot-applies the browser array | Removed relay sessions deleted | Config payload reports external apply/error; driver panel matches the file | `tests/mcp-server.test.js` | Fixed 2026-09-18. Invalid external values preserve the current live array and surface `externalBrowsersError`. |
-| `BROWSERS` | Restart | Pending audit | Pending audit | Pending audit | Pending audit | Not yet covered | Startup still restores all durable relay sessions without config reconciliation. |
+| `BROWSERS` | Restart | `.env` (on disk) is authoritative | Only persisted sessions for names still configured `navigator-cdp` are restored into `_tokenToName` | Unconfigured `relay_sessions` rows are kept in SQLite but not authorized | Dashboard shows them as known/disconnected (recoverable unmanaged), not paired | `tests/relay-server.test.js` ("restores persisted pairings only for names still configured navigator-cdp") | Fixed 2026-10-01 (B1). Standalone callers that pass no `configuredBrowsers` keep legacy restore-all. |
 
 ## 9b. Full Audit Evidence Register
 
@@ -156,8 +173,8 @@ Audit run 2026-09-18 (four independent passes: browser/relay, API keys/permissio
 
 | # | Severity | Finding | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| B1 | Critical | Startup restores every durable relay token before validating against current `BROWSERS`; removed relays reappear as dynamic browsers after restart and can route traffic | `src/relay-server.js:88-105` loads all `relay_sessions`; `getStatusEntries()`:238-253 projects unconfigured pairings; `src/browser.js:1149-1204` exposes them; `src/mcp-server.js:3197-3205` init order | PENDING |
-| B2 | Critical | Server-initiated Forget closes with code 4000 which both extensions treat as expired-PIN and retain the token — forgotten extensions reconnect with stale pairing material | `src/relay-server.js:162-168`; `chrome-extension/core/connection-manager.js:279-292`; `firefox-extension/core/connection-manager.js:254-263` | PENDING |
+| B1 | Critical | Startup restores every durable relay token before validating against current `BROWSERS`; removed relays reappear as dynamic browsers after restart and can route traffic | `src/relay-server.js:88-105` loads all `relay_sessions`; `getStatusEntries()`:238-253 projects unconfigured pairings; `src/browser.js:1149-1204` exposes them; `src/mcp-server.js:3197-3205` init order | FIXED 2026-10-01: `RelayServer.init({ configuredBrowsers })` restores a persisted token into `_tokenToName` only when the current config still declares that name `navigator-cdp`. Unconfigured rows stay in SQLite and in the known registry (recoverable unmanaged — shown known/disconnected, not paired) but are not authorized, so a removed relay cannot route after restart. Wired at `src/mcp-server.js:4763` (`configuredBrowsers: manager.config.browsers`); legacy restore-all preserved when no config is supplied. Regression: `tests/relay-server.test.js` "restores persisted pairings only for names still configured navigator-cdp (plan 60 B1)". |
+| B2 | Critical | Server-initiated Forget closes with code 4000 which both extensions treat as expired-PIN and retain the token — forgotten extensions reconnect with stale pairing material | `src/relay-server.js:162-168`; `chrome-extension/core/connection-manager.js:279-292`; `firefox-extension/core/connection-manager.js:254-263` | FIXED 2026-10-01: server closes forgotten sockets with code **4004** ("forget") instead of 4000 ("PIN wrong/expired"). Both extensions gained a 4004 branch that clears the session token, clears the connected flag, stops auto-reconnect, and surfaces a "forgotten by navigator" error, so a forgotten browser presents the pairing screen instead of silently reconnecting with stale material. Tests: `tests/relay-server.test.js` "forget closes an open socket with 4004"; `firefox-extension/test/unit-ff.mjs` 5e; `chrome-extension/test/unit-ext.mjs` forgotten-browser case. |
 | B3 | High | Same-name `cdp` → `navigator-cdp` type change reuses the old direct-CDP puppeteer connection: `_ensureAddOnConnection()` keys `_addOnState` by name only, so user-browser requests can drive the former endpoint | `src/browser.js:708-715`; `src/mcp-server.js:710-730` type-change path misses plain-addon invalidation | FIXED 2026-09-18: `BrowserManager.invalidateAddOn(name)` (new) drops our puppeteer handle, clears the probe cache, and closes navigator-owned shared CDP browsers for that name; `reconcileBrowserChanges()` (replaces `reconcileRemovedRelayBrowsers`) invalidates on removal AND on same-name identity change (type or cdpUrl). Config read path now reports `invalidatedBrowsers` (console config payload includes `envFile.externalBrowsersInvalidated`). Regression tests: "invalidates the stale add-on connection when a browser changes type in place" + "invalidates add-on state + devtools targets when a plain-cdp browser is removed" (tests/mcp-server.test.js). |
 | B4 | High | Adopted user tabs are closed by the 5-minute inactivity cleanup (`state.page.close()` unconditional); manual close correctly only releases the handle | `src/devtools.js:412-418`; manual path :692-699; tests/devtools.test.js:402-425 covers manual only | FIXED 2026-09-18: inactivity sweep extracted into exported `runInactivityTick(now)`; adopted targets are released (handle dropped, `page.close()` never sent, no `closedTargets` tombstone). Regression test: "inactivity cleanup releases adopted target without closing its tab". Pre-existing unrelated failure noted: `formatDevtoolsToolResponse` "includes tool name and JSON payload" test (expects count in JSON render; current renderer emits markdown) fails identically at HEAD. |
 | B5 | High | Rename is delete-plus-create without migration; extension identity not migrated, old name resurrects as dynamic relay after re-pair | `src/mcp-server.js:710-720` forgets only; no rename op in relay/DB/BrowserManager/extensions | PENDING |
@@ -171,6 +188,10 @@ Audit run 2026-09-18 (four independent passes: browser/relay, API keys/permissio
 Deployed live after the first browser/relay slice: `docker compose restart navigator`, health OK. Full vitest sweep: 643 pass; the only 2 failures are pre-existing and unrelated (svg.test.js `centers lone lines vertically` fails identically at HEAD, svg unchanged by this work; `formatDevtoolsToolResponse` "includes tool name and JSON payload" expects raw `"count"` in a markdown render). Console config payload now exposes `envFile.externalBrowsersInvalidated`.
 
 **Live-verification side effect (logged honestly):** an interactive BROWSERS PUT used as a smoke test sent a browser list that omitted the configured `macbook chrome` relay, which correctly forget it (`forgottenRelayBrowsers: ["macbook chrome"]`) and deleted its SQLite `relay_sessions` row on the production instance. The revert path restored the `.env` and the configured entry, but the durable session token was already deleted — `macbook chrome`'s next reconnect presents a now-invalid token and the extension prompts for a fresh PIN. One-time re-pair required; a reminder that live config surfaces must never be used as test fixtures. Other relays (`dev-chrome`, `Chrome`, `mac firefox`) were unaffected.
+
+### 9b.1b Deployment record — B1/B2 (2026-10-01)
+
+`RelayServer.init()` now takes an optional `configuredBrowsers` allowlist; `mcp-server.js` passes `manager.config.browsers`. Server-initiated forget closes with 4004. Verified in-container: `tests/relay-server.test.js` 26/26 including both new cases. Extension suites (standalone vm harnesses): `firefox-extension/test/unit-ff.mjs` 63 pass / 2 pre-existing probe fails (20d/20e, documented in AGENTS.md); `chrome-extension/test/unit-ext.mjs` 51/51.
 
 ### 9b.2 API key and permission lifecycle
 

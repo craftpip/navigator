@@ -205,7 +205,7 @@ var ConnectionManager = (function() {
               State.clearHeartbeatTimer();
               State.setConnected(false);
               // If we never opened, try next candidate before giving up
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004) {
                 Logger.info('[Connection] Falling back to next candidate');
                 tryNext();
                 return;
@@ -314,6 +314,26 @@ var ConnectionManager = (function() {
       State.setPinError('Session invalid for this server — pairing with a new PIN');
       notify({ type: 'pin-required' });
       scheduleReconnect(300);
+      return;
+    }
+    if (event.code === 4004) {
+      // The server forgot this browser (removed from BROWSERS or forgotten
+      // through Manage). The pairing is gone server-side; drop our stored
+      // token so we do not keep reconnecting with stale material, and stop
+      // without an auto-reconnect loop. The user must connect explicitly to
+      // re-pair (plan 60 B2).
+      Logger.warn('[Connection] This browser was forgotten by the server');
+      State.setConnecting(false);
+      State.setConnected(false);
+      Config.clearSessionToken(function() {
+        State.setSessionToken(null);
+      });
+      State.setPairing(false);
+      State.setPinRequired(false);
+      State.setPinError(null);
+      State.setLastError('This browser was forgotten by navigator — connect again to re-pair');
+      ClearPending();
+      notify({ type: 'connection-status-changed' });
       return;
     }
     if (event.code === 4000) {
