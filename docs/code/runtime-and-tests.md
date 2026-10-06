@@ -44,6 +44,29 @@ docker compose up -d
 
 The server serves generated files from `src/web-console/dist` at `/console/`. Do not edit hashed files in that directory; edit `src/web-console/src/` and rebuild. The console polls live health, stats, activity, configuration, logs, API keys, and domain hints. Its activity feed has separate cursors for searches and page operations (`since` and `sinceOps`); consumers must retain both so rows are not skipped.
 
+### Console Loading States
+
+Two shared components in `src/web-console/src/components/ui.jsx` cover every async state in the console, and both build on the single `.activity-spinner` ring primitive in `style.css`:
+
+- `<Loading>` renders a centered ring plus a label, replacing `Empty` while a view's first request is in flight. It is a *page-region* state: status dashboard, activity trend, hints list, Manage config. A view must not show an `Empty` state before its first request settles, or "no data" briefly reads as the truth.
+- `<Spinner small />` is a *button* or *status-line* state. Prefix it in front of the control's existing busy text rather than replacing it, so the busy state is still announced without motion (and for reduced-motion users).
+
+Both are purely visual. Keep each control's existing `disabled` expression and its `finally` cleanup untouched: a ring that outlives its request is a stuck spinner, and a control that is not disabled during a request can be double-submitted. Sub-100ms requests legitimately flash the ring — that is the expected behavior, not a failure, so do not add a minimum-display delay to smooth it out.
+
+The Manage view's `Loading` is defensive rather than a standing hole: `main.jsx` refetches a full snapshot on every view change, so a direct deep-link to `/console/manage` already has its configuration.
+
+### Request Activity Trend Card
+
+The status page's `Request activity` card is self-contained in `src/web-console/src/pages/status/ActivityChart.jsx` (imported by `pages/status/index.jsx`, not defined there): `ActivityLineChart` draws the inline SVG, and `RequestActivityTrend` owns the heading, summary, range controls, legend, and engine selector. Range state (`trendRange`, `trend`, `trendError`, `changeTrendRange`) and engine state (`trendEngine`, `changeTrendEngine`) live in `main.jsx` and round-trip through the URL as `?range=` and `?engine=` (engine is omitted when `all`), so a refreshed or shared console keeps the chosen view. Data comes from `GET /stats/activity-trend`; the card shares the `.trend-drivers` grid with `Browser drivers`, so its width is coupled to that sibling's scroll container.
+
+Two measure families keep fan-out honest. The category series (total, Web ok/fail, DevTools ok/fail) come from `activity_events` — one row per completed MCP tool call — categorized by tool prefix: `Target.`/`Page.`/`Runtime.`/`DOM.`/`Input.`/`Network.`/`Browser.` are DevTools, everything else is Web. A running operation is never counted, so restarts and in-flight work cannot inflate success totals. The engine series (Engine ok/fail) come from `engine_attempts`, one row per engine outcome. The `?engine=` filter scopes **only** the engine series and the engine footer — Web/DevTools request totals are engine-independent and deliberately stay unchanged when the selector moves, so one `web_search` never double-counts as request plus fan-out. Failure lines are dashed as well as red, so state is never color-only, and hidden/visible series recompute the shared zero-based y-scale.
+
+Interactions: legend entries are real buttons with `aria-pressed` — clicking hides or shows a series without touching the underlying totals, and a hidden series drops out of the tooltip and the y-scale. The engine `<select>` (labeled "Search engine") switches the aggregate engine lines to one engine's trend and drives the footer's `attempt / success / failure / skipped` totals. Hovering or keyboard-focusing a bucket's hit rectangle shows a tooltip with the bucket time and every visible series value (`data-tooltip`, handled by `ImmediateTooltip`, which listens for `focusin` too); clicking or tapping pins the same text as a persistent readout in `.request-trend-detail` below the chart — a second click clears it — so touch users are not hover-dependent. The card renders explicit empty ("No request activity in this period."), loading, and error ("Could not load activity trend: …") states instead of a bare SVG.
+
+Series colors are CSS variables (`--series-total`, `--series-web-*`, `--series-devtools-*`, `--series-engine-*`) with light and dark values, and the hit rectangles carry a `:focus-visible` stroke ring so keyboard navigation is visible. Of the `.request-trend-*` rules in `style.css`, only `.request-trend-plots`, `.request-trend-plot-heading`, and `.request-trend-switch` remain orphaned (no JSX); `.request-trend-legend` and `.request-trend-detail` are live. Treat the orphaned three as legacy, not a latent feature — delete them if the multi-plot layout is never revived.
+
+Server-side coverage lives in `tests/activity.test.js` (range bucket shapes, engine-filter/request-total separation, running-search exclusion, 7-day prune) and `tests/mcp-server.test.js` (HTTP 400 for an unknown range or engine).
+
 ## Host CLI
 
 `navigator.js` is an observer for an already-running HTTP service. It does not launch the MCP server.

@@ -71,6 +71,64 @@ describe("activity trends", () => {
     const { activity } = await loadActivity();
     expect(() => activity.getActivityTrend({ range: "year" })).toThrow("Unsupported activity trend range");
   });
+
+  it("creates the expected bucket count and width for every range", async () => {
+    const { activity } = await loadActivity();
+    const now = 1_728_000_000_000;
+    const expected = [
+      ["minutes", 15, 60_000],
+      ["hour", 12, 300_000],
+      ["day", 24, 3_600_000],
+      ["week", 28, 21_600_000],
+    ];
+    for (const [range, points, bucketMs] of expected) {
+      const trend = activity.getActivityTrend({ range, now });
+      expect(trend.range).toBe(range);
+      expect(trend.bucketMs).toBe(bucketMs);
+      expect(trend.buckets).toHaveLength(points);
+      expect(trend.sinceMs % bucketMs).toBe(0);
+      expect(trend.buckets[0].ts).toBe(trend.sinceMs);
+      expect(trend.buckets[points - 1].ts - trend.buckets[0].ts).toBe((points - 1) * bucketMs);
+      expect(trend.untilMs).toBe(now);
+      expect(trend.sinceMs).toBeGreaterThanOrEqual(now - points * bucketMs);
+      expect(trend.sinceMs).toBeLessThanOrEqual(now - (points - 1) * bucketMs);
+      expect(trend.buckets.every((bucket) => bucket.total === 0 && bucket.engine.ok === 0 && bucket.engine.fail === 0 && bucket.engine.skip === 0)).toBe(true);
+      expect(trend.summary).toMatchObject({ total: 0, ok: 0, fail: 0 });
+      expect(trend.engineSummary).toEqual({ total: 0, ok: 0, fail: 0, skip: 0 });
+    }
+  });
+
+  it("excludes running searches from request totals and prunes activity older than seven days", async () => {
+    const { db, activity } = await loadActivity();
+    const now = Date.now();
+    const old = now - 8 * 86400_000;
+    const database = db.getDb();
+    database.prepare("INSERT INTO searches (ts, query, status, ok) VALUES (?, ?, 'running', NULL)").run(now, "in-flight query");
+    database.prepare("INSERT INTO searches (ts, query, status, ok) VALUES (?, ?, 'ok', 1)").run(old, "old query");
+    const insertEvent = database.prepare("INSERT INTO activity_events (ts, tool, category, ok, error) VALUES (?, ?, ?, ?, ?)");
+    insertEvent.run(old, "web_search", "web", 1, "");
+    insertEvent.run(now - 60_000, "web_search", "web", 1, "");
+    const insertAttempt = database.prepare("INSERT INTO engine_attempts (search_id, ts, engine, backend, status, result_count, duration_ms, error) VALUES (NULL, ?, ?, 'lightpanda', ?, ?, ?, '')");
+    insertAttempt.run(old, "bing", "ok", 3, 10);
+    insertAttempt.run(now - 60_000, "bing", "ok", 4, 12);
+
+    const before = activity.getActivityTrend({ range: "week", now });
+    expect(before.summary).toMatchObject({ total: 1, ok: 1, fail: 0 });
+    expect(before.engineSummary).toEqual({ total: 1, ok: 1, fail: 0, skip: 0 });
+
+    db.pruneActivity(true);
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM activity_events").get().count).toBe(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM engine_attempts").get().count).toBe(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM searches").get().count).toBe(1);
+
+    const trend = activity.getActivityTrend({ range: "week", now });
+    expect(trend.summary).toMatchObject({ total: 1, ok: 1, fail: 0 });
+    expect(trend.engineSummary).toEqual({ total: 1, ok: 1, fail: 0, skip: 0 });
+    expect(trend.sinceMs).toBeGreaterThanOrEqual(now - 7 * 86400_000);
+    expect(trend.sinceMs).toBeLessThanOrEqual(now - 27 * 21_600_000);
+    expect(trend.buckets).toHaveLength(28);
+  });
 });
 
 describe("page ops live feed", () => {

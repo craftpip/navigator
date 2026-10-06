@@ -44,7 +44,7 @@ See [Browser Runtime](../architecture/browser-runtime.md) for target lifetime an
 | `/`, `/health` | GET | Lightweight liveness, browser state, VNC state, page limiter, and circuit breakers |
 | `/stats` | GET | Memory, browser instances, caches, counters, request rates, scheduler and activity summary |
 | `/stats/activity` | GET | Incremental SQLite activity feed; use independent `since` and `sinceOps` cursors |
-| `/stats/activity-trend` | GET | Bucketed request/engine trend for `minutes`, `hour`, `day`, or `week` |
+| `/stats/activity-trend` | GET | Bucketed request/engine trend for `minutes`, `hour`, `day`, or `week` (default `day`), with an optional `engine` filter that scopes only the engine-attempt series; 400 for an unknown range or engine |
 | `/mcp` | POST/GET/DELETE | Stateless and session-based MCP transport |
 | `/search`, `/extract`, `/screenshot` | GET | Human-friendly HTTP wrappers around core browser operations |
 | `/download/:id` | GET | Temporary screenshot download when enabled |

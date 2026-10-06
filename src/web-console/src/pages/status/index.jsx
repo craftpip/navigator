@@ -7,7 +7,7 @@ import { Runtime } from "./Runtime.jsx";
 import { LiveFeed, buildFeed } from "./LiveFeed.jsx";
 import { Logs } from "./Logs.jsx";
 
-function StatusView({ snapshot, ready, history, toggleVnc, vncBusy, feed, trend, trendRange, trendError, setTrendRange, reload }) {
+function StatusView({ snapshot, ready, history, toggleVnc, vncBusy, feed, trend, trendRange, trendError, setTrendRange, engine, setEngine, reload }) {
   const { health = {}, stats = {}, config = {}, logs = [], ok } = snapshot;
   const instances = stats.instances || [];
   const engines = config.engines || [];
@@ -134,6 +134,9 @@ function StatusView({ snapshot, ready, history, toggleVnc, vncBusy, feed, trend,
           range={trendRange}
           error={trendError}
           setRange={setTrendRange}
+          engine={engine}
+          setEngine={setEngine}
+          engines={engines}
         />
         <Drivers health={health} instances={instances} reload={reload} height={driverHeight} />
       </section>

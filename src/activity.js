@@ -217,6 +217,13 @@ export function recordPageOp({ id = null, tool, url, backend, durationMs = 0, re
   });
 }
 
+export function activityCategoryForTool(name) {
+  const n = String(name);
+  return ["Target.", "Page.", "Runtime.", "DOM.", "Input.", "Network.", "Browser."].some((prefix) => n.startsWith(prefix))
+    ? "devtools"
+    : "web";
+}
+
 export function recordActivityEvent({ tool, category, ok = true, error = "" }) {
   runExclusive(() => {
     getDb()

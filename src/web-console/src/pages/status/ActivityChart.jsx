@@ -3,19 +3,32 @@ import { formatTrendLabel } from "../../lib/format.js";
 import { Empty, Loading } from "../../components/ui.jsx";
 import { WEB_TOOLS, classifyError } from "../../lib/request.js";
 
-export const REQUEST_SERIES = [
+export const CATEGORY_SERIES = [
+  { key: "total", label: "Total requests", color: "var(--series-total)" },
   { key: "web-ok", label: "Web succeeded", color: "var(--series-web-ok)" },
-  { key: "web-fail", label: "Web failed", color: "var(--series-web-fail)" },
+  { key: "web-fail", label: "Web failed", color: "var(--series-web-fail)", fail: true },
   { key: "devtools-ok", label: "DevTools succeeded", color: "var(--series-devtools-ok)" },
-  { key: "devtools-fail", label: "DevTools failed", color: "var(--series-devtools-fail)" },
+  { key: "devtools-fail", label: "DevTools failed", color: "var(--series-devtools-fail)", fail: true },
 ];
+export const ENGINE_SERIES = [
+  { key: "engine-ok", label: "Engine succeeded", color: "var(--series-engine-ok)" },
+  { key: "engine-fail", label: "Engine failed", color: "var(--series-engine-fail)", fail: true },
+];
+export const REQUEST_SERIES = [...CATEGORY_SERIES, ...ENGINE_SERIES];
+
 export function requestValue(bucket, key) {
+  if (key === "total") return bucket.total || 0;
   const [category, status] = key.split("-");
   return bucket[category]?.[status] || 0;
 }
 
-export function ActivityLineChart({ buckets, range }) {
-  const [selected, setSelected] = useState(null);
+export function bucketTooltip(item, range, series) {
+  return [formatTrendLabel(item.ts, range), ...series.map((entry) => `${entry.label} ${requestValue(item, entry.key)}`)].join(" · ");
+}
+
+export function ActivityLineChart({ buckets, range, series }) {
+  const [hovered, setHovered] = useState(null);
+  const [pinned, setPinned] = useState(null);
   const wrapRef = useRef(null);
   const [scale, setScale] = useState(1);
   useEffect(() => {
@@ -28,7 +41,7 @@ export function ActivityLineChart({ buckets, range }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const max = Math.max(1, ...buckets.flatMap((bucket) => REQUEST_SERIES.map((series) => requestValue(bucket, series.key))));
+  const max = Math.max(1, ...buckets.flatMap((bucket) => series.map((entry) => requestValue(bucket, entry.key))));
   const width = 800;
   const height = 260;
   const left = 38;
@@ -37,11 +50,11 @@ export function ActivityLineChart({ buckets, range }) {
   const bottom = 32;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const active = selected;
+  const active = hovered ?? pinned;
   const xFor = (index) => (buckets.length === 1 ? left + plotWidth / 2 : left + (index / (buckets.length - 1)) * plotWidth);
   const yFor = (value) => top + plotHeight - (value / max) * plotHeight;
-  const pathFor = (series) => {
-    const points = buckets.map((item, index) => ({ x: xFor(index), y: yFor(requestValue(item, series.key)) }));
+  const pathFor = (entry) => {
+    const points = buckets.map((item, index) => ({ x: xFor(index), y: yFor(requestValue(item, entry.key)) }));
     if (points.length < 2) return "";
     const clampY = (value) => Math.max(top, Math.min(top + plotHeight, value));
     let path = `M ${points[0].x} ${points[0].y}`;
@@ -57,33 +70,78 @@ export function ActivityLineChart({ buckets, range }) {
     return path;
   };
   const every = Math.max(1, Math.ceil(buckets.length / 4));
+  const togglePin = (index) => setPinned((current) => (current === index ? null : index));
+  const onKeyDown = (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      togglePin(Number(event.currentTarget.dataset.index));
+    }
+  };
   return <>
-    <div className="request-trend-chart" ref={wrapRef} role="img" aria-label="Web and DevTools request line graph" style={{ "--tscale": scale }}>
+    <div className="request-trend-chart" ref={wrapRef} role="img" aria-label="Request activity line graph" style={{ "--tscale": scale }}>
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
         {[0, 0.5, 1].map((ratio) => {
           const y = top + plotHeight - ratio * plotHeight;
           return <g key={ratio}><line className="request-trend-grid" x1={left} x2={width - right} y1={y} y2={y} /><text x={left - 5} y={y + 4} textAnchor="end">{Math.round(max * ratio)}</text></g>;
         })}
-        {REQUEST_SERIES.map((series) => (
-          <g key={series.key}>
-            <path className="request-trend-line" style={{ "--series": series.color }} d={pathFor(series)} />
+        {series.map((entry) => (
+          <g key={entry.key}>
+            <path className="request-trend-line" style={{ "--series": entry.color, ...(entry.fail ? { strokeDasharray: "6 4" } : {}) }} d={pathFor(entry)} />
             {buckets.map((item, index) => (
-              <circle key={item.ts} className="request-trend-dot" cx={xFor(index)} cy={yFor(requestValue(item, series.key))} r={active === index ? 3.5 : 2.25} style={{ "--series": series.color }} />
+              <circle key={item.ts} className="request-trend-dot" cx={xFor(index)} cy={yFor(requestValue(item, entry.key))} r={active === index ? 3.5 : 2.25} style={{ "--series": entry.color }} />
             ))}
           </g>
         ))}
         {buckets.map((item, index) => {
           const x = xFor(index);
           const half = buckets.length > 1 ? plotWidth / (buckets.length - 1) / 2 : plotWidth / 2;
-          const tooltip = `${formatTrendLabel(item.ts, range)} · Web ${item.web?.ok || 0} ok / ${item.web?.fail || 0} fail · DevTools ${item.devtools?.ok || 0} ok / ${item.devtools?.fail || 0} fail`;
-          return <g key={item.ts} onMouseEnter={() => setSelected(index)} onMouseLeave={() => setSelected(null)}><rect className="request-trend-hit" data-tooltip={tooltip} x={x - half} y={top} width={half * 2} height={plotHeight} />{(index === 0 || index === buckets.length - 1 || index % every === 0) && <text className="request-trend-label" x={x} y={height - 8} textAnchor="middle">{formatTrendLabel(item.ts, range)}</text>}</g>;
+          const tooltip = bucketTooltip(item, range, series);
+          return <g key={item.ts}>
+            <rect
+              className="request-trend-hit"
+              data-tooltip={tooltip}
+              data-index={index}
+              tabIndex={0}
+              role="button"
+              aria-label={tooltip}
+              x={x - half}
+              y={top}
+              width={half * 2}
+              height={plotHeight}
+              onMouseEnter={() => setHovered(index)}
+              onMouseLeave={() => setHovered(null)}
+              onFocus={() => setHovered(index)}
+              onBlur={() => setHovered(null)}
+              onClick={() => togglePin(index)}
+              onKeyDown={onKeyDown}
+            />
+            {(index === 0 || index === buckets.length - 1 || index % every === 0) && <text className="request-trend-label" x={x} y={height - 8} textAnchor="middle">{formatTrendLabel(item.ts, range)}</text>}
+          </g>;
         })}
       </svg>
       </div>
+    <div className="request-trend-detail">{active !== null && buckets[active] ? bucketTooltip(buckets[active], range, series) : ""}</div>
   </>;
 }
-export function RequestActivityTrend({ trend, range, error, setRange }) {
+
+export function RequestActivityTrend({ trend, range, error, setRange, engine, setEngine, engines = [] }) {
+  const [hidden, setHidden] = useState(() => new Set());
   const buckets = trend?.buckets || [];
+  const engineSummary = trend?.engineSummary || { total: 0, ok: 0, fail: 0, skip: 0 };
+  const empty = Boolean(trend) && trend.summary.total === 0 && engineSummary.total === 0;
+  const series = [...CATEGORY_SERIES.filter((entry) => !hidden.has(entry.key)), ...ENGINE_SERIES];
+  const engineOptions = [...new Set([
+    ...engines.map((entry) => (typeof entry === "string" ? entry : entry?.id)),
+    ...(trend?.engineSeries || []).map((entry) => entry.id),
+    engine && engine !== "all" ? engine : null,
+  ])].filter(Boolean).sort();
+  const toggleSeries = (key) =>
+    setHidden((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   return (
     <section className="panel request-trend">
       <div className="request-trend-heading">
@@ -103,13 +161,40 @@ export function RequestActivityTrend({ trend, range, error, setRange }) {
               </button>
             ))}
           </div>
-          <div className="request-trend-key" aria-label="Request outcome legend">
-            {REQUEST_SERIES.map((series) => <span key={series.key}><i style={{ "--series": series.color }} />{series.label}</span>)}
+          <div className="request-trend-key request-trend-legend" role="group" aria-label="Request outcome legend">
+            {CATEGORY_SERIES.map((entry) => {
+              const on = !hidden.has(entry.key);
+              return (
+                <button key={entry.key} type="button" className={on ? "active" : ""} aria-pressed={on} onClick={() => toggleSeries(entry.key)}>
+                  <i style={{ "--series": entry.color }} />
+                  {entry.label}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
-      {error ? <Empty>Could not load activity trend: {error}</Empty> : !buckets.length ? <Loading>Loading activity trend…</Loading> : (
-        <ActivityLineChart buckets={buckets} range={range} />
+      {error ? (
+        <Empty>Could not load activity trend: {error}</Empty>
+      ) : !trend ? (
+        <Loading>Loading activity trend…</Loading>
+      ) : empty ? (
+        <Empty>No request activity in this period.</Empty>
+      ) : (
+        <>
+          <ActivityLineChart buckets={buckets} range={range} series={series} />
+          <div className="request-trend-detail request-trend-engine">
+            <span>Search engines</span>
+            <select aria-label="Search engine" value={engine || "all"} onChange={(event) => setEngine?.(event.target.value)}>
+              <option value="all">All engines</option>
+              {engineOptions.map((id) => <option key={id} value={id}>{id}</option>)}
+            </select>
+            <span>· attempt {engineSummary.total}</span>
+            <span>· success {engineSummary.ok}</span>
+            <span className={engineSummary.fail ? "request-trend-fail" : ""}>· failure {engineSummary.fail}</span>
+            <span>· skipped {engineSummary.skip}</span>
+          </div>
+        </>
       )}
     </section>
   );
@@ -128,12 +213,12 @@ export function computeStatus(health, stats, ok) {
   };
   if (!ok) mark("critical", "server unreachable");
   if (
-    health?.pageLimiter?.maxConcurrentPageOps &&
-    health.pageLimiter.inUse >= health.pageLimiter.maxConcurrentPageOps
+    health?.pageLimiter?.maxCurrentPageOps &&
+    health.pageLimiter.inUse >= health.pageLimiter.maxCurrentPageOps
   )
     mark(
       "degraded",
-      `page ops saturated (${health.pageLimiter.inUse}/${health.pageLimiter.maxConcurrentPageOps}${health.pageLimiter.queued ? `, ${health.pageLimiter.queued} queued` : ""})`,
+      `page ops saturated (${health.pageLimiter.inUse}/${health.pageLimiter.maxCurrentPageOps}${health.pageLimiter.queued ? `, ${health.pageLimiter.queued} queued` : ""})`,
     );
   if (health?.vnc?.running && health.vnc.headed === false)
     mark("degraded", "VNC running but browser still headless");

@@ -1,10 +1,27 @@
 # Request Activity Trend Graph Plan
 
-## Status
+**Status:** Complete — 2026-10-07. Server side (committed earlier: `getActivityTrend` at `src/activity.js`, `GET /stats/activity-trend` at `src/mcp-server.js`, core `RequestActivityTrend` chart) plus every remaining gap closed 2026-10-05/07: engine selector + engine footer, legend hide/show toggles, hover/focus tooltip + tap-pin readout, empty/loading/error states, and the `Browser.` devtools categorization bug. 7 trend tests (`tests/activity.test.js` ×5, `tests/mcp-server.test.js` ×2). Absorbed into `docs/code/runtime-and-tests.md` §"Request Activity Trend Card" + `docs/api/mcp-and-http.md`; archived 2026-10-07. Full suite 670 pass / 90 fail — all 6 failing files pre-existing; console bundle rebuilt and live-verified (legend toggles, range/engine URL state, pin/unpin, tooltip, no JS errors).
+**Priority:** Low
+**Created:** 2026-08-11
 
-**Planned** — requested 2026-08-11. This is a new status-console card placed
-directly below **Live operational overview**, before the search-engine, browser,
-and live-activity panels.
+## Progress checklist
+
+- [x] Server: `getActivityTrend` bucketing (4 ranges, zero-filled, engine filter), `GET /stats/activity-trend` with 400s for unknown range/engine
+- [x] `Browser.` prefixed devtools tools categorized as devtools (was: web) in `activityCategoryForTool`
+- [x] Console: `ActivityLineChart` + `RequestActivityTrend` card in `.trend-drivers` grid, range controls with `?range=` round-trip, default `day`
+- [x] Console: engine selector with `?engine=` round-trip; engine footer `attempt/success/failure/skipped`; engine filter affects only engine series (web/devtools totals unchanged)
+- [x] Console: legend hide/show toggles (`aria-pressed`); hidden series excluded from the y-scale
+- [x] Console: hover/focus tooltip (`data-tooltip` → `ImmediateTooltip`) + click/tap-to-pin readout below the chart
+- [x] Console: empty / loading / error states; dashed failure strokes (not color-only)
+- [x] Tests: 7 trend tests — bucket shapes for all 4 ranges, engine-filter/request-total separation, running-search exclusion + 7-day prune, 2× HTTP 400
+- [x] Docs absorbed (`docs/code/runtime-and-tests.md`, `docs/api/mcp-and-http.md`), plan archived, queue ticked
+
+## Deviations From This Plan (already built — do not "fix" back)
+
+- The request series come from the `activity_events` table (one row per completed MCP tool call, `src/mcp-server.js:147`) rather than from `searches` / `page_ops` rows. Engine attempts still come from `engine_attempts`. A running operation is never counted, so there is no "running search" case to exclude.
+- The card sits side-by-side with **Browser drivers** in the `.trend-drivers` grid instead of full-width above `.content-grid`.
+- The default range is `day`, not `hour`.
+- Plan §"Console Design" engine footer and legend toggles were listed by `plans/archive/50_request-activity-ui-changes.md` §2 as still-open candidate change **B** (plan 50 closed unimplemented 2026-09-29); both were subsequently built as part of this plan (2026-10-05/07).
 
 ## Goal
 

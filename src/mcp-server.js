@@ -139,7 +139,8 @@ function recordRequest(tool, ok, errorMsg) {
 }
 
 function activityCategoryForTool(name) {
-  return ["Target.", "Page.", "Runtime.", "DOM.", "Input.", "Network."].some((prefix) => String(name).startsWith(prefix))
+  const n = String(name);
+  return ["Target.", "Page.", "Runtime.", "DOM.", "Input.", "Network.", "Browser."].some((prefix) => n.startsWith(prefix))
     ? "devtools"
     : "web";
 }

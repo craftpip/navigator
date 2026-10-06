@@ -19,6 +19,10 @@ function App() {
     const range = new URLSearchParams(location.search).get("range");
     return ["minutes", "hour", "day", "week"].includes(range) ? range : "day";
   });
+  const [trendEngine, setTrendEngine] = useState(() => {
+    const engine = new URLSearchParams(location.search).get("engine");
+    return engine ? engine : "all";
+  });
   const [trend, setTrend] = useState(null);
   const [trendError, setTrendError] = useState("");
   const [snapshot, setSnapshot] = useState({});
@@ -44,15 +48,19 @@ function App() {
     }
     setMode(next);
   };
-  const updateTrendQuery = (nextRange) => {
+  const updateTrendQuery = (nextRange, engine = trendEngine) => {
     const params = new URLSearchParams(location.search);
     params.set("range", nextRange);
-    params.delete("engine");
+    if (engine && engine !== "all") params.set("engine", engine); else params.delete("engine");
     window.history.replaceState({}, "", `${location.pathname}?${params}`);
   };
   const changeTrendRange = (nextRange) => {
     setTrendRange(nextRange);
     updateTrendQuery(nextRange);
+  };
+  const changeTrendEngine = (engine) => {
+    setTrendEngine(engine);
+    updateTrendQuery(trendRange, engine);
   };
   // Full snapshot (status dashboard + explicit reloads) vs light heartbeat.
   // Only the status view reads stats/config/logs/activity, and /stats alone
@@ -138,7 +146,7 @@ function App() {
     let cancelled = false;
     const loadTrend = async () => {
       try {
-        const payload = await request(`/stats/activity-trend?range=${encodeURIComponent(trendRange)}`);
+        const payload = await request(`/stats/activity-trend?range=${encodeURIComponent(trendRange)}${trendEngine && trendEngine !== "all" ? `&engine=${encodeURIComponent(trendEngine)}` : ""}`);
         if (!cancelled) {
           setTrend(payload);
           setTrendError("");
@@ -155,7 +163,7 @@ function App() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [mode, paused, trendRange]);
+  }, [mode, paused, trendRange, trendEngine]);
   useEffect(() => {
     const onPop = () => setMode(modeFromPath(location.pathname));
     window.addEventListener("popstate", onPop);
@@ -199,6 +207,8 @@ function App() {
           trendRange={trendRange}
           trendError={trendError}
           setTrendRange={changeTrendRange}
+          engine={trendEngine}
+          setEngine={changeTrendEngine}
           reload={load}
         />
       ) : mode === "manage" ? (
@@ -221,6 +231,8 @@ function App() {
           trendRange={trendRange}
           trendError={trendError}
           setTrendRange={changeTrendRange}
+          engine={trendEngine}
+          setEngine={changeTrendEngine}
           reload={load}
         />
       )}

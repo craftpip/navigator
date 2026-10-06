@@ -270,6 +270,24 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("GET /stats/activity-trend", () => {
+    it("returns 400 for an unsupported range", async () => {
+      const res = await fetch(`${MCP_BASE}/stats/activity-trend?range=year`);
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toMatch(/Unsupported activity trend range/);
+    });
+
+    it("returns 400 for an unknown engine", async () => {
+      const res = await fetch(`${MCP_BASE}/stats/activity-trend?engine=bogus_engine`);
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toMatch(/Unknown search engine/);
+    });
+  });
+
   describe("POST /engines/reset", () => {
     it("resets one scheduler profile", async () => {
       const searchMod = await import("../src/search.js");
