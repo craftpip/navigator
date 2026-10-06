@@ -332,6 +332,36 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(typeof token).toBe("string");
     expect(relay._entries.get("readded-b6").status).toBe("connected");
   });
+
+  it("a dynamic hello for a name configured as a direct-CDP browser is rejected 4006 (collision, plan 60 B7)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    relay.updateConfiguredBrowsers([{ name: "chromium", addOn: false }, { name: "dup-b7", type: "cdp", cdpUrl: "http://x:9222", addOn: true }]);
+    const ws = await open(`${wsBase}/relay`);
+    ws.send(JSON.stringify({ type: "navigator-hello", browserName: "dup-b7", platform: "chrome" }));
+    const closeCode = await nextClose(ws);
+    expect(closeCode).toBe(4006);
+    expect(relay._entries.has("dup-b7")).toBe(false);
+    // The builtin chromium name is equally unclaimable.
+    const ws2 = await open(`${wsBase}/relay`);
+    ws2.send(JSON.stringify({ type: "navigator-hello", browserName: "chromium", platform: "chrome" }));
+    expect(await nextClose(ws2)).toBe(4006);
+  });
+
+  it("configuring a plain-cdp name evicts a live dynamic relay of that name — forget 4004, known row kept (plan 60 B7)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "dup-b7");
+    expect(relay._entries.has("dup-b7")).toBe(true);
+    relay.updateConfiguredBrowsers([{ name: "dup-b7", type: "cdp", cdpUrl: "http://x:9222", addOn: true }]);
+    const closeCode = await nextClose(ws);
+    expect(closeCode).toBe(4004); // forget's close — not a new entry
+    expect(relay._entries.has("dup-b7")).toBe(false);
+    // forget keeps the known row (record of the dial-in), but a re-hello is
+    // refused by the gate, so routing cannot stay conflicted.
+    expect(relay._knownBrowsers.has("dup-b7")).toBe(true);
+    const re = await open(`${wsBase}/relay`);
+    re.send(JSON.stringify({ type: "navigator-hello", browserName: "dup-b7", platform: "chrome" }));
+    expect(await nextClose(re)).toBe(4006);
+  });
 });
 
 describe("browser description (plan 45) — auth gate, hello, live update, lifecycle", () => {

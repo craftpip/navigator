@@ -30,7 +30,7 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [~] plans/60_configuration_lifecycle_integrity_audit.md — started 2026-10-07 — `In progress`: browser/relay lifecycle slice; fixed B1–B6, B8, B9; open B7, B9-deep, K1–K7, S1–S12, H1–H7. (Dropped from the queue by a corrupted edit; restored 2026-10-07.)
+- [~] plans/60_configuration_lifecycle_integrity_audit.md — started 2026-10-07 — `In progress`: browser/relay lifecycle slice; fixed B1–B7, B8, B9; open B9-deep, K1–K7, S1–S12, H1–H7. (Dropped from the queue by a corrupted edit; restored 2026-10-07.)
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done

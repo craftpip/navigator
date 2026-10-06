@@ -205,7 +205,7 @@ var ConnectionManager = (function() {
               State.clearHeartbeatTimer();
               State.setConnected(false);
               // If we never opened, try next candidate before giving up
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005 && event.code !== 4006) {
                 Logger.info('[Connection] Falling back to next candidate');
                 tryNext();
                 return;
@@ -316,16 +316,21 @@ var ConnectionManager = (function() {
       scheduleReconnect(300);
       return;
     }
-    if (event.code === 4004 || event.code === 4005) {
+    if (event.code === 4004 || event.code === 4005 || event.code === 4006) {
       // 4004 = the server forgot this browser (removed from BROWSERS or
       // forgotten through Manage); 4005 = the name was removed from navigator
-      // and is tombstoned server-side (plan 60 B6) — a plain re-pair would be
-      // rejected again until the name is re-added in the console. Both mean
-      // the pairing is gone server-side: drop our stored token so we do not
-      // keep reconnecting with stale material, and stop without an
-      // auto-reconnect loop (plan 60 B2/B6).
+      // and is tombstoned server-side; 4006 = the name is configured as a
+      // direct-CDP browser in BROWSERS, so a relay may not claim it
+      // (plan 60 B6/B7). All three mean the pairing is gone server-side: drop
+      // our stored token so we do not keep reconnecting with stale material,
+      // and stop without an auto-reconnect loop (plan 60 B2).
+      const collision = event.code === 4006;
       const removed = event.code === 4005;
-      Logger.warn(removed ? '[Connection] This browser name was removed on the server' : '[Connection] This browser was forgotten by the server');
+      Logger.warn(collision
+        ? '[Connection] This browser name is configured as a direct browser on the server'
+        : removed
+          ? '[Connection] This browser name was removed on the server'
+          : '[Connection] This browser was forgotten by the server');
       State.setConnecting(false);
       State.setConnected(false);
       Config.clearSessionToken(function() {
@@ -334,9 +339,11 @@ var ConnectionManager = (function() {
       State.setPairing(false);
       State.setPinRequired(false);
       State.setPinError(null);
-      State.setLastError(removed
-        ? 'This browser was removed from navigator — add it back in Manage to pair again'
-        : 'This browser was forgotten by navigator — connect again to re-pair');
+      State.setLastError(collision
+        ? 'This browser name is configured as a direct browser in navigator — remove or rename its BROWSERS entry to pair it'
+        : removed
+          ? 'This browser was removed from navigator — add it back in Manage to pair again'
+          : 'This browser was forgotten by navigator — connect again to re-pair');
       ClearPending();
       notify({ type: 'connection-status-changed' });
       return;

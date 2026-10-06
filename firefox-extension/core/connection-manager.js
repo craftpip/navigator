@@ -176,7 +176,7 @@ var ConnectionManager = (function() {
               State.setWs(null);
               State.clearHeartbeatTimer();
               State.setConnecting(false);
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005 && event.code !== 4006) {
                 Logger.info('[Connection] Falling back to next candidate');
                 State.setConnecting(true);
                 tryNext();
@@ -278,13 +278,18 @@ var ConnectionManager = (function() {
       State.setReconnectTimer(t1);
       return;
     }
-    if (event.code === 4004 || event.code === 4005) {
+    if (event.code === 4004 || event.code === 4005 || event.code === 4006) {
       // 4004 = forgotten (plan 60 B2); 4005 = name removed from navigator
-      // and tombstoned (plan 60 B6) — re-pairing stays rejected until the
-      // name is re-added in the console. Drop our stored token and stop
-      // without an auto-reconnect loop either way.
+      // and tombstoned; 4006 = name configured as a direct-CDP browser in
+      // BROWSERS, so a relay may not claim it (plan 60 B6/B7). Drop our
+      // stored token and stop without an auto-reconnect loop either way.
+      const collision = event.code === 4006;
       const removed = event.code === 4005;
-      Logger.warn(removed ? '[Connection] This browser name was removed on the server' : '[Connection] This browser was forgotten by the server');
+      Logger.warn(collision
+        ? '[Connection] This browser name is configured as a direct browser on the server'
+        : removed
+          ? '[Connection] This browser name was removed on the server'
+          : '[Connection] This browser was forgotten by the server');
       State.setConnecting(false);
       State.setConnected(false);
       State.setPairing(false);
@@ -292,9 +297,11 @@ var ConnectionManager = (function() {
       State.setPinError(null);
       Config.clearSessionToken(function() {
         State.setSessionToken(null);
-        State.setLastError(removed
-          ? 'This browser was removed from navigator — add it back in Manage to pair again'
-          : 'This browser was forgotten by navigator — connect again to re-pair');
+        State.setLastError(collision
+          ? 'This browser name is configured as a direct browser in navigator — remove or rename its BROWSERS entry to pair it'
+          : removed
+            ? 'This browser was removed from navigator — add it back in Manage to pair again'
+            : 'This browser was forgotten by navigator — connect again to re-pair');
       });
       ClearPending();
       notify({ type: 'connection-status-changed' });

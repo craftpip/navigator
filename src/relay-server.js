@@ -91,6 +91,7 @@ export class RelayServer {
     this._meta = new Map(); // name -> { description, updatedAt } — durable user-authored LLM hint, survives disconnect AND restart
     this._tombstones = new Set(); // names explicitly removed (remove()) — blocks dynamic hello re-discovery (plan 60 B6)
     this._configuredRelayNames = new Set(); // current BROWSERS navigator-cdp names — the live authorization set for hellos
+    this._configuredDirectNames = new Set(); // current BROWSERS non-relay names — dynamic relays may not claim them (plan 60 B7)
     this._wss = null;
     this._server = null;
     this._host = "127.0.0.1";
@@ -314,19 +315,33 @@ export class RelayServer {
    * sync with the canonical config.
    */
   updateConfiguredBrowsers(browsers) {
-    this._configuredRelayNames = new Set(
-      (browsers || []).filter((b) => b && b.type === "navigator-cdp").map((b) => b.name)
-    );
+    const list = browsers || [];
+    this._configuredRelayNames = new Set(list.filter((b) => b && b.type === "navigator-cdp").map((b) => b.name));
+    this._configuredDirectNames = new Set(list.filter((b) => b && b.type !== "navigator-cdp").map((b) => b.name));
+    // Plan 60 B7: a live dynamic relay must not keep a name the config now
+    // owns as a direct browser — otherwise its gateway still routes commands
+    // to the replaced browser while the dashboard/routing reads the direct
+    // add-on. Evict the pairing (forget: keeps the known row for the record,
+    // closes the socket with 4004); the hello gate then refuses the name
+    // (4006) so the conflict cannot be recreated.
+    for (const name of [...this._entries.keys()]) {
+      if (this._configuredDirectNames.has(name)) {
+        log(`evicting dynamic relay "${name}" — collision with configured direct-CDP browser`);
+        this.forget(name);
+      }
+    }
   }
 
   /**
-   * Hello admission policy (plan 60 B6): dynamic discovery is valid only for
-   * names the current config authorizes as navigator-cdp, or names the user
-   * has never explicitly removed. remove() writes the tombstone; forget()
-   * deliberately does not.
+   * Hello admission policy (plan 60 B6/B7): dynamic discovery is valid only
+   * for names the current config authorizes as navigator-cdp, or names the
+   * user has never explicitly removed. A name the config owns as a direct
+   * browser (plain cdp / builtin) is a collision and is refused too. remove()
+   * writes the tombstone; forget() deliberately does not.
    */
   _discoverable(name) {
     if (this._configuredRelayNames.has(name)) return true;
+    if (this._configuredDirectNames.has(name)) return false; // plan 60 B7 — collision with a configured direct browser
     return !this._tombstones.has(name);
   }
 
@@ -630,8 +645,15 @@ export class RelayServer {
         // cannot re-materialize as a dynamic browser. Close 4005 is the
         // extension-side "removed" signal (4004 remains "forgotten").
         if (!this._discoverable(name)) {
-          log(`extension "${name}" rejected — name was removed from navigator (tombstone)`);
-          fail(4005, "removed by navigator");
+          // Plan 60 B7: a name configured as a direct-CDP browser is a
+          // collision, not a removal — distinct close code 4006.
+          if (this._configuredDirectNames.has(name)) {
+            log(`extension "${name}" rejected — name is configured as a direct-CDP browser (plan 60 B7)`);
+            fail(4006, "configured as direct browser");
+          } else {
+            log(`extension "${name}" rejected — name was removed from navigator (tombstone)`);
+            fail(4005, "removed by navigator");
+          }
           return;
         }
         entry = this._ensureEntry(name);

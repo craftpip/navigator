@@ -524,6 +524,31 @@ let env0;
     /removed/i.test(String(env.State.getLastError())));
 }
 
+// 14d. Server-initiated collision (close code 4006): the name is configured
+//      as a direct-CDP browser in BROWSERS, so the relay is refused. Same
+//      handling as 4004/4005 (token cleared, no auto-reconnect), but the
+//      error tells the user the fix is in the BROWSERS entry (plan 60 B7).
+{
+  const [server, client, env] = await startRelay();
+  env.Config.saveSessionToken('tok-collision', () => {});
+  env.State.setSessionToken('tok-collision');
+  env.State.setConnected(true);
+  await sleep(20);
+
+  let reconnects = 0;
+  const originalConnect = env.ConnectionManager.connect;
+  env.ConnectionManager.connect = function() { reconnects++; return originalConnect.apply(this, arguments); };
+
+  client.onclose({ code: 4006, reason: 'configured as direct browser' });
+  await sleep(40);
+
+  test('14d. Collision-name (4006) clears token, no auto-reconnect, direct-browser error', () =>
+    env.State.getSessionToken() === null &&
+    !env.State.isConnected() &&
+    reconnects === 0 &&
+    /direct browser/i.test(String(env.State.getLastError())));
+}
+
 // 15. Target.activateTarget / Target.closeTarget resolve CDP target ids to
 //     real tab ids (hex chrome.debugger ids, not numeric tab ids) — the old
 //     parseInt(targetId) bug rounded hex ids into a random tab.
