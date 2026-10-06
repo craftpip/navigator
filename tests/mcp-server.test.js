@@ -625,6 +625,65 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("MCP session permission re-resolution (plan 60 K2)", () => {
+    // K2: persistent MCP sessions used to capture allowedTools at initialize
+    // and hold it forever — set_tools/mcp_browsers updated the DB but not
+    // live sessions. The session now binds a per-request resolver that reads
+    // the current DB row, so every tools/list and tools/call sees fresh
+    // permissions, and a revoked key denies everything (empty sets) instead
+    // of silently widening to unrestricted.
+    let dbApi, createSessionPermissionResolver, tmpDir;
+
+    beforeAll(async () => {
+      dbApi = await import("../src/db.js");
+      ({ createSessionPermissionResolver } = await import("../src/mcp-server.js"));
+    });
+
+    afterAll(async () => {
+      dbApi.initDb();
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "k2-perm-"));
+      dbApi.closeDb();
+      dbApi.initDb(tmpDir);
+    });
+
+    it("re-resolves allowedTools live after set_tools (no captured snapshot)", async () => {
+      const created = dbApi.createMcpApiKey({ name: "k2 key", secret: "nvg_k2key", allowedTools: ["web_search"] });
+      const resolver = createSessionPermissionResolver(created.id);
+
+      expect([...resolver().allowedTools]).toEqual(["web_search"]);
+      expect(resolver().allowedMcpBrowsers).toBeNull();
+
+      dbApi.setMcpApiKeyTools(created.id, ["web_search", "web_page_svg"]);
+      expect([...resolver().allowedTools]).toEqual(["web_search", "web_page_svg"]);
+
+      dbApi.setMcpApiKeyMcpBrowsers(created.id, ["chromium", "cloakbrowser"]);
+      expect([...resolver().allowedMcpBrowsers].sort()).toEqual(["chromium", "cloakbrowser"]);
+
+      dbApi.revokeMcpApiKey(created.id);
+    });
+
+    it("a revoked key denies everything instead of reverting to unrestricted", async () => {
+      const created = dbApi.createMcpApiKey({ name: "k2 revoke", secret: "nvg_k2revoke", allowedTools: ["web_search"] });
+      const resolver = createSessionPermissionResolver(created.id);
+      expect([...resolver().allowedTools]).toEqual(["web_search"]);
+
+      dbApi.revokeMcpApiKey(created.id);
+      const denied = resolver();
+      expect(denied.allowedTools).not.toBeNull();
+      expect(denied.allowedTools.size).toBe(0);
+      expect(denied.allowedMcpBrowsers.size).toBe(0);
+    });
+
+    it("a keyless/console session stays unrestricted", async () => {
+      const resolver = createSessionPermissionResolver(null);
+      expect(resolver().allowedTools).toBeNull();
+      expect(resolver().allowedMcpBrowsers).toBeNull();
+    });
+  });
+
   describe("PUT /console/config — config manager", () => {
     let envDir;
     let envFile;

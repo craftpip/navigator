@@ -3615,7 +3615,29 @@ async function handleStatelessMcpPost(body, allowedTools = null, allowedMcpBrows
   };
 }
 
-function createMcpServer(allowedTools = null, allowedMcpBrowsers = null) {
+// K2: a persistent MCP session's permissions resolve live from the DB on every
+// request, never captured at initialize. set_tools / set_mcp_browsers / revoke
+// therefore take effect on established sessions immediately. A revoked or
+// missing key record denies everything (empty allow-set) rather than silently
+// widening back to unrestricted.
+export function createSessionPermissionResolver(keyId) {
+  return () => {
+    if (!keyId) return { allowedTools: null, allowedMcpBrowsers: null };
+    const record = (() => {
+      try { return listMcpApiKeys().find((entry) => entry.id === keyId) || null; }
+      catch { return null; }
+    })();
+    if (!record) return { allowedTools: new Set(), allowedMcpBrowsers: new Set() };
+    const allowedTools = parseAllowedTools(record.allowed_tools);
+    const names = parseAllowedBrowsers(record.allowed_mcp_browsers);
+    return {
+      allowedTools: allowedTools === null ? null : new Set(allowedTools),
+      allowedMcpBrowsers: names === null ? null : new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean)),
+    };
+  };
+}
+
+function createMcpServer(resolvePermissions = () => ({ allowedTools: null, allowedMcpBrowsers: null })) {
   const server = new Server(
     {
       name: "search-tools",
@@ -3629,6 +3651,7 @@ function createMcpServer(allowedTools = null, allowedMcpBrowsers = null) {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const { allowedTools } = resolvePermissions();
     const response = getToolsListResponse(allowedTools);
     logEvent("mcp.request", { method: "tools/list" });
     logEvent("mcp.response", { method: "tools/list", result: response });
@@ -3646,6 +3669,7 @@ function createMcpServer(allowedTools = null, allowedMcpBrowsers = null) {
 
     const t0 = Date.now();
     try {
+      const { allowedTools, allowedMcpBrowsers } = resolvePermissions();
       const response = await handleToolCall(name, args, allowedTools, allowedMcpBrowsers);
       const ms = Date.now() - t0;
       const okText = response?.content?.[0]?.text || "";
@@ -3787,7 +3811,11 @@ async function maybeStartHttpServer(managerOverride) {
               }
             };
 
-            const mcpServer = createMcpServer(allowedTools, allowedMcpBrowsers);
+            // K2: bind the session to its key id; permissions re-resolve from
+            // the DB on every request so set_tools/mcp_browsers/revoke affect
+            // live sessions, not just the next session.
+            const sessionKeyRecord = getAuthorizedKeyRecord(req.headers, authConfig);
+            const mcpServer = createMcpServer(createSessionPermissionResolver(sessionKeyRecord ? sessionKeyRecord.id : null));
             await mcpServer.connect(transport);
             await transport.handleRequest(req, res, body);
             if (transport.sessionId) {

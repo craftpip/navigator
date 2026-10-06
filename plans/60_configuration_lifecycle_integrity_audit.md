@@ -1,6 +1,6 @@
 # 60 - Configuration lifecycle integrity audit
 
-**Status:** In progress — browser/relay lifecycle slice (§10 step 1). Fixed: B1–B9, K1 (B3/B4/B8/B9 2026-09-18, B1/B2 2026-10-01, B5/B6/B7 2026-10-07, K1 2026-10-07). Open: B9-deep (folds into K4); K2–K7; S1–S12; H1–H7.
+**Status:** In progress — browser/relay lifecycle slice (§10 step 1). Fixed: B1–B9, K1, K2 (B3/B4/B8/B9 2026-09-18, B1/B2 2026-10-01, B5/B6/B7 2026-10-07, K1/K2 2026-10-07). Open: B9-deep (folds into K4); K3–K7; S1–S12; H1–H7.
 **Scope:** Every console-managed resource whose configuration, runtime registry, durable storage, derived routing/status state, or UI representation can disagree.
 
 ## Progress checklist
@@ -16,7 +16,8 @@
 - [x] B7 — dynamic relay name collision with configured plain-CDP
 - [ ] B9-deep — raw `cdp-share.js` upstream proxy pipe registry cleanup (with K4)
 - [x] K1 — API keys: DB is single live authority, env is first-boot seed (2026-10-07)
-- [ ] K2–K7 — API key / permission lifecycle
+- [x] K2 — permission re-resolution on live MCP sessions (2026-10-07)
+- [ ] K3–K7 — API key / permission lifecycle
 - [ ] S1–S12 — search engine / model lifecycle
 - [ ] H1–H7 — hints / cache / process lifecycle
 - [ ] Absorb into `docs/` and archive
@@ -199,7 +200,7 @@ Deployed live after the first browser/relay slice: `docker compose restart navig
 | # | Severity | Finding | Evidence | Status |
 | --- | --- | --- | --- | --- |
 | K1 | Critical | `MCP_API_KEYS` has two conflicting authorities: env imported once at startup, then SQLite restores/overrides; hot applier also mutates runtime directly — live vs restart disagree | `src/db.js:215-230` `initializeMcpApiKeys`; `src/mcp-server.js:592-595,3199-3201` `syncMcpApiKeys`; `src/config-manager.js:175` | RESOLVED (2026-10-07). DB `api_keys` is the single live authority; env `MCP_API_KEYS` is a first-boot seed via `syncMcpApiKeys` (`parseApiKeys(process.env.MCP_API_KEYS)` → `initializeMcpApiKeys` seed-once guard). Removed config.js env merge (line 464) and the `MCP_API_KEYS` HOT_APPLYERS entry. `manager.config.mcpApiKeys` is a DB mirror, refreshed on every boot/hot-apply/revoke. Tests: `tests/mcp-server.test.js` "MCP API key authority (plan 60 K1)" (3), `tests/config.test.js` (env no longer produces mcpApiKeys). |
-| K2 | High | Persistent MCP sessions capture `allowedTools` at initialize and never re-resolve; `set_tools` updates DB but not live sessions | `src/mcp-server.js:3266,3302,3317-3324,3131-3162,666-675` | PENDING |
+| K2 | High | Persistent MCP sessions capture `allowedTools` at initialize and never re-resolve; `set_tools` updates DB but not live sessions | `src/mcp-server.js:3266,3302,3317-3324,3131-3162,666-675` | RESOLVED (2026-10-07). `createMcpServer` no longer takes a permission snapshot — it takes a `resolvePermissions()` callback invoked on every `tools/list` and `tools/call`. Session initialize binds the key id via `createSessionPermissionResolver(keyId)` (exported), which re-reads the current `api_keys` row from the DB per request, so `set_tools`/`set_mcp_browsers`/rename/revoke take effect on established sessions immediately. A revoked/missing key resolves to empty allow-sets (deny everything) rather than silently widening to unrestricted. Keyless/console sessions (keyId null) stay unrestricted. `handleStatelessMcpPost` unchanged (already per-request). Tests: `tests/mcp-server.test.js` "MCP session permission re-resolution (plan 60 K2)" (3: live re-resolve after set_tools+mcp_browsers, revoked-key deny-all, keyless unrestricted; 14 total in the K1+K2+api-keys+session subset pass). |
 | K3 | High | CDP authorization checked once at WS upgrade; active pipes keep forwarding after revoke/scope-change/browser removal | `src/cdp-share.js:370-449`; revoke at `src/mcp-server.js:644-650` never closes sockets | PENDING |
 | K4 | High | Plain `cdp` browser removal leaves `_addOnState` connections and devtools handles; external `/cdp/<name>` pipes persist | `src/browser.js:708-763`; `src/devtools.js:246-256`; cleanup only handles navigator-cdp (`src/mcp-server.js:710-730`) | PENDING |
 | K5 | High | Deleted/renamed browser names stay in API-key `allowed_browsers` (no referential cleanup); stale grants can later attach to a new same-name browser | `src/db.js:232-263`; `src/cdp-share.js:120-141` name-only enforcement | PENDING |
