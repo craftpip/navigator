@@ -829,6 +829,59 @@ describe("mcp-server HTTP endpoints", () => {
       }
     });
 
+    it("treats a rename as delete+create with full old-name cleanup (plan 60 B5)", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const devtoolsMod = await import("../src/devtools.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const forget = vi.spyOn(relayServer, "forget").mockReturnValue(true);
+      const remove = vi.spyOn(relayServer, "remove");
+      manager.invalidateAddOn.mockImplementation((name) => [`${name}: disconnected add-on handle`]);
+      devtoolsMod.releaseTargetsByBackend.mockImplementation((name) => [`${name}: released adopted handle`]);
+      const oldRelay = { name: "old-relay-b5", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      const newRelay = { name: "new-relay-b5", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      manager.config.browsers = [...originalBrowsers, oldRelay];
+      fs.writeFileSync(envFile, `BROWSERS=${JSON.stringify([...originalBrowsers, oldRelay])}\n`);
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify([...originalBrowsers, newRelay]) } }),
+        });
+        const body = await res.json();
+
+        expect(body.ok).toBe(true);
+        // Rename = full removal of the old name (session + known row + meta via
+        // remove()), not pairing-only forget — the old name must not linger as
+        // recoverable unmanaged state once its successor is configured.
+        expect(remove).toHaveBeenCalledWith("old-relay-b5");
+        expect(forget).toHaveBeenCalledWith("old-relay-b5");
+        expect(body.forgottenRelayBrowsers).toEqual(["old-relay-b5"]);
+        expect(manager.invalidateAddOn).toHaveBeenCalledWith("old-relay-b5");
+        expect(devtoolsMod.releaseTargetsByBackend).toHaveBeenCalledWith("old-relay-b5");
+        // Canonical state: .env and the config payload carry only the new name.
+        const after = fs.readFileSync(envFile, "utf8");
+        expect(after).toContain("new-relay-b5");
+        expect(after).not.toContain("old-relay-b5");
+        const cfg = await (await fetch(`${MCP_BASE}/console/config`)).json();
+        const names = cfg.config.browsers.map((browser) => browser.name);
+        expect(names).toContain("new-relay-b5");
+        expect(names).not.toContain("old-relay-b5");
+        // Read-path: the old name does not survive as a dynamic status row.
+        const statusNames = relayServer.getStatusEntries(cfg.config.browsers).map((entry) => entry.name);
+        expect(statusNames).not.toContain("old-relay-b5");
+        expect(statusNames).toContain("new-relay-b5");
+      } finally {
+        manager.invalidateAddOn.mockReset();
+        devtoolsMod.releaseTargetsByBackend.mockReset();
+        manager.config.browsers = originalBrowsers;
+        forget.mockRestore();
+        remove.mockRestore();
+      }
+    });
+
     it("hot-applies recreate-apply keys — no restart required", async () => {
       const res = await fetch(`${MCP_BASE}/console/config`, {
         method: "PUT",
