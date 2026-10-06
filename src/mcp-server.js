@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
-import { DEFAULT_MAX_CHARS } from "./config.js";
+import { DEFAULT_MAX_CHARS, parseApiKeys } from "./config.js";
 import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowserPrompt } from "./browser.js";
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl } from "./cdp-share.js";
@@ -679,8 +679,12 @@ async function getConsoleApiKeysPayload(manager) {
   };
 }
 
-function syncMcpApiKeys(manager) {
-  const keys = initializeMcpApiKeys(Array.isArray(manager.config.mcpApiKeys) ? manager.config.mcpApiKeys : []);
+export function syncMcpApiKeys(manager) {
+  // K1: the api_keys table is the single live authority for MCP keys. The
+  // environment seed (MCP_API_KEYS) is consumed exactly once, on the first
+  // initializeMcpApiKeys pass; afterward the DB rows are mirrored into
+  // manager.config so live auth and a post-restart boot can never disagree.
+  const keys = initializeMcpApiKeys(parseApiKeys(process.env.MCP_API_KEYS));
   manager.config.mcpApiKeys = keys.map((key) => key.secret);
 }
 

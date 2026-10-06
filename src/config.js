@@ -461,7 +461,11 @@ export async function loadConfig() {
     mcpApiHost: process.env.MCP_API_HOST || "http://localhost",
     enableHttpHealth: parseBoolean(process.env.ENABLE_HTTP_HEALTH, false),
     enableHttpMcp: parseBoolean(process.env.ENABLE_HTTP_MCP, true),
-    mcpApiKeys: parseApiKeys(process.env.MCP_API_KEYS),
+    // K1: MCP API keys are NOT part of the env-loaded config. The api_keys
+    // table (SQLite) is the single live authority; MCP_API_KEYS in the
+    // environment is a first-boot seed only, consumed by syncMcpApiKeys via
+    // parseApiKeys(process.env.MCP_API_KEYS) on the very first
+    // initDb/initializeMcpApiKeys pass. The runtime config mirrors the DB.
     mcpAllowUnauthenticated: parseBoolean(process.env.MCP_ALLOW_UNAUTHENTICATED, true),
     enableCdpSharing: parseBoolean(process.env.ENABLE_CDP_SHARING, true),
     mcpPublicUrl: (process.env.MCP_PUBLIC_URL || "").trim() || null,

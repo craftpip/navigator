@@ -172,7 +172,6 @@ const HOT_APPLYERS = {
   ENABLE_VNC: (config, value) => { config.vncEnabled = value; },
   VNC_PORT: (config, value) => { config.vncPort = value; },
   NOVNC_PORT: (config, value) => { config.novncPort = value; },
-  MCP_API_KEYS: (config, value) => { config.mcpApiKeys = value; },
   MCP_ALLOW_UNAUTHENTICATED: (config, value) => { config.mcpAllowUnauthenticated = value; },
   POST_PROCESSOR_MODELS: (config, value) => {
     config.postProcessorModels = parsePostProcessorModels(value) || [];

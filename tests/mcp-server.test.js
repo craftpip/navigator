@@ -559,6 +559,72 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("MCP API key authority (plan 60 K1)", () => {
+    // K1: the api_keys table is the single live authority for MCP keys; the
+    // MCP_API_KEYS value is a first-boot seed only. syncMcpApiKeys mirrors the
+    // DB into the runtime config so live auth and a restart-boot agree, and a
+    // later env edit can never resurrect or alter live keys.
+    let dbApi, syncMcpApiKeys, tmpDir;
+
+    beforeAll(async () => {
+      dbApi = await import("../src/db.js");
+      ({ syncMcpApiKeys } = await import("../src/mcp-server.js"));
+    });
+
+    afterAll(async () => {
+      // Restore the shared bootstrap DB so later suites keep working.
+      dbApi.initDb();
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "k1-authority-"));
+      dbApi.closeDb();
+      dbApi.initDb(tmpDir);
+    });
+
+    afterEach(() => {
+      dbApi.closeDb();
+      delete process.env.MCP_API_KEYS;
+    });
+
+    it("imports the env seed once and mirrors those rows into the runtime config", async () => {
+      process.env.MCP_API_KEYS = "seed-a, seed-b, seed-a";
+      const manager = { config: {} };
+      syncMcpApiKeys(manager);
+      expect([...manager.config.mcpApiKeys].sort()).toEqual(["seed-a", "seed-b"]);
+      expect(dbApi.listMcpApiKeys().map((key) => key.secret).sort()).toEqual(["seed-a", "seed-b"]);
+    });
+
+    it("a later env edit cannot change live keys — the DB wins after first boot", async () => {
+      process.env.MCP_API_KEYS = "original-only";
+      const manager = { config: {} };
+      syncMcpApiKeys(manager);
+      expect(manager.config.mcpApiKeys).toEqual(["original-only"]);
+
+      const created = dbApi.createMcpApiKey({ name: "console key", secret: "nvg_console_added" });
+      syncMcpApiKeys(manager);
+      expect([...manager.config.mcpApiKeys].sort()).toEqual(["nvg_console_added", "original-only"]);
+
+      process.env.MCP_API_KEYS = "later-env-edit";
+      syncMcpApiKeys(manager);
+      expect([...manager.config.mcpApiKeys].sort()).toEqual(["nvg_console_added", "original-only"]);
+      expect(dbApi.listMcpApiKeys().some((key) => key.secret === "later-env-edit")).toBe(false);
+      dbApi.revokeMcpApiKey(created.id);
+    });
+
+    it("revoke drops the key from the runtime mirror", async () => {
+      process.env.MCP_API_KEYS = "revoke-me";
+      const manager = { config: {} };
+      syncMcpApiKeys(manager);
+      const row = dbApi.createMcpApiKey({ name: "temp", secret: "nvg_tmp_key" });
+      syncMcpApiKeys(manager);
+      expect(manager.config.mcpApiKeys).toContain("nvg_tmp_key");
+      dbApi.revokeMcpApiKey(row.id);
+      syncMcpApiKeys(manager);
+      expect(manager.config.mcpApiKeys).toEqual(["revoke-me"]);
+    });
+  });
+
   describe("PUT /console/config — config manager", () => {
     let envDir;
     let envFile;

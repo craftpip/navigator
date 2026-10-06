@@ -182,13 +182,13 @@ describe("loadConfig (parse engine + browser behavior)", () => {
     expect(config.searchRouteWarmupEngines).toEqual(["brave", "duckduckgo_api", "duckduckgo"]);
   });
 
-  it("parses MCP API key settings", async () => {
+  it("parses MCP allow-unauthenticated but leaves MCP API keys to the DB (plan 60 K1)", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");
     vi.stubEnv("MCP_API_KEYS", "first, second,first");
     vi.stubEnv("MCP_ALLOW_UNAUTHENTICATED", "0");
     const { loadConfig } = await import("../src/config.js");
     const config = await loadConfig();
-    expect(config.mcpApiKeys).toEqual(["first", "second"]);
+    expect(config.mcpApiKeys).toBeUndefined();
     expect(config.mcpAllowUnauthenticated).toBe(false);
   });
 
