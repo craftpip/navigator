@@ -684,6 +684,105 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("CDP pipe live re-authorization (plan 60 K3)", () => {
+    // K3: the /cdp gate runs once at upgrade; a revoked key, a narrowed
+    // allowed_browsers, or a removed browser must close established pipes, not
+    // let them forward forever. recheckCdpPipes re-runs the gate's browser +
+    // key + access checks against the live DB/config for every registered pipe.
+    let dbApi, cdpShare, tmpDir, manager;
+
+    beforeAll(async () => {
+      dbApi = await import("../src/db.js");
+      cdpShare = await import("../src/cdp-share.js");
+    });
+
+    afterAll(async () => {
+      dbApi.initDb();
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "k3-pipe-"));
+      dbApi.closeDb();
+      dbApi.initDb(tmpDir);
+      manager = {
+        config: {
+          browsers: [{ name: "chromium", type: "inbuilt", role: ["default"], addOn: false }],
+          mcpApiKeys: [],
+        },
+        _effectiveAddOns: () => [],
+      };
+    });
+
+    function fakeWs(open = true) {
+      const ws = {
+        readyState: open ? 1 : 3,
+        close: vi.fn(),
+        once: vi.fn(),
+      };
+      return ws;
+    }
+
+    it("keeps a pipe whose key, browser, and access are all still valid", async () => {
+      const key = "nvg_k3_alive";
+      const created = dbApi.createMcpApiKey({ name: "k3 alive", secret: key, allowedBrowsers: ["chromium"] });
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs();
+      cdpShare.registerCdpPipe(ws, key, "chromium");
+
+      expect(cdpShare.recheckCdpPipes(manager)).toBe(1);
+      expect(ws.close).not.toHaveBeenCalled();
+      dbApi.revokeMcpApiKey(created.id);
+    });
+
+    it("closes a pipe when the key is revoked", async () => {
+      const key = "nvg_k3_revoked";
+      const created = dbApi.createMcpApiKey({ name: "k3 revoked", secret: key, allowedBrowsers: ["chromium"] });
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs();
+      cdpShare.registerCdpPipe(ws, key, "chromium");
+
+      dbApi.revokeMcpApiKey(created.id);
+      manager.config.mcpApiKeys = []; // syncMcpApiKeys mirror drops the secret
+      expect(cdpShare.recheckCdpPipes(manager)).toBe(0);
+      expect(ws.close).toHaveBeenCalledWith(4003, expect.stringContaining("revoked"));
+    });
+
+    it("closes a pipe when allowed_browsers stops granting that browser", async () => {
+      const key = "nvg_k3_narrowed";
+      const created = dbApi.createMcpApiKey({ name: "k3 narrowed", secret: key, allowedBrowsers: ["chromium"] });
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs();
+      cdpShare.registerCdpPipe(ws, key, "chromium");
+
+      dbApi.setMcpApiKeyBrowsers(created.id, []);
+      expect(cdpShare.recheckCdpPipes(manager)).toBe(0);
+      expect(ws.close).toHaveBeenCalledWith(4003, expect.stringContaining("revoked"));
+    });
+
+    it("closes a pipe when the browser no longer resolves", async () => {
+      const key = "nvg_k3_gonebrowser";
+      const created = dbApi.createMcpApiKey({ name: "k3 gone", secret: key, allowedBrowsers: ["chromium"] });
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs();
+      cdpShare.registerCdpPipe(ws, key, "chromium");
+
+      manager.config.browsers = [];
+      expect(cdpShare.recheckCdpPipes(manager)).toBe(0);
+      expect(ws.close).toHaveBeenCalledWith(4003, expect.stringContaining("no longer exists"));
+    });
+
+    it("drops dead sockets from the registry without closing twice", async () => {
+      const key = "nvg_k3_dead";
+      dbApi.createMcpApiKey({ name: "k3 dead", secret: key, allowedBrowsers: ["chromium"] });
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs(false); // readyState !== OPEN
+      cdpShare.registerCdpPipe(ws, key, "chromium");
+
+      expect(cdpShare.recheckCdpPipes(manager)).toBe(0);
+      expect(ws.close).not.toHaveBeenCalled();
+    });
+  });
+
   describe("PUT /console/config — config manager", () => {
     let envDir;
     let envFile;

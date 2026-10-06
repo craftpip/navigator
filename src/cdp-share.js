@@ -29,6 +29,8 @@ export const CDP_PATH_RE = /^\/cdp\/([^/]+)$/;
 const BACKEND_DIAL_TIMEOUT_MS = 10_000;
 // Plan 55 §8.3 — cap concurrent fresh-Chromium /cdp sessions.
 const SHARED_CHROMIUM_CAP = 3;
+// Plan 60 K3 — how often live /cdp pipes are re-authorised against the DB.
+const CDP_PIPE_RECHECK_MS = 15_000;
 
 /** Mirror of parseAllowedTools (mcp-server.js) for the allowed_browsers column. */
 export function parseAllowedBrowsers(value) {
@@ -122,6 +124,71 @@ export function checkBrowserAccess(record, browserName) {
   const allowed = parseAllowedBrowsers(record.allowed_browsers);
   if (allowed === null) return true;
   return allowed.includes(browserName);
+}
+
+// K3: active /cdp pipes, keyed by the external ws. The upgrade gate runs
+// once; this registry lets recheckCdpPipes() re-run steps 4–5 against the
+// live DB/config so a revoked key, a narrowed allowed_browsers, or a removed
+// browser tears an established pipe down instead of letting it forward
+// forever.
+const activeCdpPipes = new Map(); // ws -> { presentedKey, browserName }
+
+/** Fake req shaped like a real upgrade request, for audit calls without one. */
+const EMPTY_REQ = { headers: {}, socket: {} };
+
+/**
+ * Track an established /cdp pipe so it can be re-authorised later (plan 60
+ * K3). Registers with the externally-facing ws and forgets it on close.
+ */
+export function registerCdpPipe(ws, presentedKey, browserName) {
+  activeCdpPipes.set(ws, { presentedKey, browserName });
+  ws.once("close", () => activeCdpPipes.delete(ws));
+}
+
+/**
+ * Re-run the CDP gate on every live pipe (plan 60 K3). A pipe is closed when
+ * its key is no longer in the live mirror (revoked), its browser no longer
+ * resolves (removed/renamed), or its DB row's allowed_browsers no longer
+ * grants the browser. Mirrors authorizeCdpKey's full-access rule: a known
+ * secret with no DB row (in-boot console key) keeps its pipe.
+ */
+export function recheckCdpPipes(manager) {
+  const config = manager.config;
+  for (const [ws, pipe] of [...activeCdpPipes.entries()]) {
+    try {
+      if (ws.readyState !== WebSocket.OPEN) {
+        activeCdpPipes.delete(ws);
+        continue;
+      }
+      let denied = null;
+      const keys = Array.isArray(config.mcpApiKeys) ? config.mcpApiKeys : [];
+      const key = matchKey(pipe.presentedKey, keys);
+      if (!key) {
+        denied = "API key revoked";
+      } else {
+        const backend = resolveCdpBrowser(manager, pipe.browserName);
+        if (!backend) {
+          denied = `browser "${pipe.browserName}" no longer exists`;
+        } else {
+          let record = null;
+          try {
+            record = listMcpApiKeys().find((entry) => entry.secret === key) || null;
+          } catch {
+            record = null;
+          }
+          if (record && !checkBrowserAccess(record, backend.name)) {
+            denied = `access to "${backend.name}" revoked`;
+          }
+        }
+      }
+      if (denied) {
+        auditCdpConnection({ req: EMPTY_REQ, record: null, browserName: pipe.browserName, ok: false, error: `pipe closed: ${denied}` });
+        try { ws.close(4003, denied); } catch {}
+        activeCdpPipes.delete(ws);
+      }
+    } catch { /* keep the registry sweep alive */ }
+  }
+  return activeCdpPipes.size;
 }
 
 /**
@@ -339,6 +406,16 @@ export function initCdpSharing({ server, manager, logToolError }) {
   }
   const wss = new WebSocketServer({ noServer: true });
 
+  // Plan 60 K3: re-authorise established pipes periodically so a revoked
+  // key / narrowed allowed_browsers / removed browser closes them (a client
+  // whose key dies mid-pipe should not keep forwarding forever).
+  const recheckTimer = setInterval(() => {
+    try {
+      recheckCdpPipes(manager);
+    } catch {}
+  }, CDP_PIPE_RECHECK_MS);
+  recheckTimer.unref();
+
   const failAuth = (req, socket, head, browserName, status, message) => {
     void head;
     writeUpgradeError(socket, status, message);
@@ -397,6 +474,7 @@ export function initCdpSharing({ server, manager, logToolError }) {
           safeHandleUpgrade(wss, req, socket, head, (ws) => {
             recordCdpConnection();
             auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
+            registerCdpPipe(ws, auth.key, backend.name);
             relayServer.attachGatewayClient(backend.name, ws);
           });
           return;
@@ -426,6 +504,7 @@ export function initCdpSharing({ server, manager, logToolError }) {
           safeHandleUpgrade(wss, req, socket, head, (ws) => {
             recordCdpConnection();
             auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
+            registerCdpPipe(ws, auth.key, backend.name);
             pipeSockets(ws, upstream, backend.name, () => manager.closeSharedBrowser(shared));
           }, () => {
             try { upstream.close(); } catch {}
@@ -446,6 +525,7 @@ export function initCdpSharing({ server, manager, logToolError }) {
         safeHandleUpgrade(wss, req, socket, head, (ws) => {
           recordCdpConnection();
           auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
+          registerCdpPipe(ws, auth.key, backend.name);
           pipeSockets(ws, upstream, backend.name, null);
         }, () => {
           try { upstream.close(); } catch {}

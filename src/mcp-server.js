@@ -16,7 +16,7 @@ import {
 import { DEFAULT_MAX_CHARS, parseApiKeys } from "./config.js";
 import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowserPrompt } from "./browser.js";
 import { relayServer } from "./relay-server.js";
-import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl } from "./cdp-share.js";
+import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
@@ -746,6 +746,8 @@ async function handleConsoleApiKeys(manager, body) {
       return { ok: false, error: "Unknown API key" };
     }
     syncMcpApiKeys(manager);
+    // K3: a revoked key must not keep its live /cdp pipes forwarding.
+    try { recheckCdpPipes(manager); } catch {}
     return getConsoleApiKeysPayload(manager);
   }
 
@@ -783,6 +785,8 @@ async function handleConsoleApiKeys(manager, body) {
     if (!Number.isInteger(id) || !setMcpApiKeyBrowsers(id, allowedBrowsers)) {
       return { ok: false, error: "Unknown API key" };
     }
+    // K3: a narrowed allowed_browsers must close pipes the key no longer owns.
+    try { recheckCdpPipes(manager); } catch {}
     return getConsoleApiKeysPayload(manager);
   }
 
