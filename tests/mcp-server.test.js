@@ -783,6 +783,66 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("CDP pipe teardown on BROWSERS removal (plan 60 K4/B9-deep)", () => {
+    // K4: removing a browser through the config funnel must close the external
+    // /cdp/<name> proxy pipe immediately — reconcileBrowserChanges runs
+    // recheckCdpPipes after every BROWSERS mutation, so a pipe does not linger
+    // until the 15s sweep. (Add-on state + devtools handles were covered by
+    // B3/B8/B9; this is the raw upstream proxy registry half.)
+    let dbApi, cdpShare, browserMod;
+
+    beforeAll(async () => {
+      dbApi = await import("../src/db.js");
+      cdpShare = await import("../src/cdp-share.js");
+      browserMod = await import("../src/browser.js");
+    });
+
+    afterAll(async () => {
+      dbApi.initDb();
+    });
+
+    beforeEach(async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "k4-pipe-"));
+      dbApi.closeDb();
+      dbApi.initDb(tmpDir);
+    });
+
+    function fakeWs(open = true) {
+      return { readyState: open ? 1 : 3, close: vi.fn(), once: vi.fn() };
+    }
+
+    it("closes an established /cdp pipe when its browser is removed via PUT /console/config", async () => {
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const removedName = "k4-removed-cdp";
+      const key = "nvg_k4_gone";
+      dbApi.createMcpApiKey({ name: "k4 gone", secret: key, allowedBrowsers: [removedName] });
+      const removed = { name: removedName, role: ["default"], type: "cdp", cdpUrl: "http://removed:9222", addOn: true };
+      manager.config.browsers = [...originalBrowsers, removed];
+      manager.config.mcpApiKeys = [key];
+      const ws = fakeWs();
+      cdpShare.registerCdpPipe(ws, key, removedName);
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify(originalBrowsers) } }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        // reconcileBrowserChanges ran the pipe recheck: the removed browser no
+        // longer resolves, so the external pipe is closed with a 4003 naming
+        // the missing browser (not left to the 15s sweep).
+        expect(ws.close).toHaveBeenCalledWith(4003, expect.stringContaining("no longer exists"));
+      } finally {
+        manager.config.browsers = originalBrowsers;
+        delete manager.config.mcpApiKeys;
+      }
+    });
+  });
+
   describe("PUT /console/config — config manager", () => {
     let envDir;
     let envFile;

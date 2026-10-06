@@ -892,6 +892,16 @@ function reconcileBrowserChanges(manager, previousBrowsers, nextBrowsers) {
   // needs refreshing.
   relayServer.updateConfiguredBrowsers?.(nextBrowsers);
 
+  // Plan 60 K4/B9-deep: a removed, renamed, or identity-changed browser must
+  // close its externally-attached /cdp/<name> proxy pipes, not just Navigator's
+  // own add-on state and devtools targets. hotApplyConfig already updated
+  // manager.config.browsers, so resolveCdpBrowser now reports the name gone
+  // and recheckCdpPipes tears the pipe down immediately (the 15s sweep would
+  // only lag it).
+  try {
+    recheckCdpPipes(manager);
+  } catch {}
+
   return { forgottenRelayBrowsers, invalidated };
 }
 
