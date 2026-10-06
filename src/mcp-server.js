@@ -878,6 +878,12 @@ function reconcileBrowserChanges(manager, previousBrowsers, nextBrowsers) {
     }
   }
 
+  // Plan 60 B6: keep the relay hello-admission set in sync with the applied
+  // config — every BROWSERS mutation path (console save, external edit,
+  // reset, revert) funnels through here, so this is the one place the gate
+  // needs refreshing.
+  relayServer.updateConfiguredBrowsers?.(nextBrowsers);
+
   return { forgottenRelayBrowsers, invalidated };
 }
 

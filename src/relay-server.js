@@ -29,7 +29,7 @@
 
 import { WebSocketServer } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
-import { deleteKnownRelayBrowser, deleteRelayBrowserMeta, deleteRelaySession, initDb, loadKnownRelayBrowsers, loadRelayBrowserMetas, loadRelaySessions, saveKnownRelayBrowser, saveRelayBrowserMeta, saveRelaySession } from "./db.js";
+import { deleteKnownRelayBrowser, deleteRelayBrowserMeta, deleteRelaySession, initDb, loadKnownRelayBrowsers, loadRelayBrowserMetas, loadRelaySessions, loadRelayTombstones, saveKnownRelayBrowser, saveRelayBrowserMeta, saveRelaySession, saveRelayTombstone } from "./db.js";
 import { PLUGIN_PLATFORMS } from "./config.js";
 
 const PIN_EXPIRY_MS = 60_000;
@@ -89,6 +89,8 @@ export class RelayServer {
     this._tokenToName = new Map(); // sessionToken -> name
     this._knownBrowsers = new Map(); // name -> { plugin, firstSeenAt } — durable "has dialed in" registry, survives forget()
     this._meta = new Map(); // name -> { description, updatedAt } — durable user-authored LLM hint, survives disconnect AND restart
+    this._tombstones = new Set(); // names explicitly removed (remove()) — blocks dynamic hello re-discovery (plan 60 B6)
+    this._configuredRelayNames = new Set(); // current BROWSERS navigator-cdp names — the live authorization set for hellos
     this._wss = null;
     this._server = null;
     this._host = "127.0.0.1";
@@ -125,12 +127,8 @@ export class RelayServer {
     // it presents as recoverable unmanaged state (known, unpaired) until the
     // user explicitly re-PINs (plan 60 §5 restart row). When no browsers
     // config is supplied (standalone relay tests), legacy restore-all applies.
-    const relayNameAllowlist = new Set(
-      (configuredBrowsers || [])
-        .filter((b) => b && b.type === "navigator-cdp")
-        .map((b) => b.name)
-    );
-    const restoreAllowed = configuredBrowsers ? (name) => relayNameAllowlist.has(name) : () => true;
+    this.updateConfiguredBrowsers(configuredBrowsers);
+    const restoreAllowed = configuredBrowsers ? (name) => this._configuredRelayNames.has(name) : () => true;
     try {
       const sessions = loadRelaySessions();
       let restored = 0;
@@ -170,6 +168,17 @@ export class RelayServer {
       if (metas.length) log(`restored ${metas.length} relay browser description(s)`);
     } catch (e) {
       log(`restore relay browser descriptions skipped: ${String(e && e.message)}`);
+    }
+
+    // Plan 60 B6: removal tombstones are durable — a restart must keep
+    // rejecting hellos for names the user explicitly removed, otherwise the
+    // whole protection evaporates on the first container restart.
+    try {
+      const tombs = loadRelayTombstones();
+      for (const t of tombs) this._tombstones.add(t.name);
+      if (tombs.length) log(`restored ${tombs.length} relay removal tombstone(s)`);
+    } catch (e) {
+      log(`restore relay tombstones skipped: ${String(e && e.message)}`);
     }
 
     server.on("upgrade", (req, socket, head) => {
@@ -283,7 +292,42 @@ export class RelayServer {
     try {
       deleteRelayBrowserMeta(trimmed);
     } catch {}
+    // Plan 60 B6: explicit removal also tombstones the name. forget() never
+    // does — a forgotten browser keeps its row and its re-PIN path; remove()
+    // means "this browser should not come back on its own", so a later
+    // unconfigured hello is rejected instead of recreating a dynamic row.
+    // Re-adding the name to BROWSERS re-authorizes it (the gate checks the
+    // configured set first).
+    this._tombstones.add(trimmed);
+    try {
+      saveRelayTombstone(trimmed);
+    } catch (e) {
+      log(`persist tombstone for "${trimmed}" failed`, String(e && e.message));
+    }
     return found || hadKnown;
+  }
+
+  /**
+   * Refresh the live authorization set used by the hello admission gate
+   * (plan 60 B6). Called from init() and from BROWSERS reconciliation, so
+   * console saves, external edits, reset, and revert all keep the gate in
+   * sync with the canonical config.
+   */
+  updateConfiguredBrowsers(browsers) {
+    this._configuredRelayNames = new Set(
+      (browsers || []).filter((b) => b && b.type === "navigator-cdp").map((b) => b.name)
+    );
+  }
+
+  /**
+   * Hello admission policy (plan 60 B6): dynamic discovery is valid only for
+   * names the current config authorizes as navigator-cdp, or names the user
+   * has never explicitly removed. remove() writes the tombstone; forget()
+   * deliberately does not.
+   */
+  _discoverable(name) {
+    if (this._configuredRelayNames.has(name)) return true;
+    return !this._tombstones.has(name);
   }
 
   /** Durable "this browser has dialed in" marker — feeds getStatusEntries so a
@@ -581,6 +625,15 @@ export class RelayServer {
           return;
         }
         clearTimeout(helloTimer);
+        // Plan 60 B6 — hello admission gate: a name the user explicitly
+        // removed is rejected BEFORE any entry/known-row is created, so it
+        // cannot re-materialize as a dynamic browser. Close 4005 is the
+        // extension-side "removed" signal (4004 remains "forgotten").
+        if (!this._discoverable(name)) {
+          log(`extension "${name}" rejected — name was removed from navigator (tombstone)`);
+          fail(4005, "removed by navigator");
+          return;
+        }
         entry = this._ensureEntry(name);
         entry.ws = ws;
         if (PLUGIN_PLATFORMS.has(msg.platform)) entry.platform = msg.platform;

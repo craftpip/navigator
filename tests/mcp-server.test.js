@@ -882,6 +882,30 @@ describe("mcp-server HTTP endpoints", () => {
       }
     });
 
+    it("keeps the relay hello-admission set in sync with BROWSERS changes (plan 60 B6)", async () => {
+      const { relayServer } = await import("../src/relay-server.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalBrowsers = manager.config.browsers;
+      const upd = vi.spyOn(relayServer, "updateConfiguredBrowsers");
+      const newRelay = { name: "new-relay-b6", role: ["devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true };
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { BROWSERS: JSON.stringify([...originalBrowsers, newRelay]) } }),
+        });
+        expect((await res.json()).ok).toBe(true);
+        // The admission gate follows the applied config, not the saved one.
+        expect(upd).toHaveBeenCalledWith(
+          expect.arrayContaining([expect.objectContaining({ name: "new-relay-b6" })])
+        );
+      } finally {
+        upd.mockRestore();
+        manager.config.browsers = originalBrowsers;
+      }
+    });
+
     it("hot-applies recreate-apply keys — no restart required", async () => {
       const res = await fetch(`${MCP_BASE}/console/config`, {
         method: "PUT",

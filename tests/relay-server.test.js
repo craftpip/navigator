@@ -27,9 +27,10 @@ async function ephemeralRelay() {
   // navigator has. Without this, rows written by an earlier test (known
   // browsers, sessions, descriptions) are hydrated into this relay and leak
   // into its status entries.
-  const { deleteKnownRelayBrowser, deleteRelaySession, loadKnownRelayBrowsers, loadRelaySessions } = await import("../src/db.js");
+  const { deleteKnownRelayBrowser, deleteRelaySession, deleteRelayTombstone, loadKnownRelayBrowsers, loadRelaySessions, loadRelayTombstones } = await import("../src/db.js");
   for (const k of loadKnownRelayBrowsers()) deleteKnownRelayBrowser(k.name);
   for (const s of loadRelaySessions()) deleteRelaySession(s.name);
+  for (const t of loadRelayTombstones()) deleteRelayTombstone(t.name);
 
   const server = http.createServer(() => {});
   server.on("error", () => {});
@@ -279,6 +280,57 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(relay.forget("forget-me")).toBe(true);
     const closeCode = await nextClose(ws);
     expect(closeCode).toBe(4004);
+  });
+
+  it("remove() tombstones the name; a later hello is rejected 4005 — no dynamic resurrection (plan 60 B6)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { ws } = await pairExtension(relay, wsBase, "removed-b6");
+    expect(relay.remove("removed-b6")).toBe(true);
+    const alertCode = await nextClose(ws); // removal still alerts the live socket via forget's 4004
+    expect(alertCode).toBe(4004);
+
+    // A fresh hello for the removed name must NOT recreate an entry or known row.
+    const re = await open(`${wsBase}/relay`);
+    re.send(JSON.stringify({ type: "navigator-hello", browserName: "removed-b6", platform: "chrome" }));
+    const rejectCode = await nextClose(re);
+    expect(rejectCode).toBe(4005);
+    expect(relay._entries.has("removed-b6")).toBe(false);
+    const { loadRelayTombstones } = await import("../src/db.js");
+    expect(loadRelayTombstones().map((t) => t.name)).toContain("removed-b6");
+  });
+
+  it("a restarted relay rehydrates tombstones and keeps rejecting the removed name (plan 60 B6)", async () => {
+    const { relay } = await ephemeralRelay();
+    relay.remove("gone-b6"); // never paired — the removal stands on its own
+
+    // Second instance over the SAME persistence slate (no wipe this time):
+    // init() must hydrate the tombstone so the protection survives restarts.
+    const server2 = http.createServer(() => {});
+    server2.on("error", () => {});
+    server2.unref?.();
+    const port2 = await listen(server2);
+    const relay2 = new RelayServer();
+    relay2.init({ server: server2, host: "127.0.0.1", port: port2 });
+    const ws2 = await open(`ws://127.0.0.1:${port2}/relay`);
+    ws2.send(JSON.stringify({ type: "navigator-hello", browserName: "gone-b6", platform: "chrome" }));
+    const code2 = await nextClose(ws2);
+    expect(code2).toBe(4005);
+    relay2._entries.clear();
+    await new Promise((res) => {
+      const g = setTimeout(res, 800);
+      server2.close(() => { clearTimeout(g); res(); });
+    });
+  });
+
+  it("re-adding the name to BROWSERS re-authorizes it — configured navigator-cdp bypasses the tombstone (plan 60 B6)", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    relay.remove("readded-b6");
+    expect(relay._tombstones.has("readded-b6")).toBe(true);
+    relay.updateConfiguredBrowsers([{ name: "readded-b6", type: "navigator-cdp" }]);
+    // pairExtension's hello → pin_required flow proves the gate let it through.
+    const { token } = await pairExtension(relay, wsBase, "readded-b6");
+    expect(typeof token).toBe("string");
+    expect(relay._entries.get("readded-b6").status).toBe("connected");
   });
 });
 

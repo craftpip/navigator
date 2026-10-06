@@ -523,6 +523,31 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
     /forgotten/i.test(String(env.State.getLastError())));
 }
 
+// 5f. Server-initiated remove (close code 4005) is the tombstone case: the
+//     name was removed from navigator and re-pairing stays rejected until it is
+//     re-added in the console. Same handling as 4004, but the error says so
+//     (plan 60 B6).
+{
+  const [server, client, env] = await startRelay();
+  env.Config.saveSessionToken('tok-removed', () => {});
+  env.State.setSessionToken('tok-removed');
+  env.State.setConnected(true);
+  await sleep(20);
+
+  let reconnects = 0;
+  const originalConnect = env.ConnectionManager.connect;
+  env.ConnectionManager.connect = function() { reconnects++; return originalConnect.apply(this, arguments); };
+
+  client.onclose({ code: 4005, reason: 'removed by navigator' });
+  await sleep(40);
+
+  test('5f. Removed-browser (4005) clears token, no auto-reconnect, removed error', () =>
+    env.State.getSessionToken() === null &&
+    !env.State.isConnected() &&
+    reconnects === 0 &&
+    /removed/i.test(String(env.State.getLastError())));
+}
+
 // 6. Browser.getVersion is Firefox-branded LOCAL
 {
   const env = buildEnv();

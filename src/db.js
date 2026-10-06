@@ -151,6 +151,10 @@ const MIGRATIONS = [
      updated_at INTEGER NOT NULL
    );`,
   `ALTER TABLE api_keys ADD COLUMN allowed_mcp_browsers TEXT;`,
+  `CREATE TABLE IF NOT EXISTS relay_tombstones (
+     name TEXT PRIMARY KEY,
+     removed_at INTEGER NOT NULL
+   );`,
 ];
 
 function applyMigration(db, migration) {
@@ -268,6 +272,28 @@ export function loadRelayBrowserMetas() {
 export function deleteRelayBrowserMeta(name) {
   if (!db) return false;
   return getDb().prepare("DELETE FROM relay_browser_meta WHERE name = ?").run(name).changes > 0;
+}
+
+// Explicit-removal tombstone (plan 60 B6): a browser name the user removed
+// through Manage or a BROWSERS config removal must not silently reappear via
+// dynamic hello-discovery. Re-adding the name to BROWSERS re-authorizes it —
+// the relay gate checks configured names first — so the row never needs a
+// production delete; only test fixtures clear it.
+export function saveRelayTombstone(name) {
+  if (!db) return;
+  getDb()
+    .prepare("INSERT OR REPLACE INTO relay_tombstones (name, removed_at) VALUES (?, ?)")
+    .run(name, Date.now());
+}
+
+export function loadRelayTombstones() {
+  if (!db) return [];
+  return getDb().prepare("SELECT name, removed_at FROM relay_tombstones").all();
+}
+
+export function deleteRelayTombstone(name) {
+  if (!db) return false;
+  return getDb().prepare("DELETE FROM relay_tombstones WHERE name = ?").run(name).changes > 0;
 }
 
 export function incrementUsageTotal(key, amount = 1) {

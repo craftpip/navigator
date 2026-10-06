@@ -176,7 +176,7 @@ var ConnectionManager = (function() {
               State.setWs(null);
               State.clearHeartbeatTimer();
               State.setConnecting(false);
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005) {
                 Logger.info('[Connection] Falling back to next candidate');
                 State.setConnecting(true);
                 tryNext();
@@ -278,11 +278,13 @@ var ConnectionManager = (function() {
       State.setReconnectTimer(t1);
       return;
     }
-    if (event.code === 4004) {
-      // The server forgot this browser — drop our stored token and stop
-      // without an auto-reconnect loop; the user connects explicitly to
-      // re-pair (plan 60 B2).
-      Logger.warn('[Connection] This browser was forgotten by the server');
+    if (event.code === 4004 || event.code === 4005) {
+      // 4004 = forgotten (plan 60 B2); 4005 = name removed from navigator
+      // and tombstoned (plan 60 B6) — re-pairing stays rejected until the
+      // name is re-added in the console. Drop our stored token and stop
+      // without an auto-reconnect loop either way.
+      const removed = event.code === 4005;
+      Logger.warn(removed ? '[Connection] This browser name was removed on the server' : '[Connection] This browser was forgotten by the server');
       State.setConnecting(false);
       State.setConnected(false);
       State.setPairing(false);
@@ -290,7 +292,9 @@ var ConnectionManager = (function() {
       State.setPinError(null);
       Config.clearSessionToken(function() {
         State.setSessionToken(null);
-        State.setLastError('This browser was forgotten by navigator — connect again to re-pair');
+        State.setLastError(removed
+          ? 'This browser was removed from navigator — add it back in Manage to pair again'
+          : 'This browser was forgotten by navigator — connect again to re-pair');
       });
       ClearPending();
       notify({ type: 'connection-status-changed' });

@@ -498,6 +498,32 @@ let env0;
     /forgotten/i.test(String(after.lastError)));
 }
 
+// 14c. Server-initiated remove (close code 4005) is the tombstone case: the
+//      name was removed from navigator and re-pairing stays rejected until it
+//      is re-added in the console. The extension must drop its stored token and
+//      stop, with no auto-reconnect loop — same handling as 4004, but the error
+//      tells the user re-pairing alone will not work (plan 60 B6).
+{
+  const [server, client, env] = await startRelay();
+  env.Config.saveSessionToken('tok-removed', () => {});
+  env.State.setSessionToken('tok-removed');
+  env.State.setConnected(true);
+  await sleep(20);
+
+  let reconnects = 0;
+  const originalConnect = env.ConnectionManager.connect;
+  env.ConnectionManager.connect = function() { reconnects++; return originalConnect.apply(this, arguments); };
+
+  client.onclose({ code: 4005, reason: 'removed by navigator' });
+  await sleep(40);
+
+  test('14c. Removed-browser (4005) clears token, no auto-reconnect, removed error', () =>
+    env.State.getSessionToken() === null &&
+    !env.State.isConnected() &&
+    reconnects === 0 &&
+    /removed/i.test(String(env.State.getLastError())));
+}
+
 // 15. Target.activateTarget / Target.closeTarget resolve CDP target ids to
 //     real tab ids (hex chrome.debugger ids, not numeric tab ids) — the old
 //     parseInt(targetId) bug rounded hex ids into a random tab.

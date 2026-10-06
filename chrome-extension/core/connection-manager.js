@@ -205,7 +205,7 @@ var ConnectionManager = (function() {
               State.clearHeartbeatTimer();
               State.setConnected(false);
               // If we never opened, try next candidate before giving up
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004) {
+              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005) {
                 Logger.info('[Connection] Falling back to next candidate');
                 tryNext();
                 return;
@@ -316,13 +316,16 @@ var ConnectionManager = (function() {
       scheduleReconnect(300);
       return;
     }
-    if (event.code === 4004) {
-      // The server forgot this browser (removed from BROWSERS or forgotten
-      // through Manage). The pairing is gone server-side; drop our stored
-      // token so we do not keep reconnecting with stale material, and stop
-      // without an auto-reconnect loop. The user must connect explicitly to
-      // re-pair (plan 60 B2).
-      Logger.warn('[Connection] This browser was forgotten by the server');
+    if (event.code === 4004 || event.code === 4005) {
+      // 4004 = the server forgot this browser (removed from BROWSERS or
+      // forgotten through Manage); 4005 = the name was removed from navigator
+      // and is tombstoned server-side (plan 60 B6) — a plain re-pair would be
+      // rejected again until the name is re-added in the console. Both mean
+      // the pairing is gone server-side: drop our stored token so we do not
+      // keep reconnecting with stale material, and stop without an
+      // auto-reconnect loop (plan 60 B2/B6).
+      const removed = event.code === 4005;
+      Logger.warn(removed ? '[Connection] This browser name was removed on the server' : '[Connection] This browser was forgotten by the server');
       State.setConnecting(false);
       State.setConnected(false);
       Config.clearSessionToken(function() {
@@ -331,7 +334,9 @@ var ConnectionManager = (function() {
       State.setPairing(false);
       State.setPinRequired(false);
       State.setPinError(null);
-      State.setLastError('This browser was forgotten by navigator — connect again to re-pair');
+      State.setLastError(removed
+        ? 'This browser was removed from navigator — add it back in Manage to pair again'
+        : 'This browser was forgotten by navigator — connect again to re-pair');
       ClearPending();
       notify({ type: 'connection-status-changed' });
       return;
