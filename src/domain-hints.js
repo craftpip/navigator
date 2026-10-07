@@ -210,7 +210,7 @@ export function validateScript(script) {
   try {
     // Scripts run wrapped as `(async () => { <script> })()` so `return` is legal —
     // validate the wrapped form, not the bare body.
-    new vm.Script(`(async () => { ${script} })()`, { filename: "validate" });
+    return new vm.Script(`(async () => { ${script} })()`, { filename: "validate" });
   } catch (e) {
     errors.push({ field: "script", message: `script syntax error: ${e.message}` });
   }
@@ -1080,7 +1080,7 @@ export function compileScriptSource(script) {
     throw new TypeError("script must be a string");
   }
   try {
-    new vm.Script(`(async () => { ${script} })()`, { filename: "script" });
+    return new vm.Script(`(async () => { ${script} })()`, { filename: "script" });
   } catch (e) {
     const err = new Error(e.message);
     err.cause = e;
