@@ -5058,4 +5058,10 @@ async function shutdown() {
 }
 
 process.on("SIGINT", shutdown);
+
+export function getMcpSessionPermissionResolver(keyId) {
+  return createSessionPermissionResolver(keyId);
+}
+
+
 process.on("SIGTERM", shutdown);
