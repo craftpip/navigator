@@ -1032,25 +1032,26 @@ async function applyConfigUpdates(manager, body) {
     }
     payload.reverted = true;
     payload.backup = backupPath;
-    const browsersEntry = parseEnvFile(await readEnvFile(envPath)).keyToLine.get("BROWSERS");
-    const browsersValue = browsersEntry?.value ?? CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS")?.fallback;
-    const browsersValidation = validateConfigValue(
-      CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS"),
-      browsersValue
-    );
-    if (!browsersValidation.valid) {
-      payload.ok = false;
-      payload.error = `Reverted .env contains an invalid BROWSERS value: ${browsersValidation.error}`;
-      return payload;
+    const revertedEnv = await readEnvFile(envPath);
+    const parsedReverted = parseEnvFile(revertedEnv);
+    for (const [key, line] of parsedReverted.keyToLine) {
+      const entry = CONFIG_SCHEMA.find((item) => item.key === key);
+      if (!entry) continue;
+      const parsed = validateConfigValue(entry, line.value);
+      if (!parsed.valid) continue;
+      if (entry.applies === "hot") {
+        const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, parsed.value) : null;
+        const applied = browsersResult ? browsersResult.applied : hotApplyConfig(manager.config, key, parsed.value);
+        if (applied) {
+          if (browsersResult) {
+            payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
+            payload.invalidatedBrowsers.push(...browsersResult.invalidated);
+          }
+          payload.hotApplied.push(key === "BROWSERS" ? "BROWSERS→reverted" : key);
+        }
+      }
+      process.env[key] = line.value;
     }
-    const appliedBrowsers = applyBrowsersConfig(manager, browsersValidation.value);
-    if (appliedBrowsers.applied) {
-      payload.hotApplied.push("BROWSERS→reverted");
-      payload.forgottenRelayBrowsers.push(...appliedBrowsers.forgottenRelayBrowsers);
-      payload.invalidatedBrowsers.push(...appliedBrowsers.invalidated);
-    }
-    if (browsersEntry) process.env.BROWSERS = browsersEntry.value;
-    else delete process.env.BROWSERS;
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
