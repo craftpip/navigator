@@ -1074,3 +1074,16 @@ export async function mutateManagedHints(hintsPath, mutator) {
   managedWriteQueue = queued.catch(() => {});
   return queued;
 }
+
+export function compileScriptSource(script) {
+  if (typeof script !== "string") {
+    throw new TypeError("script must be a string");
+  }
+  try {
+    new vm.Script(`(async () => { ${script} })()`, { filename: "script" });
+  } catch (e) {
+    const err = new Error(e.message);
+    err.cause = e;
+    throw err;
+  }
+}

@@ -1,3 +1,4 @@
+export { withStageDeadline, SvgStageTimeoutError, SVG_FONT_STAGE_TIMEOUT_MS, SVG_EXTRACT_STAGE_TIMEOUT_MS, SVG_DIMS_STAGE_TIMEOUT_MS } from './deadline.js';
 // src/svg/index.js — barrel for multi-agent ownership. Single import path for consumers.
 // Agents: A=extractor, B=text, C=style, D=builder, E=capture, F=pdf+merge
 

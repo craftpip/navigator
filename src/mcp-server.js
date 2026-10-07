@@ -21,7 +21,7 @@ import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, browserCaptureCropScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
