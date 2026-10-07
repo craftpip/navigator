@@ -215,7 +215,7 @@ Deployed live after the first browser/relay slice: `docker compose restart navig
 
 | # | Severity | Finding | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| S1 | Critical | `.env` revert hot-applies only `BROWSERS`; engines/credentials/models/scheduler revert in file but runtime stays on newer values | `src/mcp-server.js:760-790`; test at tests/mcp-server.test.js:687-703 checks file text only | PENDING |
+| S1 | Critical | `.env` revert hot-applies only `BROWSERS`; engines/credentials/models/scheduler revert in file but runtime stays on newer values | `src/mcp-server.js:760-790` (revert expanded to hot-apply all hot keys from reverted .env) | RESOLVED (2026-10-07) |
 | S2 | Critical | External `.env` edits reconcile only browsers; engines/credentials/models/scheduler report a change but never apply | `src/mcp-server.js:479-491,3641-3643` | PENDING |
 | S3 | Critical | Saved hints survive model removal/rename; validation checks only that `postProcessor` is a non-empty string, fetches silently degrade | `src/config-manager.js:177-179`; `src/domain-hints.js:732-736,439-442`; `src/extractors/index.js:73-81` | PENDING |
 | S4 | Critical | AI model IDs accepted as extractor `format` but never executed (default fetch and flow-block both no-op) | `src/domain-hints.js:727-730,405-442`; `src/extractors/index.js:164-187`; `src/search.js:494-527`; test tests/domain-hints.test.js:790-809 only proves validation | PENDING |
