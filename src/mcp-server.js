@@ -965,7 +965,9 @@ function reconcileBrowserChanges(manager, previousBrowsers, nextBrowsers) {
   // browsers immediately.
   try {
     recheckCdpPipes(manager);
-  try { _pruneStaleKeyBrowsers(manager); } catch (e) { /* best effort */ }
+  } catch {}
+  try {
+    _pruneStaleKeyBrowsers(manager);
   } catch {}
 
   // Plan 60 K5: prune stale browser names from API-key grants (allowed_browsers
