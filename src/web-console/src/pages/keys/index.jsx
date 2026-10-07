@@ -106,26 +106,28 @@ export function Keys() {
         setKind("ok");
       } else {
         let changed = false;
+        const payload = { action: "update", id: modal.id };
         if (trimmed !== modal.name) {
-          await postKeys({ action: "rename", id: modal.id, name: trimmed });
+          payload.name = trimmed;
           changed = true;
         }
         const effective = modal.allowedTools === null ? allTools() : modal.allowedTools;
         if (!sameTools(allowedTools, effective)) {
-          await postKeys({ action: "set_tools", id: modal.id, allowedTools });
+          payload.allowedTools = allowedTools;
           changed = true;
         }
         const effectiveBrowsers = modal.allowedBrowsers == null ? allBrowsers() : modal.allowedBrowsers;
         if (!sameBrowsers(allowedBrowsers, effectiveBrowsers)) {
-          await postKeys({ action: "set_browsers", id: modal.id, allowedBrowsers });
+          payload.allowedBrowsers = allowedBrowsers;
           changed = true;
         }
         const effectiveMcpBrowsers = modal.allowedMcpBrowsers == null ? allBrowsers() : modal.allowedMcpBrowsers;
         if (!sameBrowsers(allowedMcpBrowsers, effectiveMcpBrowsers)) {
-          await postKeys({ action: "set_mcp_browsers", id: modal.id, allowedMcpBrowsers });
+          payload.allowedMcpBrowsers = allowedMcpBrowsers;
           changed = true;
         }
         if (changed) {
+          await postKeys(payload);
           setMessage("API key updated.");
           setKind("ok");
         }

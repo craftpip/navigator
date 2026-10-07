@@ -831,6 +831,45 @@ async function handleConsoleApiKeys(manager, body) {
     }
     return getConsoleApiKeysPayload(manager);
   }
+  if (action === "update") {
+    const id = Number(body?.id);
+    if (!Number.isInteger(id)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    const name = typeof body?.name === "string" ? body.name.trim() : undefined;
+    if (name !== undefined && (!name || name.length > 80)) {
+      return { ok: false, error: "Key name must be between 1 and 80 characters" };
+    }
+    const availableTools = new Set(getToolGroups().flatMap((group) => group.tools));
+    let allowedTools = undefined;
+    if (Array.isArray(body?.allowedTools)) {
+      allowedTools = [...new Set(body.allowedTools.filter((tool) => availableTools.has(tool)))];
+    }
+    const availableBrowsers = new Set(listShareableBrowserNames(manager));
+    let allowedBrowsers = undefined;
+    if (Array.isArray(body?.allowedBrowsers)) {
+      allowedBrowsers = [...new Set(body.allowedBrowsers.filter((name) => availableBrowsers.has(name)))];
+    }
+    let allowedMcpBrowsers = undefined;
+    if (Array.isArray(body?.allowedMcpBrowsers)) {
+      allowedMcpBrowsers = [...new Set(body.allowedMcpBrowsers.filter((name) => availableBrowsers.has(name)))];
+    }
+    if (name !== undefined && !renameMcpApiKey(id, name)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    if (allowedTools !== undefined && !setMcpApiKeyTools(id, allowedTools)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    if (allowedBrowsers !== undefined && !setMcpApiKeyBrowsers(id, allowedBrowsers)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    if (allowedMcpBrowsers !== undefined && !setMcpApiKeyMcpBrowsers(id, allowedMcpBrowsers)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    syncMcpApiKeys(manager);
+    try { recheckCdpPipes(manager); } catch {}
+    return getConsoleApiKeysPayload(manager);
+  }
 
   if (action === "set_allow_unauthenticated") {
     if (typeof body?.allowUnauthenticated !== "boolean") {
