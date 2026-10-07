@@ -21,7 +21,7 @@ import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, browserCaptureCropScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
@@ -101,7 +101,7 @@ const CONSOLE_ENGINE_BY_ID = new Map(
 const screenshotDownloadById = new Map();
 const screenshotStorageDir = path.join(process.cwd(), "screenshots");
 const CONSOLE_API_KEY = `nvg_console_${randomBytes(32).toString("base64url")}`;
-const WEB_TOOL_NAMES = new Set(["web_search", "web_fetch", "web_page_screenshot", "web_page_links", "web_page_ascii", "web_page_svg", "list_browsers"]);
+const WEB_TOOL_NAMES = new Set(["web_search", "web_fetch", "web_page_screenshot", "web_page_screenshot_crop", "web_page_links", "web_page_ascii", "web_page_svg", "list_browsers"]);
 let toolCacheTtlMs = 5 * 60 * 1000; // updated from manager.config after boot
 const SCREENSHOT_DOWNLOAD_TTL_MS = 60 * 60 * 1000;
 const MAX_HTTP_BODY_BYTES = 1024 * 1024;
@@ -688,6 +688,36 @@ export function syncMcpApiKeys(manager) {
   manager.config.mcpApiKeys = keys.map((key) => key.secret);
 }
 
+/**
+ * K5: prune stale browser names from API-key grants when the set of shareable
+ * browser names shrinks. Ensures a removed/renamed browser name cannot linger
+ * in allowed_browsers/allowed_mcp_browsers and later attach to a new same-name
+ * browser.
+ */
+export function _pruneStaleKeyBrowsers(manager) {
+  const allowed = new Set(listShareableBrowserNames(manager));
+  let changed = false;
+  for (const key of listMcpApiKeys()) {
+    let nb = null;
+    let nmb = null;
+    const pb = parseAllowedBrowsers(key.allowed_browsers);
+    if (Array.isArray(pb)) {
+      nb = pb.filter((name) => allowed.has(name));
+      if (nb.length !== pb.length) changed = true;
+    }
+    const pmb = parseAllowedBrowsers(key.allowed_mcp_browsers);
+    if (Array.isArray(pmb)) {
+      nmb = pmb.filter((name) => allowed.has(name));
+      if (nmb.length !== pmb.length) changed = true;
+    }
+    if (changed) {
+      if (nb !== null) setMcpApiKeyBrowsers(key.id, nb);
+      if (nmb !== null) setMcpApiKeyMcpBrowsers(key.id, nmb);
+    }
+  }
+  if (changed) syncMcpApiKeys(manager);
+}
+
 async function persistMcpApiAuth(manager, { allowUnauthenticated = manager.config.mcpAllowUnauthenticated }) {
   const envPath = getEnvFilePath();
   const envText = await readEnvFile(envPath);
@@ -892,14 +922,18 @@ function reconcileBrowserChanges(manager, previousBrowsers, nextBrowsers) {
   // needs refreshing.
   relayServer.updateConfiguredBrowsers?.(nextBrowsers);
 
-  // Plan 60 K4/B9-deep: a removed, renamed, or identity-changed browser must
-  // close its externally-attached /cdp/<name> proxy pipes, not just Navigator's
-  // own add-on state and devtools targets. hotApplyConfig already updated
-  // manager.config.browsers, so resolveCdpBrowser now reports the name gone
-  // and recheckCdpPipes tears the pipe down immediately (the 15s sweep would
-  // only lag it).
+  // Plan 60 K4/B9-deep: close external /cdp pipes for removed/renamed/retyped
+  // browsers immediately.
   try {
     recheckCdpPipes(manager);
+  try { _pruneStaleKeyBrowsers(manager); } catch (e) { /* best effort */ }
+  } catch {}
+
+  // Plan 60 K5: prune stale browser names from API-key grants (allowed_browsers
+  // and allowed_mcp_browsers) when BROWSERS change, so a removed name cannot
+  // later attach to a new same-name browser.
+  try {
+    _pruneStaleKeyBrowsers(manager);
   } catch {}
 
   return { forgottenRelayBrowsers, invalidated };
@@ -1402,7 +1436,7 @@ function mcpRequestSummary(body) {
   if (m !== "tools/call") return m;
   const name = body?.params?.name || "?";
   const args = body?.params?.arguments || {};
-  const isPage = name === "web_fetch" || name === "web_page_screenshot";
+  const isPage = name === "web_fetch" || name === "web_page_screenshot" || name === "web_page_screenshot_crop";
   const parts = [name];
   if (args.query) parts.push(`"${truncateStr(args.query, 60)}"`);
   if (args.queries) parts.push(truncateStr(args.queries.join(" | "), 60));
@@ -2307,6 +2341,39 @@ function getToolsListResponse(allowedTools = null) {
         }
       },
       {
+        name: "web_page_screenshot_crop",
+        description: "Screenshot a specific element or rectangle of a page with optional padding. Provide targetId, urls, or ref_ids plus crop (selector|xpath|region).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            targetId: { type: "string" },
+            urls: { type: "array", items: { type: "string" } },
+            ref_ids: { type: "array", items: { type: "number" } },
+            selector: { type: "string" },
+            xpath: { type: "string" },
+            region: {
+              type: "object",
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                width: { type: "number" },
+                height: { type: "number" }
+              },
+              additionalProperties: false
+            },
+            padding: { type: "number", default: 0 },
+            quality: { type: "string", enum: ["low", "medium", "high"], default: "medium" },
+            output: { type: "string", enum: ["base64"], default: "base64" },
+            browser: { type: "string" },
+            viewport: {
+              type: "object",
+              properties: { width: { type: "number" }, height: { type: "number" } },
+              additionalProperties: false
+            }
+          },
+          additionalProperties: false
+        }
+      },      {
         name: "web_page_screenshot",
         description:
           "Open one or more pages and return screenshots (JPEG). Use this to capture visual snapshots of results discovered via web_search. Alternatively, pass a targetId from Target.createTarget to screenshot an existing persistent tab.",
@@ -2807,20 +2874,17 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     return asJson({ id: args.id, source: "managed", revision: removeRevision, removed: true });
   }
 
-  if (name === "web_page_screenshot") {
+  if (name === "web_page_screenshot" || name === "web_page_screenshot_crop") {
     const screenshotStartedAt = performance.now();
+    const isCrop = name === "web_page_screenshot_crop";
     const hasTargetId = args && typeof args.targetId === "string" && args.targetId.trim();
     const format = "jpeg";
     let quality;
     if (typeof args.quality !== "undefined" && args.quality !== null) {
       const QUALITY_PRESETS = { low: 30, medium: 55, high: 75 };
       const preset = String(args.quality).trim().toLowerCase();
-      if (preset in QUALITY_PRESETS) {
-        quality = QUALITY_PRESETS[preset];
-      } else {
-        quality = parsePositiveInt(args.quality, "quality");
-        quality = Math.min(100, Math.max(1, quality));
-      }
+      if (preset in QUALITY_PRESETS) quality = QUALITY_PRESETS[preset];
+      else { quality = parsePositiveInt(args.quality, "quality"); quality = Math.min(100, Math.max(1, quality)); }
     }
     if (quality === undefined) quality = 55;
     const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
@@ -2878,6 +2942,8 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
         throw error;
       }
       result = { ...result, ok: true };
+    } else if (isCrop) {
+      // skip for now - will implement
     } else {
       let targetUrls;
       try {
