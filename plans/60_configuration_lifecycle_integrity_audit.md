@@ -1,6 +1,6 @@
 # 60 - Configuration lifecycle integrity audit
 
-**Status:** In progress — browser/relay lifecycle slice (§10 step 1). Fixed: B1–B9, B9-deep, K1–K4 (B3/B4/B8/B9 2026-09-18, B1/B2 2026-10-01, B5/B6/B7 2026-10-07, B9-deep/K1-K4 2026-10-07). Open: K5–K7; S1–S12; H1–H7.
+**Status:** In progress — browser/relay lifecycle slice (§10 step 1). Fixed: B1–B9, B9-deep, K1–K4, K5–K7 (B3/B4/B8/B9 2026-09-18, B1/B2 2026-10-01, B5/B6/B7 2026-10-07, B9-deep/K1-K4 2026-10-07, K5–K7 2026-10-07). Open: S1–S12; H1–H7.
 **Scope:** Every console-managed resource whose configuration, runtime registry, durable storage, derived routing/status state, or UI representation can disagree.
 
 ## Progress checklist
