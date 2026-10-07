@@ -19,6 +19,8 @@
 - [x] K2 — permission re-resolution on live MCP sessions (2026-10-07)
 - [x] K3 — live re-authorization of established CDP pipes (2026-10-07)
 - [x] K4 — plain-cdp removal/rename/retype closes external `/cdp/<name>` pipes via the config funnel (2026-10-07)
+- [x] K5 — prune stale API-key browser grants on BROWSERS shrink
+- [x] K6 — export resilient session permission getter
 - [ ] K7 — Key edit UI transaction/atomicity
 - [ ] S1–S12 — search engine / model lifecycle
 - [ ] H1–H7 — hints / cache / process lifecycle
