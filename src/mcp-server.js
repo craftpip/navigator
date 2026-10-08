@@ -1070,8 +1070,73 @@ async function reconcileExternalBrowsersConfig(manager, envPath) {
   }
   // Plan 60 S3: surface dangling hint references left by an external model change
   envFileState.externalModelWarnings = await collectRemovedModelWarnings(manager, previousModelIds);
+
+  // Plan 60 H4: hot-applying a browser-process key must reach the LIVE process,
+  // not just config.* — a bare config mutation leaves the running Chromium
+  // (launched at boot) divergent from what Manage reports as applied.
+  syncVncManagerConfig(manager);
+  const relaunched = await relaunchBrowserProcessForKeys(manager, hotApplied);
+  if (relaunched) {
+    console.log(`[config] plan60 H4 ${relaunched.ok
+      ? `hot-applied ${relaunched.keys.join(", ")} (external .env edit) → built-in Chromium relaunched (headless=${manager.config.headless})`
+      : `browser relaunch skipped after hot-applying ${relaunched.keys.join(", ")}: ${relaunched.error}`}`);
+  }
+
   envFileState.changed = false;
   return { hotApplied };
+}
+
+// Plan 60 H4: keys that only take effect inside a running browser process.
+// Hot-applying one of these relaunches the built-in Chromium so the live
+// process mirrors the config. PRELAUNCH_BROWSER is deliberately NOT in the
+// set — it governs boot-time prelaunch only; an already-running process
+// cannot retroactively "prelaunch", so it stays a config-mutation.
+const BROWSER_PROCESS_RELAUNCH_KEYS = new Set([
+  "HEADLESS",
+  "CHROME_PATH",
+  "CHROME_USER_DATA_DIR",
+  "CHROME_PROFILE_DIR",
+  "STARTUP_URL",
+  "BROWSER_USER_AGENT"
+]);
+
+function browserProcessKeysIn(hotApplied) {
+  const keys = new Set();
+  for (const entry of hotApplied || []) {
+    const base = String(entry).split("→")[0]; // strip →default/→reverted/→external suffixes
+    if (BROWSER_PROCESS_RELAUNCH_KEYS.has(base)) keys.add(base);
+  }
+  return keys;
+}
+
+// VNC panel ports come from config (VNC_PORT/NOVNC_PORT), not the singleton's
+// constructor defaults — otherwise adopt kills nothing and probes never match
+// the running stack when the ports are non-default (plan 60 H4).
+function syncVncManagerConfig(manager) {
+  if (manager?.config) {
+    if (manager.config.vncPort) vncManager.vncPort = manager.config.vncPort;
+    if (manager.config.novncPort) vncManager.novncPort = manager.config.novncPort;
+  }
+}
+
+async function relaunchBrowserProcessForKeys(manager, hotApplied) {
+  const keys = browserProcessKeysIn(hotApplied);
+  if (!keys.size) return null;
+  const relaunchKeys = [...keys].sort();
+  // Headed Chromium needs a display it owns (Xvfb via the VNC panel, or an
+  // existing DISPLAY). Relaunching headed without one can never come up — keep
+  // the config faithful but report the skip instead of bouncing the process
+  // into a dead display.
+  if (!manager.config.headless && !process.env.DISPLAY && vncManager.status !== "running") {
+    return {
+      ok: false,
+      skipped: true,
+      keys: relaunchKeys,
+      error: "HEADLESS=false needs a visible display — use the console VNC toggle (spawns Xvfb and sets DISPLAY) before turning headless off"
+    };
+  }
+  const relaunch = await manager.relaunchDefaultBackend(manager.config.headless);
+  return { ok: true, relaunch, keys: relaunchKeys };
 }
 
 // Plan 60 S3: a POST_PROCESSOR_MODELS change that drops model ids still
@@ -1106,7 +1171,22 @@ async function applyConfigUpdates(manager, body) {
   const revert = body?.revert === true;
   const envPath = getEnvFilePath();
   const previousModelIds = getPostProcessorModels(manager.config).map((entry) => entry.id);
-  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], warnings: [], envWritten: false, backup: null, reverted: false, forgottenRelayBrowsers: [], invalidatedBrowsers: [] };
+  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], warnings: [], envWritten: false, backup: null, reverted: false, forgottenRelayBrowsers: [], invalidatedBrowsers: [], relaunched: null, relaunchSkipped: null };
+
+  // Plan 60 H4: at the end of every apply that persisted + ran appliers, sync
+  // the VncManager ports from config and relaunch the built-in Chromium when a
+  // browser-process key was hot-applied — the live process must mirror config.
+  const finalizeRuntimeApply = async () => {
+    syncVncManagerConfig(manager);
+    const relaunched = await relaunchBrowserProcessForKeys(manager, payload.hotApplied);
+    if (relaunched) {
+      payload.relaunched = relaunched.ok ? relaunched.relaunch : null;
+      payload.relaunchSkipped = relaunched.ok ? null : { keys: relaunched.keys, error: relaunched.error };
+      console.log(`[config] plan60 H4 ${relaunched.ok
+        ? `hot-applied ${relaunched.keys.join(", ")} → built-in Chromium relaunched (headless=${manager.config.headless})`
+        : `browser relaunch skipped after hot-applying ${relaunched.keys.join(", ")}: ${relaunched.error}`}`);
+    }
+  };
 
   if (revert) {
     const backupPath = await revertEnvFile(envPath);
@@ -1140,6 +1220,7 @@ async function applyConfigUpdates(manager, body) {
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    await finalizeRuntimeApply();
     payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
     return payload;
   }
@@ -1271,6 +1352,7 @@ async function applyConfigUpdates(manager, body) {
     });
   }
 
+  await finalizeRuntimeApply();
   payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
   return payload;
 }
@@ -3948,6 +4030,9 @@ function createMcpServer(resolvePermissions = () => ({ allowedTools: null, allow
 async function maybeStartHttpServer(managerOverride) {
   const manager = managerOverride || (await getBrowserManager());
   initDb();
+  // Plan 60 H4: bind the VNC singleton to whatever ports the config supplies,
+  // so adopt/probe use the real ports even when they are non-default.
+  syncVncManagerConfig(manager);
   ensureConsoleToolsApiKey();
   syncMcpApiKeys(manager);
   const wantsRelay = (manager.config.browsers || []).some(

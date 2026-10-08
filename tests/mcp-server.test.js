@@ -1742,6 +1742,120 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("PUT /console/config — browser-process hot-apply (plan 60 H4)", () => {
+    let envDir;
+    let envFile;
+    let manager;
+    let vncMod;
+    let origHeadless;
+    let origVncPort;
+    let origNovncPort;
+    let origDisplay;
+
+    beforeEach(async () => {
+      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h4-"));
+      envFile = path.join(envDir, ".env");
+      fs.writeFileSync(envFile, "# test env\nHEADLESS=true\n");
+      process.env.NAVIGATOR_ENV_FILE = envFile;
+      const browserMod = await import("../src/browser.js");
+      manager = await browserMod.getBrowserManager.mock.results[0].value;
+      vncMod = await import("../src/vnc-manager.js");
+      origHeadless = manager.config.headless;
+      origVncPort = vncMod.vncManager.vncPort;
+      origNovncPort = vncMod.vncManager.novncPort;
+      origDisplay = process.env.DISPLAY;
+      manager.config.headless = true;
+      manager.relaunchDefaultBackend.mockClear();
+      vncMod.vncManager.status = "stopped";
+    });
+
+    afterEach(() => {
+      delete process.env.NAVIGATOR_ENV_FILE;
+      manager.config.headless = origHeadless;
+      delete vncMod.vncManager.vncPort;
+      if (origVncPort !== undefined) vncMod.vncManager.vncPort = origVncPort;
+      delete vncMod.vncManager.novncPort;
+      if (origNovncPort !== undefined) vncMod.vncManager.novncPort = origNovncPort;
+      if (origDisplay === undefined) delete process.env.DISPLAY;
+      else process.env.DISPLAY = origDisplay;
+      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it("relaunches the built-in Chromium when a browser-process key is hot-applied", async () => {
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { CHROME_PATH: "/usr/bin/chromium-custom" } }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.hotApplied).toContain("CHROME_PATH");
+      expect(manager.relaunchDefaultBackend).toHaveBeenCalledWith(true);
+      expect(body.relaunched).toEqual(expect.objectContaining({ relaunched: true }));
+      expect(body.relaunchSkipped).toBeNull();
+    });
+
+    it("relaunches headed for a HEADLESS=false hot-apply and reports it", async () => {
+      process.env.DISPLAY = ":99";
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { HEADLESS: false } }),
+      });
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.hotApplied).toContain("HEADLESS");
+      expect(body.relaunched.headless).toBe(false);
+      expect(manager.relaunchDefaultBackend).toHaveBeenCalledWith(false);
+      expect(manager.config.headless).toBe(false);
+    });
+
+    it("does not relaunch for non-browser hot keys", async () => {
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { SEARCH_QUEUE_ESCALATION_FACTOR: 4 } }),
+      });
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.hotApplied).toContain("SEARCH_QUEUE_ESCALATION_FACTOR");
+      expect(manager.relaunchDefaultBackend).not.toHaveBeenCalled();
+      expect(body.relaunched).toBeNull();
+      expect(body.relaunchSkipped).toBeNull();
+    });
+
+    it("skips the relaunch headed without a display, reporting why (plan 60 H4)", async () => {
+      delete process.env.DISPLAY;
+      vncMod.vncManager.status = "stopped";
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { HEADLESS: false } }),
+      });
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.hotApplied).toContain("HEADLESS");
+      expect(body.relaunched).toBeNull();
+      expect(body.relaunchSkipped).toMatchObject({ keys: ["HEADLESS"] });
+      expect(body.relaunchSkipped.error).toContain("console VNC toggle");
+      expect(manager.relaunchDefaultBackend).not.toHaveBeenCalled();
+    });
+
+    it("syncs the VncManager ports from config after a VNC_PORT hot-apply", async () => {
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { VNC_PORT: 2995, NOVNC_PORT: 2996 } }),
+      });
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.hotApplied).toEqual(expect.arrayContaining(["VNC_PORT", "NOVNC_PORT"]));
+      expect(vncMod.vncManager.vncPort).toBe(2995);
+      expect(vncMod.vncManager.novncPort).toBe(2996);
+    });
+  });
+
   describe("POST /console/vnc", () => {
     let envDir;
     let envFile;
