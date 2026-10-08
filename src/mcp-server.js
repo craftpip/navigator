@@ -32,7 +32,7 @@ import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 
 const require = createRequire(import.meta.url);
@@ -1383,13 +1383,14 @@ async function createHint(hintsPath, rawHint, aiModelIds, browserNames = null) {
     return { ok: false, error: "invalid hint", validation };
   }
   return queueHintMutation(async () => {
+    const baseSignature = await fileSignature(path.resolve(hintsPath));
     const hints = await loadRawDomainHints(hintsPath);
     const duplicate = findHintDuplicate(hints, hint, -1);
     if (duplicate) {
       return { ok: false, error: `duplicate hint: ${hint.domain} ${hint.pathPattern}${hint.requireSelector ? ` require:${hint.requireSelector}` : ""} collides with #${duplicate.index} (${duplicate.label})`, validation: { errors: [{ field: "pathPattern", message: `collides with hint #${duplicate.index} (${duplicate.label})` }], warnings: [] } };
     }
     hints.push(hint);
-    const save = await saveDomainHints(hints, hintsPath);
+    const save = await saveDomainHints(hints, hintsPath, { baseSignature });
     if (!save.ok) return save;
     return { ok: true, index: hints.length - 1, hint, hintsPath: save.hintsPath };
   });
@@ -1411,6 +1412,7 @@ async function updateHint(hintsPath, index, rawHint, aiModelIds, browserNames = 
     return { ok: false, error: "invalid hint", validation };
   }
   return queueHintMutation(async () => {
+    const baseSignature = await fileSignature(path.resolve(hintsPath));
     const hints = await loadRawDomainHints(hintsPath);
     if (index >= hints.length) {
       return { ok: false, error: `index ${index} out of range (${hints.length} hints)` };
@@ -1420,7 +1422,7 @@ async function updateHint(hintsPath, index, rawHint, aiModelIds, browserNames = 
       return { ok: false, error: `duplicate hint: ${hint.domain} ${hint.pathPattern}${hint.requireSelector ? ` require:${hint.requireSelector}` : ""} collides with #${duplicate.index} (${duplicate.label})`, validation: { errors: [{ field: "pathPattern", message: `collides with hint #${duplicate.index} (${duplicate.label})` }], warnings: [] } };
     }
     hints[index] = hint;
-    const save = await saveDomainHints(hints, hintsPath);
+    const save = await saveDomainHints(hints, hintsPath, { baseSignature });
     if (!save.ok) return save;
     return { ok: true, index, hint, hintsPath: save.hintsPath };
   });
@@ -1431,6 +1433,7 @@ async function deleteHint(hintsPath, index) {
     return { ok: false, error: "invalid index" };
   }
   return queueHintMutation(async () => {
+    const baseSignature = await fileSignature(path.resolve(hintsPath));
     const hints = await loadRawDomainHints(hintsPath);
     if (index >= hints.length) {
       return { ok: false, error: `index ${index} out of range (${hints.length} hints)` };
@@ -1439,7 +1442,7 @@ async function deleteHint(hintsPath, index) {
       return { ok: false, error: "cannot delete the wildcard default hint" };
     }
     const [removed] = hints.splice(index, 1);
-    const save = await saveDomainHints(hints, hintsPath);
+    const save = await saveDomainHints(hints, hintsPath, { baseSignature });
     if (!save.ok) return save;
     return { ok: true, index, removed, count: save.count, hintsPath: save.hintsPath };
   });

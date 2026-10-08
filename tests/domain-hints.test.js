@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getHintRevision, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearDomainHintCache, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript, collectPostProcessorRefs } from "../src/domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getHintRevision, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearDomainHintCache, clearManagedHintCache, saveDomainHints, fileSignature, validateHintRule, validateManagedHint, validateScript, collectPostProcessorRefs } from "../src/domain-hints.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hintsPath = path.join(projectRoot, "domain-hints.json");
@@ -851,21 +851,21 @@ describe("corrupt hints file resilience (plan 60 H1)", () => {
 describe("external edits invalidate the cache (plan 60 H2)", () => {
   it("reloads on an external edit without clearDomainHintCache", async () => {
     const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h2-")), "domain-hints.json");
-    await fs.writeFile(p, JSON.stringify([{ domain: "before.com", pathPattern: "/**", pageType: "p", comment: "a" }]));
+    await fs.writeFile(p, JSON.stringify([{ domain: "before.example", pathPattern: "/**", pageType: "p", comment: "same-length-check" }]));
     const config = { domainHintsPath: p };
     clearDomainHintCache();
     const before = await getDomainHints(config);
-    expect(before.some((h) => h.domain === "before.com")).toBe(true);
+    expect(before.some((h) => h.domain === "before.example")).toBe(true);
 
-    await fs.writeFile(p, JSON.stringify([{ domain: "after.com", pathPattern: "/**", pageType: "p", comment: "b" }]));
+    await fs.writeFile(p, JSON.stringify([{ domain: "after.example", pathPattern: "/**", pageType: "p", comment: "a-different-length-comment" }]));
     const after = await getDomainHints(config);
-    expect(after.some((h) => h.domain === "after.com")).toBe(true);
-    expect(after.some((h) => h.domain === "before.com")).toBe(false);
+    expect(after.some((h) => h.domain === "after.example")).toBe(true);
+    expect(after.some((h) => h.domain === "before.example")).toBe(false);
   });
 
   it("keeps hintRevision stable across unchanged calls and bumps it once on an external edit", async () => {
     const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h2-")), "domain-hints.json");
-    await fs.writeFile(p, JSON.stringify([{ domain: "stable.com", pathPattern: "/**", pageType: "p", comment: "a" }]));
+    await fs.writeFile(p, JSON.stringify([{ domain: "stable.example", pathPattern: "/**", pageType: "p", comment: "same-length-check" }]));
     const config = { domainHintsPath: p };
     clearDomainHintCache();
     const rev0 = getHintRevision();
@@ -873,7 +873,7 @@ describe("external edits invalidate the cache (plan 60 H2)", () => {
     await getDomainHints(config);
     expect(getHintRevision()).toBe(rev0);
 
-    await fs.writeFile(p, JSON.stringify([{ domain: "edited.com", pathPattern: "/**", pageType: "p", comment: "b" }]));
+    await fs.writeFile(p, JSON.stringify([{ domain: "edited.example", pathPattern: "/**", pageType: "p", comment: "a-different-length-comment" }]));
     await getDomainHints(config);
     expect(getHintRevision()).toBe(rev0 + 1);
     await getDomainHints(config);
@@ -891,6 +891,69 @@ describe("external edits invalidate the cache (plan 60 H2)", () => {
     await fs.writeFile(p, JSON.stringify([{ domain: "appeared.com", pathPattern: "/**", pageType: "p", comment: "late" }]));
     const appeared = await getDomainHints(config);
     expect(appeared.some((h) => h.domain === "appeared.com")).toBe(true);
+  });
+});
+
+describe("CAS against external edits (plan 60 H3)", () => {
+  it("writes cleanly when the file still matches the base signature", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h3-")), "domain-hints.json");
+    await fs.writeFile(p, JSON.stringify([{ domain: "base.com", pathPattern: "/**", pageType: "p", comment: "a" }]));
+    const baseSignature = await fileSignature(path.resolve(p));
+    const flushResult = await saveDomainHints(
+      [{ domain: "base.com", pathPattern: "/**", pageType: "p", comment: "a" }, { domain: "added.com", pathPattern: "/**", pageType: "p", comment: "b" }],
+      p,
+      { baseSignature },
+    );
+    expect(flushResult.ok).toBe(true);
+    const fileHints = JSON.parse(await fs.readFile(p, "utf8"));
+    expect(fileHints.some((h) => h.domain === "added.com")).toBe(true);
+  });
+
+  it("refuses to overwrite an external edit that landed after the base was captured", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h3-")), "domain-hints.json");
+    await fs.writeFile(p, JSON.stringify([{ domain: "base.com", pathPattern: "/**", pageType: "p", comment: "a" }]));
+    const baseSignature = await fileSignature(path.resolve(p));
+
+    await fs.writeFile(p, JSON.stringify([{ domain: "external.com", pathPattern: "/**", pageType: "p", comment: "concurrent" }]));
+    const externalBytes = await fs.readFile(p, "utf8");
+    const revBefore = getHintRevision();
+    const flushResult = await saveDomainHints(
+      [{ domain: "external.com", pathPattern: "/**", pageType: "p", comment: "concurrent" }, { domain: "user.com", pathPattern: "/**", pageType: "p", comment: "from the panel" }],
+      p,
+      { baseSignature },
+    );
+    expect(flushResult.ok).toBe(false);
+    expect(flushResult.conflict).toBe(true);
+    expect(await fs.readFile(p, "utf8")).toBe(externalBytes);
+    expect(await fs.access(`${p}.bak`).then(() => true).catch(() => false)).toBe(false);
+    expect(getHintRevision()).toBe(revBefore);
+  });
+
+  it("refuses when a hints file was absent at load time and appeared externally", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h3-")), "domain-hints.json");
+    const baseSignature = await fileSignature(path.resolve(p));
+    expect(baseSignature).toBeNull();
+
+    await fs.writeFile(p, JSON.stringify([{ domain: "opened.com", pathPattern: "/**", pageType: "p", comment: "created externally" }]));
+    const flushResult = await saveDomainHints(
+      [{ domain: "opened.com", pathPattern: "/**", pageType: "p", comment: "created externally" }, { domain: "user.com", pathPattern: "/**", pageType: "p", comment: "from the panel" }],
+      p,
+      { baseSignature },
+    );
+    expect(flushResult.ok).toBe(false);
+    expect(flushResult.conflict).toBe(true);
+    const fileHints = JSON.parse(await fs.readFile(p, "utf8"));
+    expect(fileHints.some((h) => h.domain === "user.com")).toBe(false);
+    expect(fileHints.some((h) => h.domain === "opened.com")).toBe(true);
+  });
+
+  it("keeps the no-base call path unchanged (legacy callers skip CAS)", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h3-")), "domain-hints.json");
+    await fs.writeFile(p, JSON.stringify([{ domain: "base.com", pathPattern: "/**", pageType: "p", comment: "a" }]));
+    const flushResult = await saveDomainHints([{ domain: "base.com", pathPattern: "/**", pageType: "p", comment: "a" }], p);
+    expect(flushResult.ok).toBe(true);
+    const fileHints = JSON.parse(await fs.readFile(p, "utf8"));
+    expect(fileHints).toHaveLength(1);
   });
 });
 

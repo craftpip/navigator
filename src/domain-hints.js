@@ -208,8 +208,10 @@ export function findDomainHint(urlStr, hints) {
 
 // plan 60 H2: cheap freshness probe — pre-read (taken BEFORE loadDomainHints
 // reads the file) so a change during the read is caught by the NEXT call
-// instead of being recorded as newer than the content.
-async function fileSignature(resolvedPath) {
+// instead of being recorded as newer than the content. Also exported (plan 60
+// H3) so hint mutations can hand saveDomainHints the base state their `hints`
+// array was built on (CAS against concurrent external edits).
+export async function fileSignature(resolvedPath) {
   try {
     const st = await fs.stat(resolvedPath);
     return `${st.mtimeMs}:${st.size}`;
@@ -1007,7 +1009,7 @@ export function collectPostProcessorRefs(hint) {
   return refs;
 }
 
-export async function saveDomainHints(hints, hintsPath) {
+export async function saveDomainHints(hints, hintsPath, { baseSignature = undefined } = {}) {
   const resolvedPath = path.resolve(hintsPath);
   if (resolvedPath === "/dev/null") {
     return { ok: false, error: "hints file is /dev/null — cannot save (hints are disabled via DOMAIN_HINTS_PATH)" };
@@ -1015,17 +1017,49 @@ export async function saveDomainHints(hints, hintsPath) {
   if (!Array.isArray(hints)) {
     return { ok: false, error: "hints must be an array" };
   }
+  const conflict = (message) => ({ ok: false, conflict: true, error: message });
   const dir = path.dirname(resolvedPath);
   const tmpPath = path.join(dir, `.${path.basename(resolvedPath)}.tmp-${process.pid}-${Date.now()}`);
   try {
+    // plan 60 H3: compare-and-swap against concurrent external edits.
+    // baseSignature is the disk state the `hints` array was built on — the
+    // caller's pre-read signature (null when the file was absent). We refuse
+    // to write if the file changes between that read and the atomic rename,
+    // so a non-atomic external edit landing mid-save surfaces as a conflict
+    // instead of being silently clobbered (it would otherwise survive only in
+    // .bak). blockage is refuse-safe: a conflict always beats data loss.
     let previous = "";
-    try {
-      previous = await fs.readFile(resolvedPath, "utf8");
-    } catch {}
+    let sigAfterRead = null;
+    if (baseSignature !== undefined) {
+      const sigBeforeRead = await fileSignature(resolvedPath);
+      try {
+        previous = await fs.readFile(resolvedPath, "utf8");
+      } catch {}
+      sigAfterRead = await fileSignature(resolvedPath);
+      if (sigBeforeRead !== sigAfterRead) {
+        return conflict("hints file changed while it was being read — reload and retry");
+      }
+      if (sigAfterRead !== baseSignature) {
+        return conflict("hints file changed on disk since it was loaded — reload and retry (your edit was not applied)");
+      }
+    } else {
+      try {
+        previous = await fs.readFile(resolvedPath, "utf8");
+      } catch {}
+    }
     if (previous) {
       await fs.writeFile(`${resolvedPath}.bak`, previous, "utf8");
     }
     await fs.writeFile(tmpPath, JSON.stringify(hints, null, 2) + "\n", "utf8");
+    if (baseSignature !== undefined) {
+      const sigBeforeRename = await fileSignature(resolvedPath);
+      if (sigBeforeRename !== sigAfterRead) {
+        try {
+          await fs.unlink(tmpPath);
+        } catch {}
+        return conflict("hints file changed on disk while the save was in progress — reload and retry (your edit was not applied)");
+      }
+    }
     await fs.rename(tmpPath, resolvedPath);
     clearDomainHintCache();
     return { ok: true, count: hints.length, hintsPath: resolvedPath };

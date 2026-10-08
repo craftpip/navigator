@@ -263,6 +263,25 @@ describe("domain hints API", () => {
     });
   });
 
+  describe("hint save CAS (plan 60 H3)", () => {
+    it("the console path preserves an external edit already on disk", async () => {
+      const external = JSON.parse(fs.readFileSync(hintsPath, "utf8"));
+      external.push({ domain: "external-edit.test", pathPattern: "/**", pageType: "p", comment: "edited outside the console" });
+      fs.writeFileSync(hintsPath, JSON.stringify(external, null, 2) + "\n");
+
+      const { status, body } = await jsonRequest("/console/api/hints", {
+        method: "POST",
+        body: JSON.stringify({ hint: { domain: "cas-probe.test", pathPattern: "/**", pageType: "p", comment: "via console" } }),
+      });
+      expect(status).toBe(200);
+      expect(body.ok).toBe(true);
+
+      const fileHints = JSON.parse(fs.readFileSync(hintsPath, "utf8"));
+      expect(fileHints.some((h) => h.domain === "external-edit.test")).toBe(true);
+      expect(fileHints.some((h) => h.domain === "cas-probe.test")).toBe(true);
+    });
+  });
+
   describe("GET /extract hint override", () => {
     it("rejects an invalid candidate with 400 before navigating", async () => {
       searchMod.browserOpenAndExtract.mockClear();
