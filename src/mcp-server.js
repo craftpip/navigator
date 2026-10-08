@@ -561,7 +561,7 @@ function envKeyToConfigKey(key) {
   return key.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
-const envFileState = { mtimeMs: null, size: null, changed: false, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null, externalModelWarnings: [] };
+const envFileState = { mtimeMs: null, size: null, changed: false, fileKeys: null, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null, externalModelWarnings: [] };
 async function checkEnvFileChanged(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -574,6 +574,14 @@ async function checkEnvFileChanged(filePath) {
     // env file missing — not an error
   }
   return envFileState.changed;
+}
+
+// Plan 60 H5: remember which keys the canonical .env file actually carries, so
+// the external-edit reconcile can tell a REMOVED key from a merely vanished
+// one and clear the stale process.env/config state instead of letting it
+// outlive the removal for the whole session.
+function rememberEnvFileKeys(envText) {
+  envFileState.fileKeys = new Set(parseEnvFile(envText).keyToLine.keys());
 }
 
 async function getConsoleConfigPayload(manager) {
@@ -747,6 +755,7 @@ async function persistMcpApiAuth(manager, { allowUnauthenticated = manager.confi
   manager.config.mcpAllowUnauthenticated = Boolean(allowUnauthenticated);
   await checkEnvFileChanged(envPath);
   envFileState.changed = false;
+  rememberEnvFileKeys(updated.text);
   recordEnvChange({ action: "update_mcp_api_auth", keys: ["MCP_ALLOW_UNAUTHENTICATED"] });
   return { backup };
 }
@@ -1043,16 +1052,52 @@ async function reconcileExternalBrowsersConfig(manager, envPath) {
       hotApplied.push("BROWSERS→external");
       process.env.BROWSERS = line.value;
     } else {
-      const applied = hotApplyConfig(manager.config, key, parsed.value);
-      if (applied) {
-        hotApplied.push(key);
-        process.env[key] = line.value;
+      // Plan 60 H5: only count a key as hot-applied when its VALUE actually
+      // changed — an external edit that keeps the current value (e.g. a comment
+      // tweak next to an unchanged HEADLESS=true) must not push the key into
+      // hotApplied, or the browser-process relaunch fires on every reconcile.
+      // process.env still mirrors the file unconditionally — the file is the
+      // canonical source and prior console actions may have dirtied the env.
+      if (manager.config[envKeyToConfigKey(key)] !== parsed.value) {
+        const applied = hotApplyConfig(manager.config, key, parsed.value);
+        if (applied) hotApplied.push(key);
       }
+      process.env[key] = line.value;
     }
   }
 
   // also apply keys not present in file? config load sets from process.env initially
   // but external edit means file changed; we only need to sync from file's hot keys
+
+  // Plan 60 H5: keys that VANISHED from the .env file must not outlive the
+  // removal in process.env or the live config. Compare against the last-seen
+  // file key set and clear what disappeared, mirroring the console reset
+  // semantics (resetValue ?? fallback). BROWSERS is excluded — its own branch
+  // below already handles the absent case (fallback + delete process.env).
+  const newKeys = new Set(parsedEnv.keyToLine.keys());
+  const previousKeys = envFileState.fileKeys;
+  const removedKeys = [];
+  if (previousKeys instanceof Set) {
+    for (const key of previousKeys) {
+      if (key === "BROWSERS" || newKeys.has(key)) continue;
+      const entry = CONFIG_SCHEMA.find((item) => item.key === key);
+      if (!entry) continue;
+      delete process.env[key];
+      removedKeys.push(key);
+      if (entry.applies === "hot") {
+        const resetTarget = Object.hasOwn(entry, "resetValue") ? entry.resetValue : entry.fallback;
+        hotApplyConfig(manager.config, key, resetTarget);
+        hotApplied.push(`${key}→removed`);
+      } else {
+        hotApplied.push(`${key}→removed (restart-required)`);
+      }
+    }
+  }
+  envFileState.fileKeys = newKeys;
+  if (removedKeys.length) {
+    console.log(`[config] plan60 H5 external .env edit removed key(s) ${removedKeys.join(", ")} — cleared from process.env (hot keys reset to their unset defaults)`);
+  }
+
   if (browsersResult) {
     envFileState.externalBrowsersApplied = forgotten;
     envFileState.externalBrowsersInvalidated = browsersInvalid || [];
@@ -1220,6 +1265,7 @@ async function applyConfigUpdates(manager, body) {
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    rememberEnvFileKeys(revertedEnv);
     await finalizeRuntimeApply();
     payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
     return payload;
@@ -1344,6 +1390,7 @@ async function applyConfigUpdates(manager, body) {
   if (changedKeys.size) {
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    rememberEnvFileKeys(envText);
     recordEnvChange({
       action: "update",
       keys: [...changedKeys],
@@ -1379,6 +1426,7 @@ async function handleConsoleVnc(manager, body) {
     vncRunningCache.at = 0;
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    rememberEnvFileKeys(envText);
     return { ok: true, action, steps: vncManager.steps, relaunch, running: true, headed: !manager.config.headless, backup };
   }
 
@@ -1394,6 +1442,7 @@ async function handleConsoleVnc(manager, body) {
     vncRunningCache.at = 0;
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    rememberEnvFileKeys(envText);
     return { ok: true, action, steps: vncManager.steps, relaunch, running: false, headed: !manager.config.headless, backup };
   }
 
@@ -4033,6 +4082,13 @@ async function maybeStartHttpServer(managerOverride) {
   // Plan 60 H4: bind the VNC singleton to whatever ports the config supplies,
   // so adopt/probe use the real ports even when they are non-default.
   syncVncManagerConfig(manager);
+  // Plan 60 H5: seed the last-seen .env key set at boot so the first external
+  // edit that removes a key is compared against the real boot-time file.
+  try {
+    rememberEnvFileKeys(await readEnvFile(getEnvFilePath()));
+  } catch {
+    // env file missing at boot — nothing to remember
+  }
   ensureConsoleToolsApiKey();
   syncMcpApiKeys(manager);
   const wantsRelay = (manager.config.browsers || []).some(

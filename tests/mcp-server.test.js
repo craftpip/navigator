@@ -1856,6 +1856,121 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("GET /console/config — external .env key removal (plan 60 H5)", () => {
+    let envDir;
+    let envFile;
+    let manager;
+    let vncMod;
+    let origDisplay;
+    let origEnv;
+
+    beforeEach(async () => {
+      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h5-"));
+      envFile = path.join(envDir, ".env");
+      process.env.NAVIGATOR_ENV_FILE = envFile;
+      const browserMod = await import("../src/browser.js");
+      manager = await browserMod.getBrowserManager.mock.results[0].value;
+      vncMod = await import("../src/vnc-manager.js");
+      origDisplay = process.env.DISPLAY;
+      delete process.env.DISPLAY;
+      origEnv = {
+        CHROME_USER_DATA_DIR: process.env.CHROME_USER_DATA_DIR,
+        HEADLESS: process.env.HEADLESS,
+        SEARCH_QUEUE_ESCALATION_FACTOR: process.env.SEARCH_QUEUE_ESCALATION_FACTOR,
+        SOME_RANDOM: process.env.SOME_RANDOM,
+      };
+      manager.relaunchDefaultBackend.mockClear();
+      vncMod.vncManager.status = "stopped";
+    });
+
+    afterEach(() => {
+      delete process.env.NAVIGATOR_ENV_FILE;
+      for (const [k, v] of Object.entries(origEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      if (origDisplay === undefined) delete process.env.DISPLAY;
+      else process.env.DISPLAY = origDisplay;
+      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+    });
+
+    // External .env edits are picked up by GET /console/config when the file's
+    // mtime/size changed since the last baseline. The removal is only detected
+    // against the PREVIOUSLY observed key set, so each test primes the baseline
+    // with a key-present version, re-observes a changed key-present version
+    // (same keys, different value length so the stat always differs), then
+    // removes the key from a third version.
+    async function primeAndRemove(keysPresent, value, removedKey) {
+      fs.writeFileSync(envFile, keysPresent(value));
+      await fetch(`${MCP_BASE}/console/config`); // baseline stat
+      fs.writeFileSync(envFile, keysPresent(value + "-" + value)); // changed, key still present → reconcile observes the key set
+      await fetch(`${MCP_BASE}/console/config`);
+      manager.relaunchDefaultBackend.mockClear();
+      fs.writeFileSync(envFile, keysPresent(value).replace(new RegExp(`^${removedKey}=.*$`, "m"), "")); // key removed
+      const res = await fetch(`${MCP_BASE}/console/config`);
+      return { res, body: await res.json() };
+    }
+
+    it("clears a hot key removed from an externally-edited .env and resets live config", async () => {
+      const { body } = await primeAndRemove(
+        (v) => `# h5\nHEADLESS=true\nCHROME_USER_DATA_DIR=/tmp/h5dir-${v}\n`,
+        "aaaa",
+        "CHROME_USER_DATA_DIR"
+      );
+      expect(body.envFile.changedOnDisk).toBe(false);
+      expect(process.env.CHROME_USER_DATA_DIR).toBeUndefined();
+      expect(manager.config.chromeUserDataDir).toBe("/data/chrome");
+      // the still-present key is untouched
+      expect(process.env.HEADLESS).toBe("true");
+      expect(manager.config.headless).toBe(true);
+      // removing a browser-process key relaunches so the live process honors
+      // the fallback profile dir, exactly like a value change does (plan 60 H4)
+      expect(manager.relaunchDefaultBackend).toHaveBeenCalledWith(true);
+    });
+
+    it("resets a hot non-browser key to its fallback when removed", async () => {
+      const { body } = await primeAndRemove(
+        (v) => `# h5\nHEADLESS=true\nSEARCH_QUEUE_ESCALATION_FACTOR=3\n`,
+        "zzzz",
+        "SEARCH_QUEUE_ESCALATION_FACTOR"
+      );
+      expect(body.envFile.changedOnDisk).toBe(false);
+      expect(process.env.SEARCH_QUEUE_ESCALATION_FACTOR).toBeUndefined();
+      expect(manager.config.searchQueueEscalationFactor).toBe(2);
+      expect(process.env.HEADLESS).toBe("true");
+      expect(manager.relaunchDefaultBackend).not.toHaveBeenCalled();
+    });
+
+    it("relaunches the built-in Chromium when a browser-process key is removed externally", async () => {
+      const { body } = await primeAndRemove(
+        (v) => `# h5\nHEADLESS=true\nCHROME_USER_DATA_DIR=/tmp/h5dir-${v}\n`,
+        "bbbb",
+        "HEADLESS"
+      );
+      expect(body.envFile.changedOnDisk).toBe(false);
+      expect(process.env.HEADLESS).toBeUndefined();
+      expect(manager.config.headless).toBe(true); // fallback true, still headless
+      expect(process.env.CHROME_USER_DATA_DIR).toMatch(/^\/tmp\/h5dir-bbbb/);
+      expect(manager.relaunchDefaultBackend).toHaveBeenCalledWith(true);
+    });
+
+    it("leaves unknown (non-schema) removed keys untouched", async () => {
+      // Simulate an inherited env value the process picked up from some boot
+      // source other than this test's .env — removal of the key from the file
+      // must NOT clear it, because it is not ours to manage (not in CONFIG_SCHEMA).
+      process.env.SOME_RANDOM = "x1";
+      const { body } = await primeAndRemove(
+        (v) => `# h5\nHEADLESS=true\nSOME_RANDOM=${v}\n`,
+        "x1",
+        "SOME_RANDOM"
+      );
+      expect(process.env.SOME_RANDOM).toBe("x1");
+      expect(process.env.HEADLESS).toBe("true");
+      expect(body.envFile.changedOnDisk).toBe(false);
+      expect(manager.relaunchDefaultBackend).not.toHaveBeenCalled();
+    });
+  });
+
   describe("POST /console/vnc", () => {
     let envDir;
     let envFile;
