@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseApiKeys, parseBoolean, parseBrowsersEnv, parseEngines, parsePostProcessorModels, parseToolList } from "./config.js";
+import { deriveSearchEnabledEngines, parseApiKeys, parseBoolean, parseBrowsersEnv, parseEngines, parsePostProcessorModels, parseToolList } from "./config.js";
 import { clearDomainHintCache } from "./domain-hints.js";
 
 const WAIT_UNTIL_VALUES = new Set(["load", "domcontentloaded", "networkidle0", "networkidle2"]);
@@ -69,6 +69,20 @@ export function validateConfigValue(entry, raw) {
   return parseWithType(entry.type, entry, raw);
 }
 
+// Plan 60 S6: credential appliers recompute the full enabled-engines list from
+// the batch pre-synced env + fresh config keys — exactly what loadConfig does
+// at startup — so any multi-key credential/engine batch converges to the
+// restart result in any body order.
+function refreshSearchEnabledEngines(config) {
+  config.searchEnabledEngines = deriveSearchEnabledEngines({
+    explicit: process.env.SEARCH_ENABLED_ENGINES,
+    exaApiKey: config.exaApiKey,
+    linkupApiKey: config.linkupApiKey,
+    tavilyApiKey: config.tavilyApiKey,
+    firecrawlApiKey: config.firecrawlApiKey
+  });
+}
+
 const HOT_APPLYERS = {
   SEARCH_ROUTE_WARMUP_ENGINES: (config, value) => { config.searchRouteWarmupEngines = value; },
   SEARCH_ENABLED_ENGINES: (config, value) => {
@@ -83,60 +97,24 @@ const HOT_APPLYERS = {
     config.searchEnabledEngines = engines;
   },
   EXA_API_KEY: (config, value) => {
-    const key = String(value || "").trim();
-    config.exaApiKey = key;
-    process.env.EXA_API_KEY = key;
-    if (Array.isArray(config.searchEnabledEngines)) {
-      const hasExa = config.searchEnabledEngines.includes("exa_api");
-      if (key && !hasExa && !process.env.SEARCH_ENABLED_ENGINES) {
-        config.searchEnabledEngines = [...config.searchEnabledEngines, "exa_api"];
-      } else if (!key && hasExa) {
-        const filtered = config.searchEnabledEngines.filter((e) => e !== "exa_api");
-        config.searchEnabledEngines = filtered.length ? filtered : null;
-      }
-    }
+    config.exaApiKey = String(value || "").trim();
+    process.env.EXA_API_KEY = config.exaApiKey;
+    refreshSearchEnabledEngines(config);
   },
   LINKUP_API_KEY: (config, value) => {
-    const key = String(value || "").trim();
-    config.linkupApiKey = key;
-    process.env.LINKUP_API_KEY = key;
-    if (Array.isArray(config.searchEnabledEngines)) {
-      const hasLinkup = config.searchEnabledEngines.includes("linkup_api");
-      if (key && !hasLinkup && !process.env.SEARCH_ENABLED_ENGINES) {
-        config.searchEnabledEngines = [...config.searchEnabledEngines, "linkup_api"];
-      } else if (!key && hasLinkup) {
-        const filtered = config.searchEnabledEngines.filter((e) => e !== "linkup_api");
-        config.searchEnabledEngines = filtered.length ? filtered : null;
-      }
-    }
+    config.linkupApiKey = String(value || "").trim();
+    process.env.LINKUP_API_KEY = config.linkupApiKey;
+    refreshSearchEnabledEngines(config);
   },
   TAVILY_API_KEY: (config, value) => {
-    const key = String(value || "").trim();
-    config.tavilyApiKey = key;
-    process.env.TAVILY_API_KEY = key;
-    if (Array.isArray(config.searchEnabledEngines)) {
-      const hasTavily = config.searchEnabledEngines.includes("tavily_api");
-      if (key && !hasTavily && !process.env.SEARCH_ENABLED_ENGINES) {
-        config.searchEnabledEngines = [...config.searchEnabledEngines, "tavily_api"];
-      } else if (!key && hasTavily) {
-        const filtered = config.searchEnabledEngines.filter((e) => e !== "tavily_api");
-        config.searchEnabledEngines = filtered.length ? filtered : null;
-      }
-    }
+    config.tavilyApiKey = String(value || "").trim();
+    process.env.TAVILY_API_KEY = config.tavilyApiKey;
+    refreshSearchEnabledEngines(config);
   },
   FIRECRAWL_API_KEY: (config, value) => {
-    const key = String(value || "").trim();
-    config.firecrawlApiKey = key;
-    process.env.FIRECRAWL_API_KEY = key;
-    if (Array.isArray(config.searchEnabledEngines)) {
-      const hasFirecrawl = config.searchEnabledEngines.includes("firecrawl_api");
-      if (key && !hasFirecrawl && !process.env.SEARCH_ENABLED_ENGINES) {
-        config.searchEnabledEngines = [...config.searchEnabledEngines, "firecrawl_api"];
-      } else if (!key && hasFirecrawl) {
-        const filtered = config.searchEnabledEngines.filter((e) => e !== "firecrawl_api");
-        config.searchEnabledEngines = filtered.length ? filtered : null;
-      }
-    }
+    config.firecrawlApiKey = String(value || "").trim();
+    process.env.FIRECRAWL_API_KEY = config.firecrawlApiKey;
+    refreshSearchEnabledEngines(config);
   },
   SEARCH_ROUTE_CIRCUIT_OPEN_MS: (config, value) => { config.searchRouteCircuitOpenMs = value; },
   SEARCH_KEEP_MIN_WORKING_WINDOWS: (config, value) => {

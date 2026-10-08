@@ -937,6 +937,84 @@ describe("mcp-server HTTP endpoints", () => {
       delete process.env.MCP_PUBLIC_URL;
     });
 
+    it("applies a credential + engine-list batch order-independently (plan 60 S6)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origList = manager.config.searchEnabledEngines;
+      const origExa = manager.config.exaApiKey;
+      const origEnvList = process.env.SEARCH_ENABLED_ENGINES;
+      const origEnvExa = process.env.EXA_API_KEY;
+      const seed = () => {
+        manager.config.searchEnabledEngines = ["duckduckgo", "bing"];
+        manager.config.exaApiKey = "";
+        delete process.env.SEARCH_ENABLED_ENGINES;
+        delete process.env.EXA_API_KEY;
+      };
+      const orders = [
+        { SEARCH_ENABLED_ENGINES: "duckduckgo,bing", EXA_API_KEY: "fresh-exa" },
+        { EXA_API_KEY: "fresh-exa", SEARCH_ENABLED_ENGINES: "duckduckgo,bing" },
+      ];
+      const seen = [];
+      try {
+        for (const updates of orders) {
+          seed();
+          const res = await fetch(`${MCP_BASE}/console/config`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ updates }),
+          });
+          const body = await res.json();
+          expect(body.ok).toBe(true);
+          expect(body.hotApplied).toEqual(expect.arrayContaining(["SEARCH_ENABLED_ENGINES", "EXA_API_KEY"]));
+          seen.push([...manager.config.searchEnabledEngines]);
+        }
+        // explicit list wins — the credential key must not auto-add itself,
+        // and both body orders must produce the restart result
+        expect(seen[0]).toEqual(["duckduckgo", "bing"]);
+        expect(seen[1]).toEqual(seen[seen.length - 1]);
+      } finally {
+        manager.config.searchEnabledEngines = origList;
+        manager.config.exaApiKey = origExa;
+        if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
+        else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+        if (origEnvExa === undefined) delete process.env.EXA_API_KEY;
+        else process.env.EXA_API_KEY = origEnvExa;
+      }
+    });
+
+    it("restores a credential engine listed in the explicit list when its key is re-added (plan 60 S6)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origList = manager.config.searchEnabledEngines;
+      const origExa = manager.config.exaApiKey;
+      const origEnvList = process.env.SEARCH_ENABLED_ENGINES;
+      const origEnvExa = process.env.EXA_API_KEY;
+      try {
+        // explicit list still contains exa_api; the key was absent so the
+        // runtime list had it stripped — re-adding the key must bring it back
+        // exactly as a restart from this .env would
+        process.env.SEARCH_ENABLED_ENGINES = "duckduckgo,exa_api";
+        manager.config.searchEnabledEngines = ["duckduckgo"];
+        manager.config.exaApiKey = "";
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { EXA_API_KEY: "fresh-exa" } }),
+        });
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("EXA_API_KEY");
+        expect(manager.config.searchEnabledEngines).toEqual(["duckduckgo", "exa_api"]);
+      } finally {
+        manager.config.searchEnabledEngines = origList;
+        manager.config.exaApiKey = origExa;
+        if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
+        else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+        if (origEnvExa === undefined) delete process.env.EXA_API_KEY;
+        else process.env.EXA_API_KEY = origEnvExa;
+      }
+    });
+
     it("warns when an update drops a post-processor model still referenced by saved hints (plan 60 S3)", async () => {
       const browserMod = await import("../src/browser.js");
       const manager = await browserMod.getBrowserManager.mock.results[0].value;

@@ -1195,7 +1195,15 @@ async function applyConfigUpdates(manager, body) {
     payload.envWritten = true;
   }
 
-  // Phase 3: runtime application — only ever reached after the durable write
+  // Phase 3 (plan 60 S6): pre-sync process.env for this batch BEFORE the
+  // appliers run, so the credential appliers' enabled-engines derivation (it
+  // reads process.env.SEARCH_ENABLED_ENGINES) sees the batch's final env
+  // state instead of the stale pre-save value.
+  for (const { key, parsed } of validated) {
+    process.env[key] = String(parsed.value);
+  }
+
+  // Phase 4: runtime application — only ever reached after the durable write
   // succeeded (or when nothing needed writing).
   for (const { key, entry, parsed } of validated) {
     if (entry.applies === "hot") {
@@ -1232,14 +1240,6 @@ async function applyConfigUpdates(manager, body) {
   }
 
   if (changedKeys.size) {
-    if (updates) {
-      for (const [rawKey, rawValue] of Object.entries(updates)) {
-        const key = String(rawKey).toUpperCase();
-        if (changedKeys.has(key)) {
-          process.env[key] = String(rawValue);
-        }
-      }
-    }
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
     recordEnvChange({
