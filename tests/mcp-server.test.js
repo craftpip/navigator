@@ -50,6 +50,10 @@ vi.mock("../src/devtools.js", () => ({
 }));
 vi.mock("cloakbrowser", () => ({}));
 vi.mock("cloakbrowser/puppeteer", () => ({ launch: vi.fn() }));
+vi.mock("../src/env-file.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, writeEnvFile: vi.fn((...args) => actual.writeEnvFile(...args)) };
+});
 
 const MCP_PORT = 18990;
 const MCP_BASE = `http://localhost:${MCP_PORT}`;
@@ -888,6 +892,49 @@ describe("mcp-server HTTP endpoints", () => {
       expect(body.ok).toBe(true);
       expect(body.hotApplied).toContain("SEARCH_QUEUE_ESCALATION_FACTOR");
       expect(fs.readFileSync(envFile, "utf8")).toContain("SEARCH_QUEUE_ESCALATION_FACTOR=3");
+    });
+
+    it("does not apply anything to runtime when the .env write fails (plan 60 S5)", async () => {
+      const envFileMod = await import("../src/env-file.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const before = manager.config.maxConcurrentPageOps;
+      envFileMod.writeEnvFile.mockRejectedValueOnce(new Error("simulated disk failure"));
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { MAX_CONCURRENT_PAGE_OPS: 7 } }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.ok).toBe(false);
+        expect(body.error).toContain("failed to persist .env");
+        expect(body.error).toContain("simulated disk failure");
+        expect(body.envWritten).toBe(false);
+        // runtime untouched — the hot applier never ran
+        expect(manager.config.maxConcurrentPageOps).toBe(before);
+        // canonical file untouched too
+        expect(fs.readFileSync(envFile, "utf8")).not.toContain("MAX_CONCURRENT_PAGE_OPS=7");
+      } finally {
+        envFileMod.writeEnvFile.mockClear();
+      }
+    });
+
+    it("persists hot keys that have no runtime applier as restart-required (plan 60 S5)", async () => {
+      const res = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { MCP_PUBLIC_URL: "https://navigator.example.com" } }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.restartRequired).toContain("MCP_PUBLIC_URL");
+      expect(body.hotApplied).not.toContain("MCP_PUBLIC_URL");
+      expect(body.envWritten).toBe(true);
+      expect(fs.readFileSync(envFile, "utf8")).toContain("MCP_PUBLIC_URL=https://navigator.example.com");
+      delete process.env.MCP_PUBLIC_URL;
     });
 
     it("warns when an update drops a post-processor model still referenced by saved hints (plan 60 S3)", async () => {

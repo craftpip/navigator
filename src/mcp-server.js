@@ -1128,6 +1128,7 @@ async function applyConfigUpdates(manager, body) {
   }
 
   const changedKeys = new Set();
+  const resetKeys = [];
   let envText = await readEnvFile(envPath);
 
   const validated = [];
@@ -1153,6 +1154,49 @@ async function applyConfigUpdates(manager, body) {
     return { ok: false, error: `${payload.invalid.length} invalid value(s)`, invalid: payload.invalid };
   }
 
+  // Phase 1 (plan 60 S5): plan the durable .env text — pure, no runtime side
+  // effects. Every validated update and every removed reset enters changedKeys,
+  // so persistence is decided by "the file text changed", independent of
+  // whether a runtime applier exists for the key.
+  for (const { key } of validated) {
+    changedKeys.add(key);
+  }
+
+  if (resets.length) {
+    const { text: afterReset, removed } = removeEnvKeysText(envText, resets);
+    if (removed.length) {
+      envText = afterReset;
+      for (const key of removed) {
+        changedKeys.add(key);
+        resetKeys.push(key);
+      }
+    }
+  }
+
+  if (changedKeys.size && updates) {
+    const updated = upsertEnvText(envText, Object.fromEntries(
+      Object.entries(updates).map(([rawKey, rawValue]) => [String(rawKey).toUpperCase(), String(rawValue)])
+    ));
+    envText = updated.text;
+    payload.unchanged = updated.unchanged;
+  }
+
+  // Phase 2 (plan 60 S5): persist BEFORE any runtime mutation, so a failed
+  // .env write can never leave the runtime diverged from the canonical file.
+  if (changedKeys.size) {
+    let backup = null;
+    try {
+      backup = await backupEnvFile(envPath);
+      await writeEnvFile(envPath, envText);
+    } catch (error) {
+      return { ...payload, ok: false, error: `failed to persist .env — no changes applied: ${error?.message || error}` };
+    }
+    if (backup) payload.backup = backup;
+    payload.envWritten = true;
+  }
+
+  // Phase 3: runtime application — only ever reached after the durable write
+  // succeeded (or when nothing needed writing).
   for (const { key, entry, parsed } of validated) {
     if (entry.applies === "hot") {
       const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, parsed.value) : null;
@@ -1163,50 +1207,31 @@ async function applyConfigUpdates(manager, body) {
           payload.invalidatedBrowsers.push(...browsersResult.invalidated);
         }
         payload.hotApplied.push(key);
-        changedKeys.add(key);
       } else {
         payload.restartRequired.push(key);
       }
     } else {
       payload.restartRequired.push(key);
-      changedKeys.add(key);
     }
   }
 
-  if (resets.length) {
-    const { text: afterReset, removed } = removeEnvKeysText(envText, resets);
-    if (removed.length) {
-      envText = afterReset;
-      for (const key of removed) {
-        changedKeys.add(key);
-        const entry = CONFIG_SCHEMA.find((item) => item.key === key);
-        if (entry && entry.applies === "hot") {
-          const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, entry.fallback) : null;
-          if (browsersResult) {
-            payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
-            payload.invalidatedBrowsers.push(...browsersResult.invalidated);
-          }
-          else hotApplyConfig(manager.config, key, entry.fallback);
-          payload.hotApplied.push(`${key}→default`);
-          delete process.env[key];
-        } else {
-          payload.restartRequired.push(`${key}→default`);
-        }
+  for (const key of resetKeys) {
+    const entry = CONFIG_SCHEMA.find((item) => item.key === key);
+    if (entry && entry.applies === "hot") {
+      const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, entry.fallback) : null;
+      if (browsersResult) {
+        payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
+        payload.invalidatedBrowsers.push(...browsersResult.invalidated);
       }
+      else hotApplyConfig(manager.config, key, entry.fallback);
+      payload.hotApplied.push(`${key}→default`);
+      delete process.env[key];
+    } else {
+      payload.restartRequired.push(`${key}→default`);
     }
   }
 
   if (changedKeys.size) {
-    if (updates) {
-      const updated = upsertEnvText(envText, Object.fromEntries(
-        Object.entries(updates).map(([rawKey, rawValue]) => [String(rawKey).toUpperCase(), String(rawValue)])
-      ));
-      envText = updated.text;
-      payload.unchanged = updated.unchanged;
-    }
-    const backup = await backupEnvFile(envPath);
-    if (backup) payload.backup = backup;
-    await writeEnvFile(envPath, envText);
     if (updates) {
       for (const [rawKey, rawValue] of Object.entries(updates)) {
         const key = String(rawKey).toUpperCase();
@@ -1215,7 +1240,6 @@ async function applyConfigUpdates(manager, body) {
         }
       }
     }
-    payload.envWritten = true;
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
     recordEnvChange({
