@@ -30,10 +30,12 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [~] plans/60_configuration_lifecycle_integrity_audit.md  — started 2026-10-07 — `In progress`: browser/relay lifecycle slice; fixed B1–B9, B9-deep, K1–K7, S1–S12, H1–H6 (2026-10-07/08); remaining H7. (Dropped from the queue by a corrupted edit; restored 2026-10-07.)
+- [x] plans/60_configuration_lifecycle_integrity_audit.md  — resolved 2026-10-08
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done
+
+- [x] plans/60_configuration_lifecycle_integrity_audit.md  — `Complete` 2026-10-08 — browser/relay lifecycle slice; fixed B1–B9, B9-deep, K1–K7, S1–S12, H1–H7. (Dropped from the queue by a corrupted edit; restored 2026-10-07.)
 
 - [x] plans/archive/14_request-activity-trend-graph.md — completed + absorbed 2026-10-07. Server side was already live (`getActivityTrend`, `GET /stats/activity-trend`, core chart); this session closed every remaining gap: engine selector with `?engine=` URL round-trip + engine footer (`attempt/success/failure/skipped` — the engine filter scopes only the engine series, Web/DevTools totals stay engine-independent), legend hide/show toggles (`aria-pressed`; hidden series drop out of the tooltip and the shared y-scale), hover/focus tooltip + click/tap-pin readout below the chart, empty/loading/error states, dashed fail strokes (state never color-only), and the `Browser.` devtools categorization fix (`activityCategoryForTool` in `src/activity.js` + `src/mcp-server.js`). 7 trend tests (`tests/activity.test.js` ×5 — all-ranges bucket shape, running-search exclusion, 7-day prune; `tests/mcp-server.test.js` ×2 HTTP 400). Full suite 670 pass / 90 fail — all 6 failing files pre-existing; lint 66 problems, none on touched files. Absorbed into `docs/code/runtime-and-tests.md` §"Request Activity Trend Card" + `docs/api/mcp-and-http.md`; console bundle rebuilt and live-verified (legend toggle 7→6→7 paths, range/engine URL state, pin/unpin, tooltip on hover+focus, no JS errors).
 - [x] plans/71_element-crop-screenshot.md — completed 2026-10-05. Implemented `web_page_screenshot_crop` (selector/xpath/region, padding, clamping, matched/total counts) in `src/search.js` + MCP dispatch/validation/formatting in `src/mcp-server.js`. Docs added (`docs/api/tool-reference.md`, `AGENTS.md` Tool Contract); plan 5/5. Full vitest 774 passed, 1 pre-existing SVG failure. (Relocated from a corrupted spot in this file's intro.)
