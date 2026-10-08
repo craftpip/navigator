@@ -202,6 +202,44 @@ export function parsePostProcessorModels(value) {
   }
 }
 
+// Plan 60 S12: strict verdict for the model registry. parsePostProcessorModels
+// cannot tell ABSENT (null — legacy fallback applies) from MALFORMED (also null
+// — the models would silently vanish), so console validation uses this instead:
+// absent and "[]" are valid clears, while bad JSON, a non-array, a non-empty
+// array with no usable entries, and duplicate ids are each rejected with a
+// message naming the problem (same rejection style as the BROWSERS check in
+// validateConfigValue).
+export function validatePostProcessorModels(value) {
+  if (value === null || value === undefined || typeof value !== "string" || !value.trim()) {
+    return { valid: true, models: null };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    return { valid: false, error: `POST_PROCESSOR_MODELS is not valid JSON: ${error?.message || error}` };
+  }
+  if (!Array.isArray(parsed)) {
+    return { valid: false, error: 'POST_PROCESSOR_MODELS must be a JSON array of model entries, e.g. [{"id":"reader_lm","model":"jinaai/reader-lm-0.5b","baseUrl":"http://host.docker.internal:8000/v1"}]' };
+  }
+  const models = parsePostProcessorModels(value);
+  if (!models && parsed.length > 0) {
+    return { valid: false, error: 'POST_PROCESSOR_MODELS has no usable entries — each entry needs an id plus model and baseUrl (or kind:"api" with baseUrl)' };
+  }
+  if (models) {
+    const seen = new Set();
+    const duplicates = new Set();
+    for (const entry of models) {
+      if (seen.has(entry.id)) duplicates.add(entry.id);
+      seen.add(entry.id);
+    }
+    if (duplicates.size) {
+      return { valid: false, error: `POST_PROCESSOR_MODELS has duplicate model id(s): ${[...duplicates].join(", ")} — ids must be unique` };
+    }
+  }
+  return { valid: true, models };
+}
+
 export function parseBrowsersEnv(raw) {
   if (raw === undefined || raw === null || String(raw).trim() === "") {
     console.warn(
@@ -566,8 +604,14 @@ export async function loadConfig() {
 }
 
 function resolvePostProcessorModels() {
-  const configured = parsePostProcessorModels(readConfigEnv("POST_PROCESSOR_MODELS", "AI_EXTRACTOR_MODELS", "READER_LM_MODELS"));
-  if (configured) return configured;
+  const raw = readConfigEnv("POST_PROCESSOR_MODELS", "AI_EXTRACTOR_MODELS", "READER_LM_MODELS");
+  const verdict = validatePostProcessorModels(raw);
+  // Plan 60 S12: a set-but-broken registry must not empty itself silently —
+  // say so once at startup, then fall through to the legacy path as before.
+  if (raw && String(raw).trim() && !verdict.valid) {
+    console.warn(`[config] ${verdict.error} — this value was ignored (post-processor models are empty or legacy until it is fixed).`);
+  }
+  if (verdict.models) return verdict.models;
   const baseUrl = (readConfigEnv("POST_PROCESSOR_BASE_URL", "AI_EXTRACTOR_BASE_URL", "READER_LM_BASE_URL") || "").trim().replace(/\/+$/, "");
   if (!baseUrl) return [];
   const model = (readConfigEnv("POST_PROCESSOR_MODEL", "AI_EXTRACTOR_MODEL", "READER_LM_MODEL") || "reader-lm:0.5b").trim();

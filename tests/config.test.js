@@ -173,6 +173,70 @@ describe("parsePostProcessorModels / readConfigEnv (READER_LM_* → AI_EXTRACTOR
   });
 });
 
+describe("validatePostProcessorModels (plan 60 S12)", () => {
+  it("accepts absent, empty, and empty-array values as valid clears", async () => {
+    const { validatePostProcessorModels } = await import("../src/config.js");
+    expect(validatePostProcessorModels(undefined)).toEqual({ valid: true, models: null });
+    expect(validatePostProcessorModels("")).toEqual({ valid: true, models: null });
+    expect(validatePostProcessorModels("   ")).toEqual({ valid: true, models: null });
+    expect(validatePostProcessorModels("[]")).toEqual({ valid: true, models: null });
+  });
+
+  it("rejects malformed JSON and non-array values with a message naming the problem", async () => {
+    const { validatePostProcessorModels } = await import("../src/config.js");
+    const badJson = validatePostProcessorModels("{not json");
+    expect(badJson.valid).toBe(false);
+    expect(badJson.error).toContain("not valid JSON");
+    const nonArray = validatePostProcessorModels('{"id":"a"}');
+    expect(nonArray.valid).toBe(false);
+    expect(nonArray.error).toContain("must be a JSON array");
+  });
+
+  it("rejects a non-empty array whose entries are all unusable", async () => {
+    const { validatePostProcessorModels } = await import("../src/config.js");
+    const verdict = validatePostProcessorModels(JSON.stringify([{ id: "x" }, { model: "m", baseUrl: "http://x" }]));
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toContain("no usable entries");
+  });
+
+  it("rejects duplicate model ids by name", async () => {
+    const { validatePostProcessorModels } = await import("../src/config.js");
+    const verdict = validatePostProcessorModels(JSON.stringify([
+      { id: "reader_lm", model: "m", baseUrl: "http://a" },
+      { id: "reader_lm", model: "n", baseUrl: "http://b" }
+    ]));
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toContain("duplicate model id(s): reader_lm");
+  });
+
+  it("accepts a valid registry and returns the parsed models", async () => {
+    const { validatePostProcessorModels } = await import("../src/config.js");
+    const verdict = validatePostProcessorModels(JSON.stringify([
+      { id: "reader_lm", label: "reader-lm-0.5b", model: "jinaai/reader-lm-0.5b", baseUrl: "http://o:11434/v1" }
+    ]));
+    expect(verdict.valid).toBe(true);
+    expect(verdict.models).toHaveLength(1);
+    expect(verdict.models[0].id).toBe("reader_lm");
+  });
+
+  it("warns at boot instead of silently emptying a malformed registry", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      vi.stubEnv("CHROME_PATH", "/usr/bin/env");
+      vi.stubEnv("POST_PROCESSOR_MODELS", "{not json");
+      vi.stubEnv("POST_PROCESSOR_BASE_URL", undefined);
+      vi.stubEnv("AI_EXTRACTOR_BASE_URL", undefined);
+      vi.stubEnv("READER_LM_BASE_URL", undefined);
+      const { loadConfig } = await import("../src/config.js");
+      const config = await loadConfig();
+      expect(config.postProcessorModels).toEqual([]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("POST_PROCESSOR_MODELS is not valid JSON"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("loadConfig (parse engine + browser behavior)", () => {
   it("defaults SEARCH_ROUTE_WARMUP_ENGINES to the primary routes", async () => {
     vi.stubEnv("CHROME_PATH", "/usr/bin/env");

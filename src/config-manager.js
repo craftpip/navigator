@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveSearchEnabledEngines, parseApiKeys, parseBoolean, parseBrowsersEnv, parseEngines, parsePostProcessorModels, parseToolList } from "./config.js";
+import { deriveSearchEnabledEngines, parseApiKeys, parseBoolean, parseBrowsersEnv, parseEngines, parsePostProcessorModels, parseToolList, validatePostProcessorModels } from "./config.js";
 import { clearDomainHintCache } from "./domain-hints.js";
 
 const WAIT_UNTIL_VALUES = new Set(["load", "domcontentloaded", "networkidle0", "networkidle2"]);
@@ -70,6 +70,14 @@ export function validateConfigValue(entry, raw) {
     } catch (error) {
       return { valid: false, error: error?.message || "invalid BROWSERS value" };
     }
+  }
+  // Plan 60 S12: the model registry is a JSON array with identity semantics —
+  // reject malformed values and duplicate ids at the save gate (the generic
+  // string pass-through would accept anything and the applier would then
+  // silently empty the registry).
+  if (entry.key === "POST_PROCESSOR_MODELS") {
+    const verdict = validatePostProcessorModels(String(raw));
+    return verdict.valid ? { valid: true, value: String(raw) } : { valid: false, error: verdict.error };
   }
   return parseWithType(entry.type, entry, raw);
 }

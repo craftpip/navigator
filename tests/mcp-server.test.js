@@ -1230,6 +1230,49 @@ describe("mcp-server HTTP endpoints", () => {
       }
     });
 
+    it("rejects malformed and duplicate POST_PROCESSOR_MODELS saves without touching .env (plan 60 S12)", async () => {
+      const before = fs.readFileSync(envFile, "utf8");
+
+      const badJson = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { POST_PROCESSOR_MODELS: "{not json" } }),
+      });
+      expect(badJson.status).toBe(400);
+      const badBody = await badJson.json();
+      expect(badBody.ok).toBe(false);
+      expect(badBody.invalid?.[0]?.key).toBe("POST_PROCESSOR_MODELS");
+      expect(badBody.invalid[0].error).toContain("not valid JSON");
+
+      const nonArray = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { POST_PROCESSOR_MODELS: '{"id":"a"}' } }),
+      });
+      expect((await nonArray.json()).invalid?.[0]?.error).toContain("must be a JSON array");
+
+      const duplicates = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { POST_PROCESSOR_MODELS: JSON.stringify([
+          { id: "reader_lm", model: "m", baseUrl: "http://a" },
+          { id: "reader_lm", model: "n", baseUrl: "http://b" }
+        ]) } }),
+      });
+      expect((await duplicates.json()).invalid?.[0]?.error).toContain("duplicate model id(s): reader_lm");
+
+      const allUsable = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { POST_PROCESSOR_MODELS: JSON.stringify([{ id: "x" }]) } }),
+      });
+      expect((await allUsable.json()).invalid?.[0]?.error).toContain("no usable entries");
+
+      // rejected before any persistence: .env untouched, no backup created
+      expect(fs.readFileSync(envFile, "utf8")).toBe(before);
+      expect(fs.readdirSync(envDir).some((f) => f.includes(".env.backup-"))).toBe(false);
+    });
+
     it("warns when an update drops a post-processor model still referenced by saved hints (plan 60 S3)", async () => {
       const browserMod = await import("../src/browser.js");
       const manager = await browserMod.getBrowserManager.mock.results[0].value;
