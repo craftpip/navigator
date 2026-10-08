@@ -40,6 +40,7 @@ vi.mock("../src/search.js", () => ({
   getEngineProfiles: vi.fn().mockReturnValue([]),
   resetSearchEngine: vi.fn().mockReturnValue(true),
   purgeEngineRuntimeState: vi.fn().mockReturnValue(true),
+  reconfigureEngineScheduler: vi.fn(),
 }));
 vi.mock("../src/devtools.js", () => ({
   devtoolsToolDefinitions: [{ name: "Target.createTarget" }, { name: "Runtime.evaluate" }],
@@ -1176,6 +1177,56 @@ describe("mcp-server HTTP endpoints", () => {
         manager.config.searchRouteWarmupEngines = origWarmup;
         if (origEnvWarmup === undefined) delete process.env.SEARCH_ROUTE_WARMUP_ENGINES;
         else process.env.SEARCH_ROUTE_WARMUP_ENGINES = origEnvWarmup;
+      }
+    });
+
+    it("reconfigures the engine scheduler on queue-config saves (plan 60 S11)", async () => {
+      const searchMod = await import("../src/search.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origInterval = manager.config.searchQueueMinIntervalMs;
+      const origEnvInterval = process.env.SEARCH_QUEUE_MIN_INTERVAL_MS;
+      try {
+        // boot applied the queue config already — restart-equal with hot saves
+        expect(searchMod.reconfigureEngineScheduler).toHaveBeenCalledWith(manager.config);
+        searchMod.reconfigureEngineScheduler.mockClear();
+
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_QUEUE_MIN_INTERVAL_MS: 45000 } }),
+        });
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("SEARCH_QUEUE_MIN_INTERVAL_MS");
+        expect(manager.config.searchQueueMinIntervalMs).toBe(45000);
+        expect(searchMod.reconfigureEngineScheduler).toHaveBeenCalledTimes(1);
+        expect(searchMod.reconfigureEngineScheduler).toHaveBeenCalledWith(manager.config);
+
+        // a reset funnels through the same listener with the schema fallback
+        searchMod.reconfigureEngineScheduler.mockClear();
+        const resReset = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reset: ["SEARCH_QUEUE_MIN_INTERVAL_MS"] }),
+        });
+        expect((await resReset.json()).ok).toBe(true);
+        expect(manager.config.searchQueueMinIntervalMs).toBe(30000);
+        expect(searchMod.reconfigureEngineScheduler).toHaveBeenCalledTimes(1);
+
+        // non-queue hot keys leave the scheduler alone
+        searchMod.reconfigureEngineScheduler.mockClear();
+        const resOther = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { ENABLE_SCREENSHOT_DOWNLOAD_LINK: true } }),
+        });
+        expect((await resOther.json()).hotApplied).toContain("ENABLE_SCREENSHOT_DOWNLOAD_LINK");
+        expect(searchMod.reconfigureEngineScheduler).not.toHaveBeenCalled();
+      } finally {
+        manager.config.searchQueueMinIntervalMs = origInterval;
+        if (origEnvInterval === undefined) delete process.env.SEARCH_QUEUE_MIN_INTERVAL_MS;
+        else process.env.SEARCH_QUEUE_MIN_INTERVAL_MS = origEnvInterval;
       }
     });
 

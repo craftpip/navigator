@@ -359,6 +359,14 @@ export function resetSearchEngine(engine) {
   return true;
 }
 
+// Plan 60 S11: the scheduler re-reads queue config (intervals, weights,
+// profile path) only via configure(); the MCP server calls this on every
+// queue-config hot apply and once at boot, so the live instance never waits
+// for the next fallback search to pick a save up.
+export function reconfigureEngineScheduler(config) {
+  engineScheduler.configure(config);
+}
+
 // Plan 60 S8: an engine crossing the enabled/disabled boundary gets a clean
 // slate — scheduler profile (stale cooldown / failure streak), open route
 // circuit, and attempt telemetry are dropped so a re-enable cannot inherit

@@ -18,10 +18,10 @@ import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowse
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
-import { validateConfigValue, hotApplyConfig, getConfigEpoch, setEngineBoundaryListener, setWarmupBoundaryListener } from "./config-manager.js";
+import { validateConfigValue, hotApplyConfig, getConfigEpoch, setEngineBoundaryListener, setWarmupBoundaryListener, setSearchQueueConfigListener } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState, reconfigureEngineScheduler } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
@@ -5118,6 +5118,13 @@ setWarmupBoundaryListener((change) => {
     console.error("[warmup] hot apply failed:", error);
   });
 });
+
+// Plan 60 S11: queue-config edits (intervals, weights, profile path) reach
+// the live scheduler at save time instead of waiting for the next fallback
+// search, and boot applies the same configure() up front so a restart from
+// the same .env lands on the identical scheduler state.
+setSearchQueueConfigListener(reconfigureEngineScheduler);
+reconfigureEngineScheduler(manager.config);
 
 const HANG_TIMEOUT_CODE = "HANG_TIMEOUT";
 let shutdownInProgress = false;

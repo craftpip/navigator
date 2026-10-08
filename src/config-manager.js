@@ -133,6 +133,20 @@ function normalizeWarmupList(value) {
   return [...new Set(raw.map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
 }
 
+// Plan 60 S11: queue-config saves must reach the live scheduler immediately —
+// the appliers below only mutate the config object, while EngineScheduler
+// re-reads its settings (intervals, weights, profile path) exclusively via
+// configure(): once at construction with defaults, then only when a fallback
+// search runs select(). The MCP server registers a listener that calls
+// configure() with the same config, so a profile-path swap (statePath +
+// reload) and interval/weight changes land at save time and hot state equals
+// a restart from the same .env.
+let searchQueueConfigListener = null;
+
+export function setSearchQueueConfigListener(listener) {
+  searchQueueConfigListener = typeof listener === "function" ? listener : null;
+}
+
 const HOT_APPLYERS = {
   SEARCH_ROUTE_WARMUP_ENGINES: (config, value) => {
     const next = normalizeWarmupList(value);
@@ -257,6 +271,9 @@ export function hotApplyConfig(config, key, value) {
   const applier = HOT_APPLYERS[key];
   if (!applier) return false;
   applier(config, value);
+  // Plan 60 S11: queue keys configure the live scheduler — push them now
+  // instead of leaving them for the next fallback search to pick up.
+  if (searchQueueConfigListener && key.startsWith("SEARCH_QUEUE_")) searchQueueConfigListener(config);
   // Every hot applier execution may change what a cached tool result would
   // look like fresh (UA, link refs, post-processor registry, engine pool…) —
   // one epoch covers all of them without per-key wiring (plan 60 S10).

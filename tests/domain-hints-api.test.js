@@ -25,6 +25,7 @@ vi.mock("../src/search.js", () => ({
   getActivityCounters: vi.fn().mockReturnValue({ searches: 0, searchResults: 0, fetches: 0, screenshots: 0, botBlocks: 0 }),
   getEngineAttemptStats: vi.fn().mockReturnValue({ total: 0, ok: 0, fail: 0, skip: 0, byEngine: {}, recentFailures: [] }),
   getEngineProfiles: vi.fn().mockReturnValue([]),
+  reconfigureEngineScheduler: vi.fn(),
 }));
 vi.mock("../src/devtools.js", () => ({
   devtoolsToolDefinitions: [],
