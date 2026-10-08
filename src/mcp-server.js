@@ -18,10 +18,10 @@ import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowse
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
-import { validateConfigValue, hotApplyConfig } from "./config-manager.js";
+import { validateConfigValue, hotApplyConfig, setEngineBoundaryListener } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
@@ -5073,6 +5073,24 @@ const manager = await getBrowserManager();
 logEvent("boot.start", { pid: process.pid });
 toolCacheTtlMs = manager.config.toolCacheTtlMs || 5 * 60 * 1000;
 logBootConfig(manager.config);
+
+// Plan 60 S8: engine set changes purge runtime state for engines crossing the
+// enabled/disabled boundary — scheduler profile (stale cooldown), open route
+// circuit, attempt telemetry, and cached select_best results produced while a
+// since-removed engine was part of the pool. The startup purge covers the
+// case no diff can see: a .env edit made while the server was down.
+setEngineBoundaryListener((engines) => {
+  toolResultCache.web_search.clear();
+  purgeEngineRuntimeState(engines);
+});
+{
+  const enabled = manager.config.searchEnabledEngines;
+  if (Array.isArray(enabled) && enabled.length) {
+    const enabledSet = new Set(enabled);
+    const disabled = SUPPORTED_ENGINES.filter((engine) => !enabledSet.has(engine));
+    if (disabled.length) purgeEngineRuntimeState(disabled);
+  }
+}
 
 const HANG_TIMEOUT_CODE = "HANG_TIMEOUT";
 let shutdownInProgress = false;

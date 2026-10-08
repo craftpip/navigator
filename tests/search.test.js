@@ -205,6 +205,68 @@ describe("getEngineAttemptStats", () => {
   });
 });
 
+describe("purgeEngineRuntimeState (plan 60 S8)", () => {
+  let cwdTemp;
+  let originalCwd;
+  beforeEach(async () => {
+    vi.resetModules();
+    originalCwd = process.cwd();
+    cwdTemp = await fs.mkdtemp(path.join(os.tmpdir(), "engine-purge-cwd-"));
+    process.chdir(cwdTemp);
+  });
+  afterEach(async () => {
+    vi.resetModules();
+    process.chdir(originalCwd);
+    await fs.rm(cwdTemp, { recursive: true, force: true });
+  });
+
+  it("drops profiles, circuits, and telemetry for purged engines only", async () => {
+    // poison the cwd-relative state files BEFORE search.js first evaluates in
+    // this cwd, so the purge is proven against loaded state, not fresh defaults
+    const cacheDir = path.join(cwdTemp, ".cache");
+    await fs.mkdir(cacheDir, { recursive: true });
+    await fs.writeFile(
+      path.join(cacheDir, "search-engine-profiles.json"),
+      JSON.stringify({ profiles: { mojeek: { attempts: 7, failuresInRow: 3, lastCalledAt: Date.now(), lastError: "boom" } } })
+    );
+    await fs.writeFile(
+      path.join(cacheDir, "search-circuit-breakers.json"),
+      JSON.stringify({ mojeek: { openUntil: Date.now() + 600000, failures: 3, lastError: "boom" } })
+    );
+    const mod = await import("../src/search.js");
+
+    const poisonedProfile = mod.getEngineProfiles().find((profile) => profile.engine === "mojeek");
+    expect(poisonedProfile.consecutiveFailures).toBe(3);
+    expect(poisonedProfile.state).toBe("cooling_down");
+    expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek")).toBe(true);
+
+    mod.recordEngineAttempt("mojeek", "fail", "boom");
+    mod.recordEngineAttempt("bing", "fail", "captcha");
+    expect(mod.getEngineAttemptStats().byEngine.mojeek).toBeTruthy();
+
+    expect(mod.purgeEngineRuntimeState(["mojeek"])).toBe(true);
+
+    const purgedProfile = mod.getEngineProfiles().find((profile) => profile.engine === "mojeek");
+    expect(purgedProfile.consecutiveFailures).toBe(0);
+    expect(purgedProfile.attempts).toBe(0);
+    expect(purgedProfile.state).toBe("unknown");
+    expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek")).toBe(false);
+
+    const stats = mod.getEngineAttemptStats();
+    expect(stats.byEngine.mojeek).toBeUndefined();
+    expect(stats.byEngine.bing).toBeTruthy();
+
+    // persistence reflects the purge — a restart must not resurrect it
+    const persistedProfiles = JSON.parse(await fs.readFile(path.join(cacheDir, "search-engine-profiles.json"), "utf8"));
+    expect(persistedProfiles.profiles.mojeek.failuresInRow).toBe(0);
+    const persistedCircuits = JSON.parse(await fs.readFile(path.join(cacheDir, "search-circuit-breakers.json"), "utf8"));
+    expect(Object.keys(persistedCircuits)).not.toContain("mojeek");
+    const persistedAttempts = JSON.parse(await fs.readFile(path.join(cacheDir, "search-engine-attempts.json"), "utf8"));
+    expect(persistedAttempts.some((entry) => entry.engine === "mojeek")).toBe(false);
+    expect(persistedAttempts.some((entry) => entry.engine === "bing")).toBe(true);
+  });
+});
+
 describe("browserSearch", () => {
   it("throws when no query provided", async () => {
     mockGetBrowserManager.mockResolvedValue(makeMockManager());

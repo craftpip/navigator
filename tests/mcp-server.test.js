@@ -39,6 +39,7 @@ vi.mock("../src/search.js", () => ({
   getEngineAttemptStats: vi.fn().mockReturnValue({ total: 0, ok: 0, fail: 0, skip: 0, byEngine: {}, recentFailures: [] }),
   getEngineProfiles: vi.fn().mockReturnValue([]),
   resetSearchEngine: vi.fn().mockReturnValue(true),
+  purgeEngineRuntimeState: vi.fn().mockReturnValue(true),
 }));
 vi.mock("../src/devtools.js", () => ({
   devtoolsToolDefinitions: [{ name: "Target.createTarget" }, { name: "Runtime.evaluate" }],
@@ -1095,6 +1096,47 @@ describe("mcp-server HTTP endpoints", () => {
         manager.config.linkupApiKey = origLinkup;
         manager.config.tavilyApiKey = origTavily;
         manager.config.firecrawlApiKey = origFirecrawl;
+        if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
+        else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+      }
+    });
+
+    it("purges runtime state for engines crossing the enabled boundary (plan 60 S8)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const searchMod = await import("../src/search.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origList = manager.config.searchEnabledEngines;
+      const origEnvList = process.env.SEARCH_ENABLED_ENGINES;
+      try {
+        searchMod.purgeEngineRuntimeState.mockClear();
+        // mojeek was enabled, google was not: one save flips both — both must
+        // cross the boundary and be purged (profiles/circuits/telemetry + the
+        // web_search cache that may hold select_best results including them)
+        manager.config.searchEnabledEngines = ["duckduckgo", "bing", "mojeek"];
+        process.env.SEARCH_ENABLED_ENGINES = "duckduckgo,bing,mojeek";
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_ENABLED_ENGINES: "duckduckgo,bing,google" } }),
+        });
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(manager.config.searchEnabledEngines).toEqual(["duckduckgo", "bing", "google"]);
+        expect(searchMod.purgeEngineRuntimeState).toHaveBeenCalledTimes(1);
+        const purged = [...searchMod.purgeEngineRuntimeState.mock.calls.at(-1)[0]].sort();
+        expect(purged).toEqual(["google", "mojeek"]);
+
+        // a save that does not move anyone across the boundary must not purge
+        searchMod.purgeEngineRuntimeState.mockClear();
+        const res2 = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_ENABLED_ENGINES: "duckduckgo,bing,google" } }),
+        });
+        expect((await res2.json()).ok).toBe(true);
+        expect(searchMod.purgeEngineRuntimeState).not.toHaveBeenCalled();
+      } finally {
+        manager.config.searchEnabledEngines = origList;
         if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
         else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
       }

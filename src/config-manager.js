@@ -73,14 +73,43 @@ export function validateConfigValue(entry, raw) {
 // the batch pre-synced env + fresh config keys — exactly what loadConfig does
 // at startup — so any multi-key credential/engine batch converges to the
 // restart result in any body order.
+//
+// Plan 60 S8: every runtime mutation of the engine set funnels through
+// swapEnabledEngines, which diffs the before/after lists and fires the
+// boundary listener with the engines that crossed in either direction. The
+// MCP server registers the listener to purge scheduler profiles, route
+// circuits, attempt telemetry, and the web_search cache for those engines —
+// a re-enable can then never inherit pre-disable cooldown state. Null before
+// registration keeps library use and unregistered tests no-op; a null prior
+// list (never initialized) skips the diff because there is no trustworthy
+// before-state to compare.
+let engineBoundaryListener = null;
+
+export function setEngineBoundaryListener(listener) {
+  engineBoundaryListener = typeof listener === "function" ? listener : null;
+}
+
+function swapEnabledEngines(config, next) {
+  const before = Array.isArray(config.searchEnabledEngines) ? config.searchEnabledEngines : null;
+  config.searchEnabledEngines = next;
+  if (!before || !engineBoundaryListener) return;
+  const after = Array.isArray(next) ? next : [];
+  const beforeSet = new Set(before);
+  const afterSet = new Set(after);
+  const crossed = [...new Set([...before, ...after])].filter(
+    (engine) => beforeSet.has(engine) !== afterSet.has(engine)
+  );
+  if (crossed.length) engineBoundaryListener(crossed);
+}
+
 function refreshSearchEnabledEngines(config) {
-  config.searchEnabledEngines = deriveSearchEnabledEngines({
+  swapEnabledEngines(config, deriveSearchEnabledEngines({
     explicit: process.env.SEARCH_ENABLED_ENGINES,
     exaApiKey: config.exaApiKey,
     linkupApiKey: config.linkupApiKey,
     tavilyApiKey: config.tavilyApiKey,
     firecrawlApiKey: config.firecrawlApiKey
-  });
+  }));
 }
 
 const HOT_APPLYERS = {
@@ -92,13 +121,13 @@ const HOT_APPLYERS = {
     // a save, a reset, and a restart from the resulting .env all converge.
     const list = Array.isArray(value) ? value : String(value ?? "").split(",");
     const explicit = list.map(String).filter(Boolean).join(",");
-    config.searchEnabledEngines = deriveSearchEnabledEngines({
+    swapEnabledEngines(config, deriveSearchEnabledEngines({
       explicit,
       exaApiKey: config.exaApiKey,
       linkupApiKey: config.linkupApiKey,
       tavilyApiKey: config.tavilyApiKey,
       firecrawlApiKey: config.firecrawlApiKey
-    });
+    }));
   },
   EXA_API_KEY: (config, value) => {
     config.exaApiKey = String(value || "").trim();

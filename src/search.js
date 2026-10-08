@@ -359,6 +359,37 @@ export function resetSearchEngine(engine) {
   return true;
 }
 
+// Plan 60 S8: an engine crossing the enabled/disabled boundary gets a clean
+// slate — scheduler profile (stale cooldown / failure streak), open route
+// circuit, and attempt telemetry are dropped so a re-enable cannot inherit
+// pre-disable state and a disabled engine stops surfacing in /stats or
+// /health. The MCP server invalidates the web_search cache alongside; the
+// activity DB keeps its history — that is an audit log, not runtime state.
+export function purgeEngineRuntimeState(engines) {
+  if (!Array.isArray(engines) || !engines.length) return false;
+  const targets = new Set(engines.filter(Boolean).map(String));
+  if (!targets.size) return false;
+  let changed = false;
+  for (const engine of targets) {
+    if (engineScheduler.reset(engine)) changed = true;
+  }
+  let circuitsRemoved = false;
+  for (const key of [...routeCircuitState.keys()]) {
+    if (targets.has(key.split("/")[0])) {
+      routeCircuitState.delete(key);
+      circuitsRemoved = true;
+    }
+  }
+  if (circuitsRemoved) persistRouteCircuitState();
+  const before = engineAttemptLog.length;
+  for (let index = engineAttemptLog.length - 1; index >= 0; index -= 1) {
+    if (targets.has(engineAttemptLog[index]?.engine)) engineAttemptLog.splice(index, 1);
+  }
+  const telemetryRemoved = engineAttemptLog.length !== before;
+  if (telemetryRemoved) persistEngineAttemptLog();
+  return changed || circuitsRemoved || telemetryRemoved;
+}
+
 function normalizeEngines(engines, fallback) {
   const input = Array.isArray(engines) ? engines : [engines].filter(Boolean);
   const requested = input.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
