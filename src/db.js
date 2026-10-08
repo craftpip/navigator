@@ -330,6 +330,10 @@ export function getRefLinkByUrl(url) {
   return getDb().prepare("SELECT id, url FROM ref_links WHERE url = ?").get(normalized) ?? null;
 }
 
+export function clearRefLinks() {
+  return getDb().prepare("DELETE FROM ref_links").run().changes ?? 0;
+}
+
 export function initializeMcpApiKeys(legacyKeys = []) {
   const database = getDb();
   const initialized = database.prepare("SELECT value FROM app_state WHERE key = 'mcp_api_keys_initialized'").get();

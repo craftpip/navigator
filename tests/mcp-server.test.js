@@ -2050,6 +2050,117 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("POST /console/api/cache/clear (plan 60 H7)", () => {
+    // The endpoint DELETEs ref_links — run against an isolated temp db so the
+    // persistent clear never touches the shared/bootstrap navigator.db.
+    let dbApi;
+    let tmpDir;
+
+    beforeEach(async () => {
+      dbApi = await import("../src/db.js");
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "h7-cache-clear-"));
+      dbApi.closeDb();
+      dbApi.initDb(tmpDir);
+    });
+
+    afterEach(() => {
+      dbApi.closeDb();
+      dbApi.initDb(); // restore the shared bootstrap DB for later suites
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it("clears the web_search tool cache, extractHtml cache, counters, and link refs", async () => {
+      const searchMod = await import("../src/search.js");
+      const refMemory = await import("../src/ref-memory.js");
+
+      // Freeze the mock increment used by later assertions so the clear is the
+      // single cause of any further browserSearch calls.
+      const searchUrl = `https://h7.example.com/query-${Date.now()}`;
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query: searchUrl, queries: [searchUrl],
+        results: [{ title: "Cached", url: searchUrl, snippet: "cached snippet" }],
+      }));
+      const r1 = await mcpPost({
+        jsonrpc: "2.0", id: 120, method: "tools/call",
+        params: { name: "web_search", arguments: { queries: [searchUrl] } },
+      });
+      expect(r1.status).toBe(200);
+      const r2 = await mcpPost({
+        jsonrpc: "2.0", id: 121, method: "tools/call",
+        params: { name: "web_search", arguments: { queries: [searchUrl] } },
+      });
+      expect(r2.status).toBe(200);
+      // identical repeat served from the tool cache — the search driver ran once
+      expect(searchMod.browserSearch).toHaveBeenCalledTimes(1);
+
+      // Seed the extractHtml cache through the real /extract capture path.
+      const extractUrl = `https://h7.example.com/html-${Date.now()}`;
+      searchMod.browserOpenAndExtract.mockResolvedValueOnce({
+        ok: true, url: extractUrl, title: "H7", text: "h7 body",
+        html: "<html><body>h7 html</body></html>",
+      });
+      const ext = await fetch(`${MCP_BASE}/extract?url=${encodeURIComponent(extractUrl)}&cacheHtml=1`);
+      expect(ext.status).toBe(200);
+
+      // Seed a persisted link ref (in-memory + temp-db row).
+      const refUrl = `https://h7.example.com/ref-${Date.now()}`;
+      const ref = refMemory.rememberLink(refUrl);
+      expect(ref).toBeTruthy();
+
+      const stats1 = await (await fetch(`${MCP_BASE}/stats`)).json();
+      const nWebSearchBefore = stats1.cache.byTool.web_search;
+      expect(nWebSearchBefore).toBeGreaterThanOrEqual(1);
+
+      const res = await fetch(`${MCP_BASE}/console/api/cache/clear`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      // reports the sizes it just wiped, one of which is the seed above
+      expect(body.cleared.toolResultCache.web_search).toBe(nWebSearchBefore);
+      expect(typeof body.cleared.toolResultCache.web_fetch).toBe("number");
+      expect(body.cleared.extractHtml).toBeGreaterThanOrEqual(1);
+      expect(body.cleared.linkRefs.memoryRefs).toBeGreaterThanOrEqual(1);
+      expect(body.cleared.linkRefs.persistedRefs).toBeGreaterThanOrEqual(1);
+      expect(body.cleared.counters).toEqual({ hits: 0, misses: 0 });
+
+      // every bucket is empty after the clear — the whole tool cache is gone
+      const statsEmpty = await (await fetch(`${MCP_BASE}/stats`)).json();
+      expect(statsEmpty.cache.total).toBe(0);
+      expect(statsEmpty.cache.byTool).toEqual({ web_search: 0, web_fetch: 0 });
+
+      // nothing re-registered: a second clear reports the links are all gone
+      const again = await (await fetch(`${MCP_BASE}/console/api/cache/clear`, { method: "POST" })).json();
+      expect(again.cleared.linkRefs.memoryRefs).toBe(0);
+      expect(again.cleared.linkRefs.persistedRefs).toBe(0);
+
+      // the same query is now a fresh miss (re-cache after clear proves the
+      // clear, not a miss inside the endpoint itself)
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({
+        query: searchUrl, queries: [searchUrl],
+        results: [{ title: "Cached", url: searchUrl, snippet: "cached snippet" }],
+      }));
+      const r3 = await mcpPost({
+        jsonrpc: "2.0", id: 122, method: "tools/call",
+        params: { name: "web_search", arguments: { queries: [searchUrl] } },
+      });
+      expect(r3.status).toBe(200);
+      expect(searchMod.browserSearch).toHaveBeenCalledTimes(2);
+      const stats2 = await (await fetch(`${MCP_BASE}/stats`)).json();
+      expect(stats2.cache.byTool.web_search).toBe(1); // re-cached by the fresh miss
+
+      // the seed link ref survived the web_search activity and is gone now
+      const refAfter = dbApi.getRefLinkByUrl(refUrl);
+      expect(refAfter).toBeNull();
+    });
+
+    it("rejects methods other than POST and clears nothing", async () => {
+      const get = await fetch(`${MCP_BASE}/console/api/cache/clear`);
+      expect(get.status).toBe(405);
+      const put = await fetch(`${MCP_BASE}/console/api/cache/clear`, { method: "PUT" });
+      expect(put.status).toBe(405);
+    });
+  });
+
   describe("POST /console/vnc", () => {
     let envDir;
     let envFile;

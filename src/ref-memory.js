@@ -1,4 +1,4 @@
-import { getRefLinkById, getRefLinkByUrl, rememberRefLink } from "./db.js";
+import { clearRefLinks, getRefLinkById, getRefLinkByUrl, rememberRefLink } from "./db.js";
 
 const MAX_LINK_MEMORY_ENTRIES = 2000;
 
@@ -31,6 +31,17 @@ function pruneLinkMemory() {
       linkMemoryByUrl.delete(rememberedUrl);
     }
   }
+}
+
+export function clearLinkRefMemory() {
+  const cleared = {
+    memoryRefs: linkMemoryByRef.size,
+    memoryUrls: linkMemoryByUrl.size,
+    persistedRefs: clearRefLinks()
+  };
+  linkMemoryByRef.clear();
+  linkMemoryByUrl.clear();
+  return cleared;
 }
 
 export function rememberLink(url) {

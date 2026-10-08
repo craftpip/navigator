@@ -29,7 +29,7 @@ import { devtoolsToolDefinitions, formatDevtoolsToolResponse, handleDevtoolsTool
 import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
 import { svgExtractor, capturePageAsSvg } from "./svg.js";
-import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord } from "./ref-memory.js";
+import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord, clearLinkRefMemory } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
@@ -4758,6 +4758,43 @@ async function maybeStartHttpServer(managerOverride) {
             const { listTargets } = await import("./devtools.js");
             const result = await listTargets();
             sendJson(res, 200, { ok: true, targets: result.targets || [] });
+            return;
+          }
+          sendJson(res, 405, { ok: false, error: "Method not allowed" });
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: String(error?.message || error) });
+        }
+        return;
+      }
+
+      if (url.pathname === "/console/api/cache/clear") {
+        if (!manager.config.enableWebConsole) {
+          sendJson(res, 404, { ok: false, error: "Web console not available" });
+          return;
+        }
+        try {
+          if (method === "POST") {
+            const toolSizes = {
+              web_search: toolResultCache.web_search.size,
+              web_fetch: toolResultCache.web_fetch.size,
+            };
+            toolResultCache.web_search.clear();
+            toolResultCache.web_fetch.clear();
+            cacheCounters.hits = 0;
+            cacheCounters.misses = 0;
+            const extractHtml = extractHtmlCache.size;
+            extractHtmlCache.clear();
+            const linkRefs = clearLinkRefMemory();
+            console.log(`[config] plan60 H7 cache cleared via POST /console/api/cache/clear (toolResultCache ${toolSizes.web_search + toolSizes.web_fetch}, extractHtml ${extractHtml}, linkRefs ${JSON.stringify(linkRefs)})`);
+            sendJson(res, 200, {
+              ok: true,
+              cleared: {
+                toolResultCache: toolSizes,
+                extractHtml,
+                linkRefs,
+                counters: { hits: 0, misses: 0 },
+              },
+            });
             return;
           }
           sendJson(res, 405, { ok: false, error: "Method not allowed" });
