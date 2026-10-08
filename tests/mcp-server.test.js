@@ -1971,6 +1971,85 @@ describe("mcp-server HTTP endpoints", () => {
     });
   });
 
+  describe("GET /console/config — external .env reconcile failure containment (plan 60 H6)", () => {
+    let envDir;
+    let envFile;
+    let manager;
+    let origEnv;
+
+    beforeEach(async () => {
+      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h6-"));
+      envFile = path.join(envDir, ".env");
+      process.env.NAVIGATOR_ENV_FILE = envFile;
+      const browserMod = await import("../src/browser.js");
+      manager = await browserMod.getBrowserManager.mock.results[0].value;
+      origEnv = {
+        DISPLAY: process.env.DISPLAY,
+        HEADLESS: process.env.HEADLESS,
+        CHROME_PATH: process.env.CHROME_PATH,
+      };
+      delete process.env.DISPLAY;
+      manager.relaunchDefaultBackend.mockClear();
+    });
+
+    afterEach(() => {
+      delete process.env.NAVIGATOR_ENV_FILE;
+      for (const [k, v] of Object.entries(origEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+    });
+
+    // Reconcile reaches its last awaited step (the plan 60 H4 relaunch hook)
+    // only when a CHROME_PATH value-change hot-applies; injecting a throw there
+    // exercises the GET handler's reconcile containment.
+    async function primeAndCauseFailure() {
+      fs.writeFileSync(envFile, "# h6\nHEADLESS=true\nCHROME_PATH=/usr/bin/chromium\n");
+      await fetch(`${MCP_BASE}/console/config`); // baseline stat
+      fs.writeFileSync(envFile, "# h6\nHEADLESS=true\nCHROME_PATH=/usr/bin/chromium-h6\n"); // delta
+      manager.relaunchDefaultBackend.mockImplementationOnce(() => {
+        throw new Error("h6 reconcile boom");
+      });
+      const res = await fetch(`${MCP_BASE}/console/config`);
+      return { res, body: await res.json() };
+    }
+
+    it("reports a reconcile failure in the payload instead of 500ing, then self-heals once it succeeds", async () => {
+      const { res, body } = await primeAndCauseFailure();
+      // the first poll: reconcile blew up, so the payload is still served with
+      // the banner truthfully up and a machine-readable reason attached
+      expect(res.status).toBe(200);
+      expect(body.envFile.changedOnDisk).toBe(true);
+      expect(body.envFile.reconcileError).toContain("h6 reconcile boom");
+      // the exact same .env on the next poll reconciles cleanly (the failure
+      // was transient): both the banner and the stuck error clear
+      const res2 = await fetch(`${MCP_BASE}/console/config`);
+      const body2 = await res2.json();
+      expect(res2.status).toBe(200);
+      expect(body2.envFile.changedOnDisk).toBe(false);
+      expect(body2.envFile.reconcileError).toBeNull();
+    });
+
+    it("clears a left-over reconcile error when the operator writes the file through the console", async () => {
+      const { body } = await primeAndCauseFailure();
+      expect(body.envFile.changedOnDisk).toBe(true);
+      expect(body.envFile.reconcileError).toContain("h6 reconcile boom");
+      // a console PUT acknowledges the sync: the previously-failed external
+      // state is superseded, banner and error must not stick
+      const put = await fetch(`${MCP_BASE}/console/config`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ updates: { SEARCH_QUEUE_ESCALATION_FACTOR: 7 } }),
+      });
+      expect(put.status).toBe(200);
+      const get = await fetch(`${MCP_BASE}/console/config`);
+      const final = await get.json();
+      expect(final.envFile.changedOnDisk).toBe(false);
+      expect(final.envFile.reconcileError).toBeNull();
+    });
+  });
+
   describe("POST /console/vnc", () => {
     let envDir;
     let envFile;

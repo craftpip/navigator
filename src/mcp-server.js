@@ -561,7 +561,16 @@ function envKeyToConfigKey(key) {
   return key.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
-const envFileState = { mtimeMs: null, size: null, changed: false, fileKeys: null, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null, externalModelWarnings: [] };
+const envFileState = { mtimeMs: null, size: null, changed: false, fileKeys: null, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null, externalModelWarnings: [], externalReconcileError: null };
+
+// Plan 60 H6: an acknowledged env-file sync clears BOTH the "changed on disk"
+// flag and any sticky reconcile error — two views of the same "file synced"
+// state. Every site that resets the banner goes through here, so a reconcile
+// failure can never leave one half of the pair behind.
+function acknowledgeEnvFileSync() {
+  envFileState.changed = false;
+  envFileState.externalReconcileError = null;
+}
 async function checkEnvFileChanged(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -608,7 +617,8 @@ async function getConsoleConfigPayload(manager) {
       externalBrowsersApplied: envFileState.externalBrowsersApplied,
       externalBrowsersInvalidated: envFileState.externalBrowsersInvalidated,
       externalBrowsersError: envFileState.externalBrowsersError,
-      externalModelWarnings: envFileState.externalModelWarnings
+      externalModelWarnings: envFileState.externalModelWarnings,
+      reconcileError: envFileState.externalReconcileError
     },
     postProcessorModels: getPostProcessorModels(manager.config),
     engines: enabledEngines.map((id) => CONSOLE_ENGINE_BY_ID.get(id)).filter(Boolean),
@@ -754,7 +764,7 @@ async function persistMcpApiAuth(manager, { allowUnauthenticated = manager.confi
   await writeEnvFile(envPath, updated.text);
   manager.config.mcpAllowUnauthenticated = Boolean(allowUnauthenticated);
   await checkEnvFileChanged(envPath);
-  envFileState.changed = false;
+  acknowledgeEnvFileSync();
   rememberEnvFileKeys(updated.text);
   recordEnvChange({ action: "update_mcp_api_auth", keys: ["MCP_ALLOW_UNAUTHENTICATED"] });
   return { backup };
@@ -1127,7 +1137,7 @@ async function reconcileExternalBrowsersConfig(manager, envPath) {
       : `browser relaunch skipped after hot-applying ${relaunched.keys.join(", ")}: ${relaunched.error}`}`);
   }
 
-  envFileState.changed = false;
+  acknowledgeEnvFileSync();
   return { hotApplied };
 }
 
@@ -1264,7 +1274,7 @@ async function applyConfigUpdates(manager, body) {
     }
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
-    envFileState.changed = false;
+    acknowledgeEnvFileSync();
     rememberEnvFileKeys(revertedEnv);
     await finalizeRuntimeApply();
     payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
@@ -1389,7 +1399,7 @@ async function applyConfigUpdates(manager, body) {
 
   if (changedKeys.size) {
     await checkEnvFileChanged(envPath);
-    envFileState.changed = false;
+    acknowledgeEnvFileSync();
     rememberEnvFileKeys(envText);
     recordEnvChange({
       action: "update",
@@ -1425,7 +1435,7 @@ async function handleConsoleVnc(manager, body) {
     await writeEnvFile(envPath, envText);
     vncRunningCache.at = 0;
     await checkEnvFileChanged(envPath);
-    envFileState.changed = false;
+    acknowledgeEnvFileSync();
     rememberEnvFileKeys(envText);
     return { ok: true, action, steps: vncManager.steps, relaunch, running: true, headed: !manager.config.headless, backup };
   }
@@ -1441,7 +1451,7 @@ async function handleConsoleVnc(manager, body) {
     await writeEnvFile(envPath, envText);
     vncRunningCache.at = 0;
     await checkEnvFileChanged(envPath);
-    envFileState.changed = false;
+    acknowledgeEnvFileSync();
     rememberEnvFileKeys(envText);
     return { ok: true, action, steps: vncManager.steps, relaunch, running: false, headed: !manager.config.headless, backup };
   }
@@ -4557,7 +4567,16 @@ async function maybeStartHttpServer(managerOverride) {
         if (method === "GET") {
           const envPath = getEnvFilePath();
           if (await checkEnvFileChanged(envPath)) {
-            await reconcileExternalBrowsersConfig(manager, envPath);
+            // Plan 60 H6: the reconcile is best-effort — a failure must not
+            // 500 the whole poll. Leave `changed` set (the file genuinely is
+            // not synced) plus a reason the console can render; the next poll
+            // retries and a successful pass self-heals.
+            try {
+              await reconcileExternalBrowsersConfig(manager, envPath);
+            } catch (error) {
+              envFileState.externalReconcileError = String(error?.message || error);
+              console.error(`[config] plan60 H6 external .env reconcile failed (retrying on next poll): ${envFileState.externalReconcileError}`);
+            }
           }
           const payload = await getConsoleConfigPayload(manager);
           logEvent("http.request", { method, path: url.pathname });
