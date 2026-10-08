@@ -6,6 +6,11 @@ import { EXTRACTOR_FORMATS } from "./extractors/index.js";
 
 let loadedHints = null;
 let loadedPath = null;
+// plan 60 H1: last-known-good per path — survives clearDomainHintCache() so a
+// corrupt domain-hints.json can never purge a previously working set. Path-
+// guarded so hints from one DOMAIN_HINTS_PATH never serve for another.
+let lastGoodHints = null;
+let lastGoodPath = null;
 // Bumped by clearDomainHintCache — the single choke point every hint
 // mutation funnels through — so callers can stamp extraction outputs with
 // the hint generation that produced them (plan 60 S10).
@@ -150,6 +155,10 @@ export function ensureWildcardHint(hints) {
   return hints;
 }
 
+// Returns the migrated hints array, or null when the file is present but
+// broken (unreadable, not valid JSON, or not an array) — plan 60 H1: a broken
+// file must never throw into extraction; getDomainHints() turns null into a
+// last-known-good (or wildcard-only) fallback.
 export async function loadDomainHints(hintsPath) {
   const resolvedPath = path.resolve(hintsPath);
   try {
@@ -157,9 +166,17 @@ export async function loadDomainHints(hintsPath) {
   } catch {
     return ensureWildcardHint([]);
   }
-  const raw = await fs.readFile(resolvedPath, "utf8");
-  const entries = JSON.parse(raw);
-  if (!Array.isArray(entries)) return ensureWildcardHint([]);
+  let entries;
+  try {
+    entries = JSON.parse(await fs.readFile(resolvedPath, "utf8"));
+  } catch (error) {
+    console.warn(`[domain-hints] ${resolvedPath} is unreadable or not valid JSON (${error.message}) — serving last-known-good hints when cached, else the wildcard default`);
+    return null;
+  }
+  if (!Array.isArray(entries)) {
+    console.warn(`[domain-hints] ${resolvedPath} does not contain a JSON array of hints — serving last-known-good hints when cached, else the wildcard default`);
+    return null;
+  }
   const migrated = [];
   for (const entry of entries) {
     if (!entry || typeof entry.domain !== "string") continue;
@@ -189,12 +206,31 @@ export async function getDomainHints(config) {
   const hintsPath = config?.domainHintsPath;
   if (!hintsPath) return [];
   if (loadedPath === hintsPath && loadedHints !== null) return loadedHints;
-  loadedHints = await loadDomainHints(hintsPath);
+  const resolvedPath = path.resolve(hintsPath);
+  const loaded = await loadDomainHints(hintsPath);
+  if (loaded === null) {
+    // plan 60 H1: the file is broken — serve last-known-good for this exact
+    // path, else degrade to wildcard-only. The fallback is cached like any
+    // load result (external repair is picked up on the next cache clear, the
+    // same semantics every hint edit already has).
+    const fallback = (lastGoodPath === resolvedPath && lastGoodHints !== null)
+      ? lastGoodHints
+      : ensureWildcardHint([]);
+    loadedHints = fallback;
+    loadedPath = hintsPath;
+    return fallback;
+  }
+  loadedHints = loaded;
   loadedPath = hintsPath;
-  return loadedHints;
+  lastGoodHints = loaded;
+  lastGoodPath = resolvedPath;
+  return loaded;
 }
 
 export function clearDomainHintCache() {
+  // Deliberately keeps lastGoodHints/lastGoodPath (plan 60 H1): a cache clear
+  // forces a re-read; if that re-read fails, the previous good set must still
+  // be servable.
   loadedHints = null;
   loadedPath = null;
   hintRevision += 1;

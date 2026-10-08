@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { describe, expect, it } from "vitest";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript, collectPostProcessorRefs } from "../src/domain-hints.js";
+import { describe, expect, it, vi } from "vitest";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearDomainHintCache, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript, collectPostProcessorRefs } from "../src/domain-hints.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hintsPath = path.join(projectRoot, "domain-hints.json");
@@ -770,6 +770,84 @@ describe("saveDomainHints and loadRawDomainHints", () => {
     expect(raw).toHaveLength(2);
     const filtered = await loadDomainHints(hintsPath);
     expect(filtered).toHaveLength(2);
+  });
+});
+
+describe("corrupt hints file resilience (plan 60 H1)", () => {
+  async function withWarnCapture(fn) {
+    const warns = [];
+    const spy = vi.spyOn(console, "warn").mockImplementation((...args) => warns.push(args.join(" ")));
+    try {
+      return { result: await fn(), warns };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it("loadDomainHints returns null and warns instead of throwing on malformed JSON", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h1-")), "domain-hints.json");
+    await fs.writeFile(p, "{ not json");
+    const { result, warns } = await withWarnCapture(() => loadDomainHints(p));
+    expect(result).toBeNull();
+    expect(warns.join("\n")).toMatch(/not valid JSON/);
+  });
+
+  it("loadDomainHints treats a present non-array file as broken too", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h1-")), "domain-hints.json");
+    await fs.writeFile(p, JSON.stringify({ domain: "x.com" }));
+    const { result, warns } = await withWarnCapture(() => loadDomainHints(p));
+    expect(result).toBeNull();
+    expect(warns.join("\n")).toMatch(/JSON array/);
+  });
+
+  it("serves last-known-good after the file breaks instead of killing extraction", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h1-")), "domain-hints.json");
+    await fs.writeFile(p, JSON.stringify([{ domain: "good.com", pathPattern: "/**", pageType: "p", comment: "one" }]));
+    const config = { domainHintsPath: p };
+    clearDomainHintCache();
+    const good = await getDomainHints(config);
+    expect(good.some((h) => h.domain === "good.com")).toBe(true);
+
+    await fs.writeFile(p, "{ broken");
+    clearDomainHintCache();
+    const { result: served, warns } = await withWarnCapture(() => getDomainHints(config));
+    expect(served).toEqual(good);
+    expect(served.some((h) => h.domain === "good.com")).toBe(true);
+    expect(served.some((h) => h.domain === "*")).toBe(true);
+    expect(warns.join("\n")).toMatch(/not valid JSON/);
+  });
+
+  it("degrades to wildcard-only when the file is broken with no last-known-good", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h1-")), "domain-hints.json");
+    await fs.writeFile(p, "{ broken");
+    clearDomainHintCache();
+    const { result: served, warns } = await withWarnCapture(() => getDomainHints({ domainHintsPath: p }));
+    expect(served).toHaveLength(1);
+    expect(served[0].domain).toBe("*");
+    expect(warns.join("\n")).toMatch(/not valid JSON/);
+  });
+
+  it("recovers on the next cache clear after the file is fixed", async () => {
+    const p = path.join(mkdtempSync(path.join(os.tmpdir(), "hints-h1-")), "domain-hints.json");
+    const goodEntry = { domain: "good.com", pathPattern: "/**", pageType: "p", comment: "one" };
+    await fs.writeFile(p, JSON.stringify([goodEntry]));
+    const config = { domainHintsPath: p };
+    clearDomainHintCache();
+    await getDomainHints(config);
+
+    await fs.writeFile(p, "{ broken");
+    clearDomainHintCache();
+    await withWarnCapture(() => getDomainHints(config));
+
+    // fixed externally — the cached fallback still serves until the next clear
+    await fs.writeFile(p, JSON.stringify([goodEntry, { domain: "fixed.com", pathPattern: "/**", pageType: "p", comment: "two" }]));
+    const stillCached = await getDomainHints(config);
+    expect(stillCached.some((h) => h.domain === "fixed.com")).toBe(false);
+
+    clearDomainHintCache();
+    const fresh = await getDomainHints(config);
+    expect(fresh.some((h) => h.domain === "fixed.com")).toBe(true);
+    expect(fresh.some((h) => h.domain === "good.com")).toBe(true);
   });
 });
 
