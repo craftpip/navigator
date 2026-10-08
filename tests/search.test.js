@@ -887,6 +887,46 @@ describe("browserOpenAndExtract", () => {
 
       expect(result.text).toContain("Fallback content here.");
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("post-processor"));
+      // plan 60 S3: the degradation is reported to the consumer, not only logged
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("post-processor \"reader_lm\" failed")
+      ]));
+    } finally {
+      mockRunPostProcessor.mockReset();
+      warnSpy.mockRestore();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("block post-processor failure keeps block output and adds a warning (plan 60 S3)", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "browser-search-ai-"));
+    const hintsPath = path.join(tempDir, "domain-hints.json");
+    await fs.writeFile(hintsPath, JSON.stringify([{
+      domain: "example.com",
+      pathPattern: "/**",
+      flow: [{
+        action: "extract",
+        label: "AI section",
+        content: { blocks: [{ selector: "article", label: "Article", priority: "high", format: "readability_to_markdown", postProcessor: "reader_lm" }] }
+      }]
+    }]));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockRunPostProcessor.mockRejectedValue(new Error("model not found"));
+    mockGetBrowserManager.mockResolvedValue(makeExtractionManager({
+      hintsPath,
+      configOverrides: { postProcessorModels: [{ id: "reader_lm", label: "Reader LM", model: "reader-lm:0.5b", baseUrl: "http://localhost:9999" }] },
+      html: `<!doctype html><html><head><title>AI block</title></head><body><article><p>Article body.</p></article></body></html>`
+    }));
+
+    try {
+      const { browserOpenAndExtract } = await import("../src/search.js");
+      const result = await browserOpenAndExtract({ url: "https://example.com/page", includeSeoAnalysis: false });
+
+      expect(result.text).toContain("Article body.");
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("post-processor \"reader_lm\" failed")
+      ]));
     } finally {
       mockRunPostProcessor.mockReset();
       warnSpy.mockRestore();

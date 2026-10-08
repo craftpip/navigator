@@ -543,6 +543,7 @@ export async function renderContentBlocks(doc, hint, {
 
   const output = [];
   const zeroMatch = [];
+  const postProcessorWarnings = [];
   const order = { high: 0, medium: 1, low: 2 };
   const sorted = [...content].sort((a, b) => (order[a.priority] || 1) - (order[b.priority] || 1));
 
@@ -617,6 +618,8 @@ export async function renderContentBlocks(doc, hint, {
       } catch (err) {
         if (signal?.aborted) throw signal.reason || err;
         console.warn(`[web_fetch] post-processor "${blockPostProcessor}" failed for block — keeping original: ${err.message}`);
+        // Plan 60 S3: surface the degradation to the consumer, not just the log.
+        postProcessorWarnings.push(`post-processor "${blockPostProcessor}" failed — kept the original block output: ${err.message}`);
       }
     }
 
@@ -632,12 +635,16 @@ export async function renderContentBlocks(doc, hint, {
   if (!output.length) return null;
   const text = output.join("\n");
   if (debug) console.log(`[web_fetch] [${url}] content_path: blocks: ${output.length}`);
+  const warnings = [
+    ...zeroMatch.map((selector) => `section selector "${selector}" matched 0 elements`),
+    ...postProcessorWarnings
+  ];
   return {
     title: cleanWhitespace(doc.title || fallbackTitle || ""),
     url,
     text: safeTruncateText(text, maxChars),
     textOriginalLength: text.length,
-    ...(zeroMatch.length ? { warnings: zeroMatch.map((selector) => `section selector "${selector}" matched 0 elements`) } : {})
+    ...(warnings.length ? { warnings } : {})
   };
 }
 

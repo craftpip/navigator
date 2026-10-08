@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript } from "../src/domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, sortManagedHints, getDomainHints, getExtractionMethod, getManagedHintsPath, loadDomainHints, loadManagedHints, loadRawDomainHints, migrateHintShape, mutateManagedHints, clearManagedHintCache, saveDomainHints, validateHintRule, validateManagedHint, validateScript, collectPostProcessorRefs } from "../src/domain-hints.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hintsPath = path.join(projectRoot, "domain-hints.json");
@@ -807,6 +807,51 @@ describe("extractor formats and AI models", () => {
       { scope: "test", aiModelIds }
     );
     expect(block.errors.map((e) => e.field)).toContain("flow[0].content.blocks[0].format");
+  });
+
+  // plan 60 S3: a hint referencing a removed/renamed post-processor model must
+  // warn (never error) so saved hints survive model removal.
+  it("warns when default.postProcessor references an unconfigured model (plan 60 S3)", () => {
+    const { errors, warnings } = validateHintRule(
+      { domain: "example.com", pathPattern: "/**", default: { postProcessor: "reader_lm" } },
+      { scope: "test", aiModelIds: [] }
+    );
+    expect(errors).toEqual([]);
+    const fields = warnings.map((w) => w.field);
+    expect(fields).toContain("default.postProcessor");
+  });
+
+  it("warns when a flow block postProcessor references an unconfigured model (plan 60 S3)", () => {
+    const { errors, warnings } = validateHintRule(
+      { flow: [{ action: "extract", content: { blocks: [{ selector: "main", priority: "high", format: "text", postProcessor: "gone_model" }] } }] },
+      { scope: "test", aiModelIds: ["reader_lm"] }
+    );
+    expect(errors).toEqual([]);
+    expect(warnings.map((w) => w.field)).toContain("flow[0].content.blocks[0].postProcessor");
+  });
+
+  it("stays silent on postProcessor when the model is configured or the model set is unknown (plan 60 S3)", () => {
+    const configured = validateHintRule(
+      { default: { postProcessor: "reader_lm" } },
+      { scope: "test", aiModelIds: ["reader_lm"] }
+    );
+    expect(configured.errors).toEqual([]);
+    expect(configured.warnings).toEqual([]);
+
+    const unknownSet = validateHintRule({ default: { postProcessor: "reader_lm" } }, { scope: "test" });
+    expect(unknownSet.errors).toEqual([]);
+    expect(unknownSet.warnings).toEqual([]);
+  });
+
+  it("collectPostProcessorRefs walks default, legacy content, and flow blocks (plan 60 S3)", () => {
+    const refs = collectPostProcessorRefs({
+      default: { postProcessor: "a" },
+      content: { blocks: [{ selector: "main", postProcessor: "b" }] },
+      flow: [{ action: "extract", content: { blocks: [{ selector: "x", postProcessor: "c" }, { selector: "y" }] } }]
+    });
+    expect(refs.map((r) => r.model).sort()).toEqual(["a", "b", "c"]);
+    expect(collectPostProcessorRefs(null)).toEqual([]);
+    expect(collectPostProcessorRefs("nope")).toEqual([]);
   });
 
   it("warns (not errors) when default.tables carries a real value and skips the warning for '' / 'all'", () => {

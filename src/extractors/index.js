@@ -50,6 +50,17 @@ export const EXTRACTOR_FORMATS = [...FORMAT_EXTRACTORS.keys()];
 
 // ── Post-processor Pipeline Step ─────────────────────────────────────────────
 
+// Plan 60 S3: a post-processor failure (model removed/renamed, endpoint down)
+// must not be silent — attach a warning the extraction result carries to the
+// tool output (`- ⚠ …` lines), alongside the server-side console.warn.
+function withPostProcessorWarning(result, model, err) {
+  const existing = Array.isArray(result.warnings) ? result.warnings : [];
+  return {
+    ...result,
+    warnings: [...existing, `post-processor "${model}" failed — kept the original extractor output: ${err.message}`]
+  };
+}
+
 async function applyPostProcessor(result, { url, postProcessorModel, config, signal }) {
   if (!postProcessorModel || !result?.text) return result;
 
@@ -63,6 +74,7 @@ async function applyPostProcessor(result, { url, postProcessorModel, config, sig
     } catch (err) {
       if (signal?.aborted) throw signal.reason || err;
       console.warn(`[web_fetch] [${url}] post-processor "${postProcessorModel}" failed for screenshot — falling back to raw: ${err.message}`);
+      return withPostProcessorWarning(result, postProcessorModel, err);
     }
     return result;
   }
@@ -77,6 +89,7 @@ async function applyPostProcessor(result, { url, postProcessorModel, config, sig
   } catch (err) {
     if (signal?.aborted) throw signal.reason || err;
     console.warn(`[web_fetch] [${url}] post-processor "${postProcessorModel}" failed — keeping original: ${err.message}`);
+    return withPostProcessorWarning(result, postProcessorModel, err);
   }
   return result;
 }

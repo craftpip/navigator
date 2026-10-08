@@ -99,8 +99,13 @@ function Manage({ config, health, reload }) {
         body: JSON.stringify(body),
       });
       await reload();
+      // Plan 60 S3: config saves report dangling hint references as warnings.
+      const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      const warningSuffix = warnings.length
+        ? ` — ${warnings.length} warning(s): ${warnings.join("; ")}`
+        : "";
       setMessage(
-        success || `Saved. ${result.hotApplied?.length || 0} setting(s) applied.`,
+        (success || `Saved. ${result.hotApplied?.length || 0} setting(s) applied.`) + warningSuffix,
       );
       setKind("ok");
     } catch (error) {

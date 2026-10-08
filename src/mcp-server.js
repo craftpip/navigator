@@ -32,7 +32,7 @@ import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 
 const require = createRequire(import.meta.url);
@@ -544,7 +544,7 @@ function envKeyToConfigKey(key) {
   return key.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
-const envFileState = { mtimeMs: null, size: null, changed: false, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null };
+const envFileState = { mtimeMs: null, size: null, changed: false, externalBrowsersApplied: [], externalBrowsersInvalidated: [], externalBrowsersError: null, externalModelWarnings: [] };
 async function checkEnvFileChanged(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -582,7 +582,8 @@ async function getConsoleConfigPayload(manager) {
       backup: backupPath,
       externalBrowsersApplied: envFileState.externalBrowsersApplied,
       externalBrowsersInvalidated: envFileState.externalBrowsersInvalidated,
-      externalBrowsersError: envFileState.externalBrowsersError
+      externalBrowsersError: envFileState.externalBrowsersError,
+      externalModelWarnings: envFileState.externalModelWarnings
     },
     postProcessorModels: getPostProcessorModels(manager.config),
     engines: enabledEngines.map((id) => CONSOLE_ENGINE_BY_ID.get(id)).filter(Boolean),
@@ -996,6 +997,7 @@ function applyBrowsersConfig(manager, value) {
 
 async function reconcileExternalBrowsersConfig(manager, envPath) {
   // Plan 60 S2: reconcile ALL hot-appliable keys from external .env edits
+  const previousModelIds = getPostProcessorModels(manager.config).map((entry) => entry.id);
   const parsedEnv = parseEnvFile(await readEnvFile(envPath));
   const hotApplied = [];
   const invalidatedBrowsers = [];
@@ -1049,8 +1051,36 @@ async function reconcileExternalBrowsersConfig(manager, envPath) {
       delete process.env.BROWSERS;
     }
   }
+  // Plan 60 S3: surface dangling hint references left by an external model change
+  envFileState.externalModelWarnings = await collectRemovedModelWarnings(manager, previousModelIds);
   envFileState.changed = false;
   return { hotApplied };
+}
+
+// Plan 60 S3: a POST_PROCESSOR_MODELS change that drops model ids still
+// referenced by saved hints — report it on the save payload (§8.5 warnings)
+// instead of leaving the hints silently degraded. Hints themselves are kept.
+async function collectRemovedModelWarnings(manager, previousModelIds) {
+  const currentIds = new Set(getPostProcessorModels(manager.config).map((entry) => entry.id));
+  const removed = previousModelIds.filter((id) => !currentIds.has(id));
+  if (!removed.length) return [];
+  let hints = [];
+  try {
+    hints = await loadRawDomainHints(manager.config.domainHintsPath);
+  } catch {
+    return [];
+  }
+  const warnings = [];
+  hints.forEach((hint, index) => {
+    if (!hint || typeof hint !== "object") return;
+    const label = `hint #${index + 1} (${hint.domain || "?"}${hint.pathPattern ? ` ${hint.pathPattern}` : ""})`;
+    for (const { field, model } of collectPostProcessorRefs(hint)) {
+      if (removed.includes(model)) {
+        warnings.push(`${label}: ${field} references post-processor model "${model}", which is no longer configured — fetches keep the raw extractor output`);
+      }
+    }
+  });
+  return warnings;
 }
 
 async function applyConfigUpdates(manager, body) {
@@ -1058,7 +1088,8 @@ async function applyConfigUpdates(manager, body) {
   const resets = Array.isArray(body?.reset) ? body.reset.map((key) => String(key).toUpperCase()) : [];
   const revert = body?.revert === true;
   const envPath = getEnvFilePath();
-  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], envWritten: false, backup: null, reverted: false, forgottenRelayBrowsers: [], invalidatedBrowsers: [] };
+  const previousModelIds = getPostProcessorModels(manager.config).map((entry) => entry.id);
+  const payload = { ok: true, hotApplied: [], restartRequired: [], invalid: [], unchanged: [], warnings: [], envWritten: false, backup: null, reverted: false, forgottenRelayBrowsers: [], invalidatedBrowsers: [] };
 
   if (revert) {
     const backupPath = await revertEnvFile(envPath);
@@ -1092,6 +1123,7 @@ async function applyConfigUpdates(manager, body) {
     recordEnvChange({ action: "revert", backup: backupPath });
     await checkEnvFileChanged(envPath);
     envFileState.changed = false;
+    payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
     return payload;
   }
 
@@ -1194,6 +1226,7 @@ async function applyConfigUpdates(manager, body) {
     });
   }
 
+  payload.warnings.push(...(await collectRemovedModelWarnings(manager, previousModelIds)));
   return payload;
 }
 

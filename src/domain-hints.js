@@ -209,8 +209,9 @@ export function validateScript(script) {
   }
   try {
     // Scripts run wrapped as `(async () => { <script> })()` so `return` is legal —
-    // validate the wrapped form, not the bare body.
-    return new vm.Script(`(async () => { ${script} })()`, { filename: "validate" });
+    // validate the wrapped form, not the bare body. Success means NO errors:
+    // do not return the compiled Script here (callers iterate this result).
+    new vm.Script(`(async () => { ${script} })()`, { filename: "validate" });
   } catch (e) {
     errors.push({ field: "script", message: `script syntax error: ${e.message}` });
   }
@@ -441,7 +442,7 @@ function validateField(field, errors, fieldPrefix) {
   }
 }
 
-function validateBlock(block, errors, fieldPrefix, aiModelIds) {
+function validateBlock(block, errors, fieldPrefix, aiModelIds, warnings = []) {
   if (!block || typeof block !== "object" || Array.isArray(block)) {
     errors.push({ field: fieldPrefix, message: "must be an object" });
     return;
@@ -475,8 +476,12 @@ function validateBlock(block, errors, fieldPrefix, aiModelIds) {
     if (!validExtractors.includes(block.format) && block.format !== LEGACY_MARKDOWN_FORMAT) {
       errors.push({ field: `${prefix}format`, message: `must be one of ${validExtractors.map((f) => `"${f}"`).join(", ")}` });
     }
-    if (block.postProcessor !== undefined && (typeof block.postProcessor !== "string" || !block.postProcessor.trim())) {
-      errors.push({ field: `${prefix}postProcessor`, message: "optional; when present must be a non-empty string (model id from POST_PROCESSOR_MODELS)" });
+    if (block.postProcessor !== undefined) {
+      if (typeof block.postProcessor !== "string" || !block.postProcessor.trim()) {
+        errors.push({ field: `${prefix}postProcessor`, message: "optional; when present must be a non-empty string (model id from POST_PROCESSOR_MODELS)" });
+      } else if (Array.isArray(aiModelIds) && !aiModelIds.includes(block.postProcessor.trim())) {
+        warnings.push({ field: `${prefix}postProcessor`, message: `post-processor model "${block.postProcessor.trim()}" is not configured (POST_PROCESSOR_MODELS) — fetches keep the raw extractor output` });
+      }
     }
     return;
   }
@@ -503,7 +508,7 @@ function validateContent(content, errors, fieldPrefix, warnings, aiModelIds) {
       errors.push({ field: `${fieldPrefix}.blocks`, message: "must be a non-empty array" });
     } else {
       content.blocks.forEach((block, index) => {
-        validateBlock(block, errors, `${fieldPrefix}.blocks[${index}]`, aiModelIds);
+        validateBlock(block, errors, `${fieldPrefix}.blocks[${index}]`, aiModelIds, warnings);
       });
     }
   }
@@ -772,6 +777,8 @@ function validateDefault(defaultBlock, errors, warnings, aiModelIds) {
   if (defaultBlock.postProcessor !== undefined) {
     if (typeof defaultBlock.postProcessor !== "string" || !defaultBlock.postProcessor.trim()) {
       errors.push({ field: "default.postProcessor", message: "optional; when present must be a non-empty string (model id from POST_PROCESSOR_MODELS)" });
+    } else if (Array.isArray(aiModelIds) && !aiModelIds.includes(defaultBlock.postProcessor.trim())) {
+      warnings.push({ field: "default.postProcessor", message: `post-processor model "${defaultBlock.postProcessor.trim()}" is not configured (POST_PROCESSOR_MODELS) — fetches keep the raw extractor output` });
     }
   }
   if (defaultBlock.readability !== undefined) {
@@ -790,7 +797,13 @@ function validateDefault(defaultBlock, errors, warnings, aiModelIds) {
   }
 }
 
-export function validateHintRule(hint, { scope = "static", aiModelIds = [], browserNames = null } = {}) {
+// aiModelIds: the configured post-processor model ids (POST_PROCESSOR_MODELS).
+// null (default) means "the configured set is unknown" — extractor-format
+// validation then accepts base formats only and postProcessor membership
+// warnings are skipped. Callers that know the configured set pass the id list
+// (including [] when no models are configured) so dangling postProcessor
+// references are flagged (plan 60 S3).
+export function validateHintRule(hint, { scope = "static", aiModelIds = null, browserNames = null } = {}) {
   const errors = [];
   const warnings = [];
   if (!hint || typeof hint !== "object" || Array.isArray(hint)) {
@@ -899,6 +912,35 @@ export function validateHintRule(hint, { scope = "static", aiModelIds = [], brow
   }
 
   return { errors, warnings };
+}
+
+// Collect every postProcessor model reference in a hint as { field, model }.
+// Used after POST_PROCESSOR_MODELS changes to warn that a saved hint still
+// points at a model id that is no longer configured (plan 60 S3) — the hint is
+// kept (hints survive model removal/rename) but fetches skip post-processing.
+export function collectPostProcessorRefs(hint) {
+  const refs = [];
+  if (!hint || typeof hint !== "object" || Array.isArray(hint)) return refs;
+  const visit = (block, field) => {
+    if (block && typeof block.postProcessor === "string" && block.postProcessor.trim()) {
+      refs.push({ field, model: block.postProcessor.trim() });
+    }
+  };
+  visit(hint.default, "default.postProcessor");
+  // Legacy top-level content shape — migrateHintShape converts it on load, but
+  // loadRawDomainHints (used by config-save checks) does not migrate.
+  if (Array.isArray(hint.content?.blocks)) {
+    hint.content.blocks.forEach((block, blockIndex) => visit(block, `content.blocks[${blockIndex}].postProcessor`));
+  }
+  if (Array.isArray(hint.flow)) {
+    hint.flow.forEach((step, index) => {
+      const blocks = step?.content?.blocks;
+      if (Array.isArray(blocks)) {
+        blocks.forEach((block, blockIndex) => visit(block, `flow[${index}].content.blocks[${blockIndex}].postProcessor`));
+      }
+    });
+  }
+  return refs;
 }
 
 export async function saveDomainHints(hints, hintsPath) {

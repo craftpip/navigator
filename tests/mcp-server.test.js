@@ -890,6 +890,72 @@ describe("mcp-server HTTP endpoints", () => {
       expect(fs.readFileSync(envFile, "utf8")).toContain("SEARCH_QUEUE_ESCALATION_FACTOR=3");
     });
 
+    it("warns when an update drops a post-processor model still referenced by saved hints (plan 60 S3)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const hintsPath = path.join(envDir, "domain-hints.json");
+      fs.writeFileSync(hintsPath, JSON.stringify([{
+        domain: "example.com",
+        pathPattern: "/**",
+        default: { format: "text", postProcessor: "reader_lm" },
+      }]));
+      const originalHintsPath = manager.config.domainHintsPath;
+      const originalModels = manager.config.postProcessorModels;
+      const originalEnvModels = process.env.POST_PROCESSOR_MODELS;
+      manager.config.domainHintsPath = hintsPath;
+      manager.config.postProcessorModels = [
+        { id: "reader_lm", label: "Reader LM", model: "reader-lm:0.5b", baseUrl: "http://localhost:9999" },
+      ];
+      process.env.POST_PROCESSOR_MODELS = JSON.stringify(manager.config.postProcessorModels);
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { POST_PROCESSOR_MODELS: "[]" } }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("POST_PROCESSOR_MODELS");
+        expect(body.warnings).toEqual(expect.arrayContaining([
+          expect.stringContaining('references post-processor model "reader_lm"'),
+        ]));
+
+        // the saved hint itself survives the model removal
+        const reloaded = JSON.parse(fs.readFileSync(hintsPath, "utf8"));
+        expect(reloaded[0].default.postProcessor).toBe("reader_lm");
+      } finally {
+        manager.config.domainHintsPath = originalHintsPath;
+        manager.config.postProcessorModels = originalModels;
+        if (originalEnvModels === undefined) delete process.env.POST_PROCESSOR_MODELS;
+        else process.env.POST_PROCESSOR_MODELS = originalEnvModels;
+      }
+    });
+
+    it("emits no warnings when a config save leaves referenced models configured (plan 60 S3)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const originalModels = manager.config.postProcessorModels;
+      manager.config.postProcessorModels = [
+        { id: "reader_lm", label: "Reader LM", model: "reader-lm:0.5b", baseUrl: "http://localhost:9999" },
+      ];
+
+      try {
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { MAX_CONCURRENT_PAGE_OPS: 31 } }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.warnings).toEqual([]);
+      } finally {
+        manager.config.postProcessorModels = originalModels;
+      }
+    });
+
     it("forgets a removed configured relay browser so it does not return as a dynamic driver", async () => {
       const { relayServer } = await import("../src/relay-server.js");
       const browserMod = await import("../src/browser.js");
@@ -1039,6 +1105,46 @@ describe("mcp-server HTTP endpoints", () => {
         if (originalEnvBrowsers === undefined) delete process.env.BROWSERS;
         else process.env.BROWSERS = originalEnvBrowsers;
         forget.mockRestore();
+      }
+    });
+
+    it("surfaces an external POST_PROCESSOR_MODELS removal as externalModelWarnings (plan 60 S3)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const hintsPath = path.join(envDir, "domain-hints.json");
+      fs.writeFileSync(hintsPath, JSON.stringify([{
+        domain: "example.com",
+        pathPattern: "/**",
+        default: { format: "text", postProcessor: "reader_lm" },
+      }]));
+      const models = [{ id: "reader_lm", label: "Reader LM", model: "reader-lm:0.5b", baseUrl: "http://localhost:9999" }];
+      const originalHintsPath = manager.config.domainHintsPath;
+      const originalModels = manager.config.postProcessorModels;
+      const originalEnvModels = process.env.POST_PROCESSOR_MODELS;
+      manager.config.domainHintsPath = hintsPath;
+      manager.config.postProcessorModels = models;
+      process.env.POST_PROCESSOR_MODELS = JSON.stringify(models);
+      fs.writeFileSync(envFile, `POST_PROCESSOR_MODELS=${JSON.stringify(models)}\n`);
+
+      try {
+        // Establish the file timestamp baseline before the external edit.
+        await fetch(`${MCP_BASE}/console/config`);
+        fs.writeFileSync(envFile, `POST_PROCESSOR_MODELS=[]\n`);
+
+        const res = await fetch(`${MCP_BASE}/console/config`);
+        const body = await res.json();
+
+        expect(body.envFile.externalModelWarnings).toEqual(expect.arrayContaining([
+          expect.stringContaining('references post-processor model "reader_lm"'),
+        ]));
+        // the hint itself is never touched by reconcile
+        const reloaded = JSON.parse(fs.readFileSync(hintsPath, "utf8"));
+        expect(reloaded[0].default.postProcessor).toBe("reader_lm");
+      } finally {
+        manager.config.domainHintsPath = originalHintsPath;
+        manager.config.postProcessorModels = originalModels;
+        if (originalEnvModels === undefined) delete process.env.POST_PROCESSOR_MODELS;
+        else process.env.POST_PROCESSOR_MODELS = originalEnvModels;
       }
     });
 
