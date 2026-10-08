@@ -231,7 +231,11 @@ describe("purgeEngineRuntimeState (plan 60 S8)", () => {
     );
     await fs.writeFile(
       path.join(cacheDir, "search-circuit-breakers.json"),
-      JSON.stringify({ mojeek: { openUntil: Date.now() + 600000, failures: 3, lastError: "boom" } })
+      JSON.stringify({
+        mojeek: { openUntil: Date.now() + 600000, failures: 3, lastError: "boom" },
+        "mojeek_lp/lightpanda": { openUntil: Date.now() + 600000, failures: 2, lastError: "Mojeek blocked" },
+        startpage: { openUntil: Date.now() + 600000, failures: 1, lastError: "timeout" }
+      })
     );
     const mod = await import("../src/search.js");
 
@@ -239,10 +243,14 @@ describe("purgeEngineRuntimeState (plan 60 S8)", () => {
     expect(poisonedProfile.consecutiveFailures).toBe(3);
     expect(poisonedProfile.state).toBe("cooling_down");
     expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek")).toBe(true);
+    expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek_lp/lightpanda")).toBe(true);
 
     mod.recordEngineAttempt("mojeek", "fail", "boom");
+    mod.recordEngineAttempt("mojeek_lp", "fail", "warmup boom");
     mod.recordEngineAttempt("bing", "fail", "captcha");
+    mod.recordEngineAttempt("duckduckgo_api", "fail", "bot page");
     expect(mod.getEngineAttemptStats().byEngine.mojeek).toBeTruthy();
+    expect(mod.getEngineAttemptStats().byEngine.mojeek_lp).toBeTruthy();
 
     expect(mod.purgeEngineRuntimeState(["mojeek"])).toBe(true);
 
@@ -251,19 +259,30 @@ describe("purgeEngineRuntimeState (plan 60 S8)", () => {
     expect(purgedProfile.attempts).toBe(0);
     expect(purgedProfile.state).toBe("unknown");
     expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek")).toBe(false);
+    expect(mod.getSearchBackendHealth().some((entry) => entry.route === "mojeek_lp/lightpanda")).toBe(false);
+    expect(mod.getSearchBackendHealth().some((entry) => entry.route === "startpage")).toBe(true);
 
     const stats = mod.getEngineAttemptStats();
+    // route-level variants of the purged engine go too (warmup/legacy ids)
     expect(stats.byEngine.mojeek).toBeUndefined();
+    expect(stats.byEngine.mojeek_lp).toBeUndefined();
+    // other engines — including duckduckgo_api, which shares a name prefix
+    // but is its own logical engine — survive
     expect(stats.byEngine.bing).toBeTruthy();
+    expect(stats.byEngine.duckduckgo_api).toBeTruthy();
 
     // persistence reflects the purge — a restart must not resurrect it
     const persistedProfiles = JSON.parse(await fs.readFile(path.join(cacheDir, "search-engine-profiles.json"), "utf8"));
     expect(persistedProfiles.profiles.mojeek.failuresInRow).toBe(0);
     const persistedCircuits = JSON.parse(await fs.readFile(path.join(cacheDir, "search-circuit-breakers.json"), "utf8"));
     expect(Object.keys(persistedCircuits)).not.toContain("mojeek");
+    expect(Object.keys(persistedCircuits)).not.toContain("mojeek_lp/lightpanda");
+    expect(Object.keys(persistedCircuits)).toContain("startpage");
     const persistedAttempts = JSON.parse(await fs.readFile(path.join(cacheDir, "search-engine-attempts.json"), "utf8"));
     expect(persistedAttempts.some((entry) => entry.engine === "mojeek")).toBe(false);
+    expect(persistedAttempts.some((entry) => entry.engine === "mojeek_lp")).toBe(false);
     expect(persistedAttempts.some((entry) => entry.engine === "bing")).toBe(true);
+    expect(persistedAttempts.some((entry) => entry.engine === "duckduckgo_api")).toBe(true);
   });
 });
 

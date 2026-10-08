@@ -365,13 +365,25 @@ export function resetSearchEngine(engine) {
 // pre-disable state and a disabled engine stops surfacing in /stats or
 // /health. The MCP server invalidates the web_search cache alongside; the
 // activity DB keeps its history — that is an audit log, not runtime state.
+//
+// State ids span route-level variants: warmup runs and legacy persisted keys
+// use `${engine}_${backend}` (cb/ch/lp) forms (`google_cb`, `mojeek_lp/…`)
+// while profiles live under the SUPPORTED id. `_api` ids are their own
+// logical engines (duckduckgo_api ≠ duckduckgo) and are never folded into
+// the bare engine's family.
+function engineStateIds(engine) {
+  const id = String(engine);
+  const base = id.replace(/_(cb|ch|lp)$/, "");
+  return [...new Set([id, base, `${base}_cb`, `${base}_ch`, `${base}_lp`])];
+}
+
 export function purgeEngineRuntimeState(engines) {
   if (!Array.isArray(engines) || !engines.length) return false;
-  const targets = new Set(engines.filter(Boolean).map(String));
+  const targets = new Set(engines.filter(Boolean).flatMap((engine) => engineStateIds(engine)));
   if (!targets.size) return false;
   let changed = false;
-  for (const engine of targets) {
-    if (engineScheduler.reset(engine)) changed = true;
+  for (const id of targets) {
+    if (engineScheduler.reset(id)) changed = true;
   }
   let circuitsRemoved = false;
   for (const key of [...routeCircuitState.keys()]) {
