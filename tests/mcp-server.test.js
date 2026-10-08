@@ -1015,6 +1015,91 @@ describe("mcp-server HTTP endpoints", () => {
       }
     });
 
+    it("an empty engine list means derived defaults, not disabled (plan 60 S7)", async () => {
+      const { DEFAULT_SEARCH_ENABLED_ENGINES } = await import("../src/config.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origList = manager.config.searchEnabledEngines;
+      const origExa = manager.config.exaApiKey;
+      const origLinkup = manager.config.linkupApiKey;
+      const origTavily = manager.config.tavilyApiKey;
+      const origFirecrawl = manager.config.firecrawlApiKey;
+      const origEnvList = process.env.SEARCH_ENABLED_ENGINES;
+      try {
+        // the uncheck-all path sends ""; the stored list must fall back to
+        // defaults + key-gated engines — never null — and match what a
+        // restart from the pre-synced env would derive
+        process.env.SEARCH_ENABLED_ENGINES = "duckduckgo,bing";
+        manager.config.searchEnabledEngines = ["duckduckgo", "bing"];
+        manager.config.exaApiKey = "seed-exa";
+        manager.config.linkupApiKey = "";
+        manager.config.tavilyApiKey = "";
+        manager.config.firecrawlApiKey = "";
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_ENABLED_ENGINES: "" } }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("SEARCH_ENABLED_ENGINES");
+        expect(manager.config.searchEnabledEngines).toEqual([...DEFAULT_SEARCH_ENABLED_ENGINES, "exa_api"]);
+        expect(process.env.SEARCH_ENABLED_ENGINES).toBe("");
+      } finally {
+        manager.config.searchEnabledEngines = origList;
+        manager.config.exaApiKey = origExa;
+        manager.config.linkupApiKey = origLinkup;
+        manager.config.tavilyApiKey = origTavily;
+        manager.config.firecrawlApiKey = origFirecrawl;
+        if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
+        else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+      }
+    });
+
+    it("reset reverts the engine list to derived defaults, not a static list (plan 60 S7)", async () => {
+      const { DEFAULT_SEARCH_ENABLED_ENGINES } = await import("../src/config.js");
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origList = manager.config.searchEnabledEngines;
+      const origExa = manager.config.exaApiKey;
+      const origLinkup = manager.config.linkupApiKey;
+      const origTavily = manager.config.tavilyApiKey;
+      const origFirecrawl = manager.config.firecrawlApiKey;
+      const origEnvList = process.env.SEARCH_ENABLED_ENGINES;
+      try {
+        // "reset" means unset: the runtime list must equal what startup
+        // computes for a .env without the line — defaults + present keys —
+        // instead of the static schema fallback (which drops the key engines)
+        fs.writeFileSync(envFile, "# test env\nMAX_CONCURRENT_PAGE_OPS=30\nHEADLESS=true\nSEARCH_ENABLED_ENGINES=duckduckgo,bing\n");
+        manager.config.searchEnabledEngines = ["duckduckgo", "bing"];
+        manager.config.exaApiKey = "seed-exa";
+        manager.config.linkupApiKey = "";
+        manager.config.tavilyApiKey = "";
+        manager.config.firecrawlApiKey = "";
+        process.env.SEARCH_ENABLED_ENGINES = "duckduckgo,bing";
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reset: ["SEARCH_ENABLED_ENGINES"] }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("SEARCH_ENABLED_ENGINES→default");
+        expect(manager.config.searchEnabledEngines).toEqual([...DEFAULT_SEARCH_ENABLED_ENGINES, "exa_api"]);
+        expect(process.env.SEARCH_ENABLED_ENGINES).toBeUndefined();
+      } finally {
+        manager.config.searchEnabledEngines = origList;
+        manager.config.exaApiKey = origExa;
+        manager.config.linkupApiKey = origLinkup;
+        manager.config.tavilyApiKey = origTavily;
+        manager.config.firecrawlApiKey = origFirecrawl;
+        if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
+        else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+      }
+    });
+
     it("warns when an update drops a post-processor model still referenced by saved hints (plan 60 S3)", async () => {
       const browserMod = await import("../src/browser.js");
       const manager = await browserMod.getBrowserManager.mock.results[0].value;

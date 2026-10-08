@@ -86,15 +86,19 @@ function refreshSearchEnabledEngines(config) {
 const HOT_APPLYERS = {
   SEARCH_ROUTE_WARMUP_ENGINES: (config, value) => { config.searchRouteWarmupEngines = value; },
   SEARCH_ENABLED_ENGINES: (config, value) => {
-    let engines = value.length ? value : null;
-    if (engines) {
-      if (!config.exaApiKey) engines = engines.filter((e) => e !== "exa_api");
-      if (!config.linkupApiKey) engines = engines.filter((e) => e !== "linkup_api");
-      if (!config.tavilyApiKey) engines = engines.filter((e) => e !== "tavily_api");
-      if (!config.firecrawlApiKey) engines = engines.filter((e) => e !== "firecrawl_api");
-      if (!engines.length) engines = null;
-    }
-    config.searchEnabledEngines = engines;
+    // Plan 60 S7: empty/unset means "use the derived defaults", never "disable
+    // everything". Every input shape (validated [], reset null, explicit list)
+    // funnels through the same deriveSearchEnabledEngines the startup runs, so
+    // a save, a reset, and a restart from the resulting .env all converge.
+    const list = Array.isArray(value) ? value : String(value ?? "").split(",");
+    const explicit = list.map(String).filter(Boolean).join(",");
+    config.searchEnabledEngines = deriveSearchEnabledEngines({
+      explicit,
+      exaApiKey: config.exaApiKey,
+      linkupApiKey: config.linkupApiKey,
+      tavilyApiKey: config.tavilyApiKey,
+      firecrawlApiKey: config.firecrawlApiKey
+    });
   },
   EXA_API_KEY: (config, value) => {
     config.exaApiKey = String(value || "").trim();

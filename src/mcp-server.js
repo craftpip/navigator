@@ -1226,12 +1226,16 @@ async function applyConfigUpdates(manager, body) {
   for (const key of resetKeys) {
     const entry = CONFIG_SCHEMA.find((item) => item.key === key);
     if (entry && entry.applies === "hot") {
-      const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, entry.fallback) : null;
+      // resetValue (plan 60 S7): "reset" means unset — apply what startup would
+      // compute for a .env without this key, which may differ from the static
+      // fallback (SEARCH_ENABLED_ENGINES derives from defaults + API keys).
+      const resetTarget = Object.hasOwn(entry, "resetValue") ? entry.resetValue : entry.fallback;
+      const browsersResult = key === "BROWSERS" ? applyBrowsersConfig(manager, resetTarget) : null;
       if (browsersResult) {
         payload.forgottenRelayBrowsers.push(...browsersResult.forgottenRelayBrowsers);
         payload.invalidatedBrowsers.push(...browsersResult.invalidated);
       }
-      else hotApplyConfig(manager.config, key, entry.fallback);
+      else hotApplyConfig(manager.config, key, resetTarget);
       payload.hotApplied.push(`${key}→default`);
       delete process.env[key];
     } else {

@@ -11,7 +11,7 @@ export const CONFIG_SCHEMA = [
   { key: "BROWSER_USER_AGENT", category: "backend", type: "string", fallback: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", applies: "hot", description: "User agent string used by the browsers." },
 
   { key: "SEARCH_ROUTE_WARMUP_ENGINES", category: "search", type: "engines", fallback: ["brave", "duckduckgo_api", "duckduckgo"], applies: "hot", description: "Browser routes prewarmed on start." },
-  { key: "SEARCH_ENABLED_ENGINES", category: "search", type: "engines", fallback: DEFAULT_SEARCH_ENABLED_ENGINES, applies: "hot", description: "Search routes eligible for automatic select_best scheduling." },
+  { key: "SEARCH_ENABLED_ENGINES", category: "search", type: "engines", fallback: DEFAULT_SEARCH_ENABLED_ENGINES, resetValue: null, applies: "hot", description: "Search routes eligible for automatic select_best scheduling. Empty means use the derived defaults (defaults plus engines whose API keys are present), never disable everything." },
   { key: "SEARCH_ROUTE_CIRCUIT_OPEN_MS", category: "search", type: "number", fallback: 300000, applies: "hot", description: "Route cooldown after failure (ms)." },
   { key: "EXA_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for exa_api search (https://dashboard.exa.ai/api-keys). When empty, exa_api is disabled." },
   { key: "LINKUP_API_KEY", category: "search", type: "string", fallback: "", applies: "hot", description: "API key for linkup_api search (https://app.linkup.so/api-keys). When empty, linkup_api is disabled." },

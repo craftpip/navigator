@@ -73,20 +73,33 @@ export function parseEngines(value, fallback) {
 // converges to exactly what a restart computes from the same .env state.
 // `explicit` is the raw SEARCH_ENABLED_ENGINES value (string, empty, or
 // undefined = unset → derived from defaults + credential-gated engines).
+function deriveDefaultsWithKeys(exaApiKey, linkupApiKey, tavilyApiKey, firecrawlApiKey) {
+  const next = [...DEFAULT_SEARCH_ENABLED_ENGINES];
+  if (exaApiKey && !next.includes("exa_api")) next.push("exa_api");
+  if (linkupApiKey && !next.includes("linkup_api")) next.push("linkup_api");
+  if (tavilyApiKey && !next.includes("tavily_api")) next.push("tavily_api");
+  if (firecrawlApiKey && !next.includes("firecrawl_api")) next.push("firecrawl_api");
+  return next;
+}
+
 export function deriveSearchEnabledEngines({ explicit, exaApiKey = "", linkupApiKey = "", tavilyApiKey = "", firecrawlApiKey = "" }) {
   const hasExplicit = explicit !== undefined && String(explicit).trim() !== "";
   const parsed = parseEngines(explicit, DEFAULT_SEARCH_ENABLED_ENGINES);
   let next = [...parsed];
   if (!hasExplicit) {
-    if (exaApiKey && !next.includes("exa_api")) next.push("exa_api");
-    if (linkupApiKey && !next.includes("linkup_api")) next.push("linkup_api");
-    if (tavilyApiKey && !next.includes("tavily_api")) next.push("tavily_api");
-    if (firecrawlApiKey && !next.includes("firecrawl_api")) next.push("firecrawl_api");
+    next = deriveDefaultsWithKeys(exaApiKey, linkupApiKey, tavilyApiKey, firecrawlApiKey);
   }
   if (!exaApiKey) next = next.filter((engine) => engine !== "exa_api");
   if (!linkupApiKey) next = next.filter((engine) => engine !== "linkup_api");
   if (!tavilyApiKey) next = next.filter((engine) => engine !== "tavily_api");
   if (!firecrawlApiKey) next = next.filter((engine) => engine !== "firecrawl_api");
+  if (!next.length) {
+    // Plan 60 S7: an empty result (unset, or an explicit list that filters
+    // away to nothing) means "use the derived defaults", never "disable
+    // everything" — search.js already falls back to the defaults at runtime,
+    // so this keeps the stored value in sync with what actually runs.
+    next = deriveDefaultsWithKeys(exaApiKey, linkupApiKey, tavilyApiKey, firecrawlApiKey);
+  }
   return next;
 }
 
