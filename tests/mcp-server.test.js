@@ -2898,7 +2898,7 @@ describe("mcp-server HTTP endpoints", () => {
       fs.writeFileSync(hintsPath, JSON.stringify([{
         domain: "ai.example.com",
         pathPattern: "/**",
-        default: { format: "reader_lm" }
+        default: { format: "readability_to_markdown", postProcessor: "reader_lm" }
       }]));
 
       const browserMod = await import("../src/browser.js");

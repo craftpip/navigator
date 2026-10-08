@@ -1,6 +1,6 @@
 # Post-processors (AI)
 
-Post-processors let you send page HTML or a screenshot to **any AI endpoint** — local Ollama or any ChatGPT-compatible API — and get clean markdown back. Any model that speaks OpenAI `chat/completions` works. If the model fails or isn't configured, Navigator falls back to `html_to_markdown`.
+Post-processors let you send page HTML or a screenshot to **any AI endpoint** — local Ollama or any ChatGPT-compatible API — and get clean markdown back. Any model that speaks OpenAI `chat/completions` works. If the model fails or isn't configured, the extractor's own output is kept as-is.
 
 ## Overview
 
@@ -68,7 +68,7 @@ If the post-processor is unreachable or fails, the extractor's output is passed 
 - Empty response → fallback to extractor output
 - Model not configured → fallback to extractor output
 
-You'll see a warning in the server logs, but the fetch still succeeds.
+You'll see a warning in the server logs and a `⚠` note in the fetch result, but the fetch still succeeds.
 
 ## Model Entry Fields
 

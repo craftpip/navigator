@@ -1,9 +1,10 @@
 # Extraction, Markdown, and Domain Hints
 
-> **AI-model extractors** (reader-lm, MinerU-HTML) are a separate extraction path that
-> replaces the pipeline below for matched pages — see
-> [MinerU-HTML GPU Sidecar](navigator-mineru-sidecar.md) for the GPU-backed AI extractor's
-> pipeline, KV-cache limits, and silent fallback behavior.
+> **AI-model post-processors** (reader-lm, MinerU-HTML) run *after* the pipeline below
+> on matched pages — an extractor formats the content first, then the model rewrites it.
+> AI model ids are never valid extractor formats (plan 60 S4). See
+> [MinerU-HTML GPU Sidecar](navigator-mineru-sidecar.md) for the GPU-backed post-processor's
+> pipeline, KV-cache limits, and fallback behavior.
 
 ## Fetch Pipeline
 

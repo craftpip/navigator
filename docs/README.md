@@ -12,7 +12,7 @@ This folder is the project documentation. It describes how navigator is built an
 | [Search and Drivers](search/search-and-drivers.md) | Search orchestration, scheduler, circuit breakers, and every search driver |
 | [Browser Runtime](architecture/browser-runtime.md) | Chromium, CloakBrowser, Lightpanda, page slots, browser pools, and screenshots |
 | [Extraction and Hints](extraction/extraction-and-hints.md) | Page extraction, tables, links, Markdown, SEO data, and domain-hint flows |
-| [MinerU-HTML GPU Sidecar](extraction/navigator-mineru-sidecar.md) | The optional AI-Model extractor: pipeline, KV-cache limits, fallback behavior, performance |
+| [MinerU-HTML GPU Sidecar](extraction/navigator-mineru-sidecar.md) | The optional AI-model post-processor sidecar: pipeline, KV-cache limits, fallback behavior, performance |
 | [Operations and Configuration](operations/operations-and-configuration.md) | Environment settings, Docker, SQLite, console, monitoring, VNC, and error logging |
 | [Source Map](reference/source-reference.md) | Locate the code that owns a documented behavior and follow safe change paths |
 | [Implementation Guides](code/README.md) | Behavior, decisions, limits, fallbacks, and safe change boundaries for the codebase |

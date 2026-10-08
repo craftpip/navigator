@@ -787,18 +787,22 @@ describe("extractor formats and AI models", () => {
     expect(errors.map((e) => e.field)).toContain("default.format");
   });
 
-  it("accepts AI-model ids in default.format and block.format when configured", () => {
+  // plan 60 S4 (direction B): AI model ids are post-processors, never extractor
+  // formats — validation rejects them even when configured, pointing at postProcessor.
+  it("rejects AI-model ids in default.format and block.format even when configured (plan 60 S4)", () => {
     const aiModelIds = ["reader_lm", "reader-lm-qwen"];
     const defaults = validateHintRule({ default: { format: "reader_lm" } }, { scope: "test", aiModelIds });
-    expect(defaults.errors).toEqual([]);
+    expect(defaults.errors.map((e) => e.field)).toContain("default.format");
+    expect(defaults.errors.find((e) => e.field === "default.format").message).toContain("postProcessor");
     const block = validateHintRule(
       { flow: [{ action: "extract", content: { blocks: [{ selector: "main", priority: "high", format: "reader-lm-qwen" }] } }] },
       { scope: "test", aiModelIds }
     );
-    expect(block.errors).toEqual([]);
+    expect(block.errors.map((e) => e.field)).toContain("flow[0].content.blocks[0].format");
+    expect(block.errors.find((e) => e.field === "flow[0].content.blocks[0].format").message).toContain("postProcessor");
   });
 
-  it("rejects an unknown AI-model id in default.format and block.format", () => {
+  it("rejects an unknown model id in default.format and block.format", () => {
     const aiModelIds = ["reader_lm"];
     const defaults = validateHintRule({ default: { format: "unknown_model" } }, { scope: "test", aiModelIds });
     expect(defaults.errors.map((e) => e.field)).toContain("default.format");

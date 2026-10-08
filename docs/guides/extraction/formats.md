@@ -186,11 +186,12 @@ China,"1,404,890,000",17.0%,31 Dec 2025,Official estimate[5],[c]
 ```
 ````
 
-## AI Model Extractors
+## AI models are post-processors, not extractors
 
-If configured with `POST_PROCESSOR_MODELS`, you can use AI models to extract content. The page HTML is sent to an AI model, which returns clean markdown.
-
-Available models appear in the format dropdown in the web console. They fall back to `html_to_markdown` if the model fails.
+AI model ids are **not** valid `format` values — validation rejects them with a pointer to
+`postProcessor` (plan 60 S4). To run a model on a page, pick an extractor normally and set
+`postProcessor` on the hint (web console hint editor, or `default.postProcessor` in the
+hint JSON). The extractor formats the content first; the model rewrites its output.
 
 See [Post-processors (AI)](/guides/extraction/ai-extractors) for setup details.
 
@@ -205,4 +206,4 @@ See [Post-processors (AI)](/guides/extraction/ai-extractors) for setup details.
 ## Next Steps
 
 - [Domain Hints](/guides/extraction/domain-hints) — Per-site extraction rules
-- [Post-processors (AI)](/guides/extraction/ai-extractors) — AI-powered extraction
+- [Post-processors (AI)](/guides/extraction/ai-extractors) — AI-powered post-processing

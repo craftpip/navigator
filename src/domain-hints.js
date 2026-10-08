@@ -371,17 +371,6 @@ function coerceLegacyFormat(format) {
   return { format: "readability_to_markdown", coerced: true };
 }
 
-export function isAiModelFormat(format, aiModelIds = []) {
-  if (!format || typeof format !== "string") return false;
-  if (!Array.isArray(aiModelIds)) return false;
-  return aiModelIds.includes(format);
-}
-
-export function getValidExtractors(baseFormats, aiModelIds = []) {
-  const ids = Array.isArray(aiModelIds) ? aiModelIds : [];
-  return [...baseFormats, ...ids.filter((id) => id && !baseFormats.includes(id))];
-}
-
 export const FIELD_FORMATS = [
   "text",
   "list",
@@ -472,9 +461,11 @@ function validateBlock(block, errors, fieldPrefix, aiModelIds, warnings = []) {
   }
 
   if (hasFormat) {
-    const validExtractors = getValidExtractors(BLOCK_FORMATS, aiModelIds);
-    if (!validExtractors.includes(block.format) && block.format !== LEGACY_MARKDOWN_FORMAT) {
-      errors.push({ field: `${prefix}format`, message: `must be one of ${validExtractors.map((f) => `"${f}"`).join(", ")}` });
+    if (!BLOCK_FORMATS.includes(block.format) && block.format !== LEGACY_MARKDOWN_FORMAT) {
+      const aiPointer = Array.isArray(aiModelIds) && aiModelIds.includes(block.format)
+        ? ` — "${block.format}" is a POST_PROCESSOR_MODELS id; AI models run as "postProcessor", not as an extractor format`
+        : "";
+      errors.push({ field: `${prefix}format`, message: `must be one of ${BLOCK_FORMATS.map((f) => `"${f}"`).join(", ")}${aiPointer}` });
     }
     if (block.postProcessor !== undefined) {
       if (typeof block.postProcessor !== "string" || !block.postProcessor.trim()) {
@@ -769,9 +760,11 @@ function validateDefault(defaultBlock, errors, warnings, aiModelIds) {
   if (defaultBlock.skipSelectors !== undefined) validateSelectorArray(defaultBlock, "skipSelectors", errors);
 
   if (defaultBlock.format !== undefined) {
-    const validExtractors = getValidExtractors(DEFAULT_FORMATS, aiModelIds);
-    if (!validExtractors.includes(defaultBlock.format)) {
-      errors.push({ field: "default.format", message: `must be one of ${validExtractors.map((f) => `"${f}"`).join(", ")}` });
+    if (!DEFAULT_FORMATS.includes(defaultBlock.format)) {
+      const aiPointer = Array.isArray(aiModelIds) && aiModelIds.includes(defaultBlock.format)
+        ? ` — "${defaultBlock.format}" is a POST_PROCESSOR_MODELS id; AI models run as "postProcessor", not as an extractor format`
+        : "";
+      errors.push({ field: "default.format", message: `must be one of ${DEFAULT_FORMATS.map((f) => `"${f}"`).join(", ")}${aiPointer}` });
     }
   }
   if (defaultBlock.postProcessor !== undefined) {

@@ -1,6 +1,6 @@
 # MinerU-HTML v1.1 GPU Sidecar
 
-The `navigator-mineru` container is an optional **"AI Model" extractor** for `web_fetch`. It
+The `navigator-mineru` container is an optional **AI-model post-processor** for `web_fetch`. It
 runs the full `mineru_html` v1.1 pipeline (simplify → classify → extract → convert) on a
 GPU, wrapped in a thin FastAPI HTTP server. Navigator never imports the Python stack —
 it POSTs raw HTML over HTTP and gets clean Markdown back.
@@ -29,8 +29,8 @@ it POSTs raw HTML over HTTP and gets clean Markdown back.
 
 ```text
 navigator container (Node)
-  web_fetch with format: "<ai-model-id>"
-    -> src/ai-extractor.js extractWithMineru()   # kind === "mineru"
+  web_fetch with hint postProcessor: "mineru"
+    -> src/post-processor.js extractWithMineru()   # kind === "mineru"
        -> POST http://localhost:1998/extract  {html}
 navigator-mineru container (Python, NVIDIA GPU)
   sidecar.py (FastAPI, uvicorn :1998)
@@ -44,8 +44,8 @@ navigator-mineru container (Python, NVIDIA GPU)
 ```
 
 The container is deliberately separate from navigator: GPU runtime, its own image, its
-own lifecycle. If it is down, navigator's AI extractor **falls back to
-`html_to_markdown`** (existing fallback semantics) — navigator is never blocked.
+own lifecycle. If it is down, the post-processor **keeps the extractor's own output**
+(falls back with a console warning and a `⚠` result warning) — navigator is never blocked.
 
 ## Files
 
@@ -262,10 +262,11 @@ Add a model entry with `kind: "mineru"` and the sidecar's base URL, e.g.:
 
 - `parseAiModelKind` (`src/config.js`) normalizes `kind` to `chat`/`mineru` (anything
   else falls back to `chat`).
-- `extractWithMineru` (`src/ai-extractor.js`) tail-cuts the HTML at 400,000 chars, POSTs
+- `extractWithMineru` (`src/post-processor.js`) tail-cuts the HTML at 400,000 chars, POSTs
   `{html}` to `${baseUrl}/extract`, reads `data.text`, and shares the
   `DEFAULT_MAX_CONCURRENCY=2` slot gate with the chat extractor.
-- AI-model fetches bypass the web_fetch result cache (per-call re-run).
+- Post-processed results are cached normally with the rest of the web_fetch payload (the
+  old AI-extractor cache bypass was removed with plan 25 / plan 60 S4).
 
 ## Performance (measured on this box, GTX 1650 4GB, warm engine)
 
