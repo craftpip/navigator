@@ -112,8 +112,34 @@ function refreshSearchEnabledEngines(config) {
   }));
 }
 
+// Plan 60 S9: a hot warmup-list change must reach the window pools, not just
+// the config object — the listener fires with the engines that actually
+// entered or left the list, and the MCP server forwards that diff to the
+// browser manager (new entries get warm windows now, dropped entries retire
+// theirs), converging to what a restart from the same .env would leave behind.
+let warmupBoundaryListener = null;
+
+export function setWarmupBoundaryListener(listener) {
+  warmupBoundaryListener = typeof listener === "function" ? listener : null;
+}
+
+function normalizeWarmupList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? "").split(",");
+  return [...new Set(raw.map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
+}
+
 const HOT_APPLYERS = {
-  SEARCH_ROUTE_WARMUP_ENGINES: (config, value) => { config.searchRouteWarmupEngines = value; },
+  SEARCH_ROUTE_WARMUP_ENGINES: (config, value) => {
+    const next = normalizeWarmupList(value);
+    const before = normalizeWarmupList(config.searchRouteWarmupEngines);
+    config.searchRouteWarmupEngines = next;
+    if (!warmupBoundaryListener) return;
+    const beforeSet = new Set(before);
+    const afterSet = new Set(next);
+    const added = next.filter((engine) => !beforeSet.has(engine));
+    const removed = before.filter((engine) => !afterSet.has(engine));
+    if (added.length || removed.length) warmupBoundaryListener({ added, removed });
+  },
   SEARCH_ENABLED_ENGINES: (config, value) => {
     // Plan 60 S7: empty/unset means "use the derived defaults", never "disable
     // everything". Every input shape (validated [], reset null, explicit list)

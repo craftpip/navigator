@@ -1149,6 +1149,11 @@ export class BrowserManager {
     const poolEngine = this._poolEngine(lower);
     const pool = this.getEnginePool(poolEngine);
     this.pruneClosedWindows(pool);
+    // Plan 60 S9: a warmup run tracks the pool's retire epoch so a route
+    // dropped from the warmup list while its window is still being created
+    // discards that window instead of resurrecting it. Cold-start runs are
+    // never cancelled — a drop from warmup does not stop real searches.
+    const warmEpoch = reason === "warmup" ? (pool.retireEpoch || 0) : null;
 
     const minWindows = this.config.searchKeepMinWorkingWindows;
     const maxWindows = this._poolMaxWindows(poolEngine);
@@ -1182,6 +1187,16 @@ export class BrowserManager {
             timeout: this.config.browserOpTimeoutMs
           });
         }
+        if (warmEpoch !== null && pool.retireEpoch !== warmEpoch) {
+          pool.windows = pool.windows.filter((item) => item !== entry);
+          try {
+            await page.close();
+          } catch {
+            // ignore window close errors
+          }
+          this.logWindowEvent("search.window.closed", entry.engine, { reason: "warmup_retired", persistent: true });
+          return;
+        }
         this.logWindowEvent("search.window.opened", label || entry.engine, { reason, persistent: true });
       } catch (error) {
         pool.windows = pool.windows.filter((item) => item !== entry);
@@ -1209,7 +1224,7 @@ export class BrowserManager {
 
     while (true) {
       this.pruneClosedWindows(pool);
-      const idle = pool.windows.find((entry) => !entry.pending && !entry.inUse);
+      const idle = pool.windows.find((entry) => !entry.pending && !entry.inUse && !entry.retired);
       if (idle) {
         idle.inUse = true;
         return idle.page;
@@ -1265,6 +1280,16 @@ export class BrowserManager {
 
     if (entry.pending || !entry.page || entry.page.isClosed()) {
       pool.windows = pool.windows.filter((item) => item !== entry);
+    } else if (entry.retired) {
+      // Plan 60 S9: a route dropped from the warmup list closes on release
+      // instead of being retained as a warm window.
+      pool.windows = pool.windows.filter((item) => item !== entry);
+      try {
+        await entry.page.close();
+        this.logWindowEvent("search.window.closed", entry.engine, { reason: "warmup_retired", persistent: Boolean(entry.persistent) });
+      } catch {
+        // ignore window close errors
+      }
     } else if (!entry.persistent && pool.windows.length > this.config.searchKeepMinWorkingWindows) {
       pool.windows = pool.windows.filter((item) => item !== entry);
       try {
@@ -1284,6 +1309,58 @@ export class BrowserManager {
       await this.trimIdleWindows(pool, this.config.searchKeepMinWorkingWindows);
     }
 
+    this.wakeSearchWaiter(pool);
+  }
+
+  // Plan 60 S9: a hot warmup-list edit converges the pools to the restart
+  // result — newly listed browser routes warm their windows immediately
+  // (same prelaunch gate + browser-driver filter as startup), and dropped
+  // routes retire: idle windows close now, in-use ones close on release, and
+  // a warmup creation still in flight sees the retire epoch and discards its
+  // window instead of resurrecting it.
+  async applyWarmupListChange({ added = [], removed = [] } = {}) {
+    const normalize = (list) => [...new Set(
+      (Array.isArray(list) ? list : [])
+        .map((engine) => String(engine).trim().toLowerCase())
+        .filter(Boolean)
+    )];
+    const addList = normalize(added);
+    const removeList = normalize(removed);
+    for (const engine of removeList) {
+      await this.retireSearchWindows(engine);
+    }
+    const warm = getBrowserWarmupEngines(addList);
+    if (!warm.length || !this.config.prelaunchBrowser) return;
+    await this.prelaunchIfConfigured().catch(() => {
+      // ignore prelaunch errors; a later search warms its own windows
+    });
+    await Promise.allSettled(warm.map((engine) => this.ensureMinWorkingWindows(engine, {
+      startupUrl: getEngineMetadata(engine)?.homeUrl || "about:blank",
+      waitUntil: "domcontentloaded",
+      reason: "warmup"
+    })));
+  }
+
+  async retireSearchWindows(engine) {
+    const poolEngine = this._poolEngine(engine);
+    if (!poolEngine) return;
+    const pool = this.engineWorkingWindows.get(poolEngine);
+    if (!pool) return;
+    pool.retireEpoch = (pool.retireEpoch || 0) + 1;
+    this.pruneClosedWindows(pool);
+    for (const entry of pool.windows) entry.retired = true;
+    const idle = pool.windows.filter((entry) => !entry.pending && !entry.inUse);
+    pool.windows = pool.windows.filter((entry) => !idle.includes(entry));
+    for (const entry of idle) {
+      try {
+        if (entry.page && !entry.page.isClosed()) {
+          await entry.page.close();
+          this.logWindowEvent("search.window.closed", pool.engine, { reason: "warmup_retired", persistent: Boolean(entry.persistent) });
+        }
+      } catch {
+        // ignore window close errors
+      }
+    }
     this.wakeSearchWaiter(pool);
   }
 

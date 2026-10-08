@@ -328,6 +328,71 @@ describe("BrowserManager", () => {
     });
   });
 
+  describe("warmup list hot-apply (plan 60 S9)", () => {
+    it("retires dropped routes and warms newly listed ones", async () => {
+      const manager = new BrowserManager(makeConfig({ prelaunchBrowser: true }));
+      manager.ensureMinWorkingWindows = vi.fn().mockResolvedValue(undefined);
+      manager.prelaunchIfConfigured = vi.fn().mockResolvedValue(undefined);
+      const pool = manager.getEnginePool("duckduckgo");
+      const idleClose = vi.fn().mockResolvedValue(undefined);
+      const inUseClose = vi.fn().mockResolvedValue(undefined);
+      const idlePage = { isClosed: () => false, close: idleClose };
+      const inUsePage = { isClosed: () => false, close: inUseClose };
+      pool.windows.push(
+        { page: idlePage, inUse: false, pending: false, persistent: true, engine: "duckduckgo" },
+        { page: inUsePage, inUse: true, pending: false, persistent: true, engine: "duckduckgo" }
+      );
+
+      await manager.applyWarmupListChange({ added: ["google"], removed: ["duckduckgo"] });
+
+      // idle window closed immediately; in-use one only marked for release
+      expect(idleClose).toHaveBeenCalledOnce();
+      expect(inUseClose).not.toHaveBeenCalled();
+      expect(pool.windows.length).toBe(1);
+      expect(pool.windows[0].retired).toBe(true);
+      // newly listed browser route warmed through the startup path
+      expect(manager.ensureMinWorkingWindows).toHaveBeenCalledTimes(1);
+      expect(manager.ensureMinWorkingWindows).toHaveBeenCalledWith("google", expect.objectContaining({ reason: "warmup" }));
+
+      // the in-use retired window closes on release instead of being retained
+      await manager.releaseSearchWindow("duckduckgo", inUsePage);
+      expect(inUseClose).toHaveBeenCalledOnce();
+      expect(pool.windows).toEqual([]);
+    });
+
+    it("skips retired idle windows when acquiring", async () => {
+      const manager = new BrowserManager(makeConfig({ searchKeepMinWorkingWindows: 0, searchMaxWorkingWindows: 2 }));
+      const retiredPage = { isClosed: () => false, close: vi.fn() };
+      const freshPage = { isClosed: () => false, on: vi.fn() };
+      manager.ensureMinWorkingWindows = vi.fn();
+      manager.newPage = vi.fn().mockResolvedValue(freshPage);
+      const pool = manager.getEnginePool("google");
+      pool.windows.push({ page: retiredPage, inUse: false, pending: false, persistent: true, retired: true, engine: "google" });
+
+      const got = await manager.acquireSearchWindow("google");
+
+      expect(got).toBe(freshPage);
+      expect(got).not.toBe(retiredPage);
+      expect(retiredPage.close).not.toHaveBeenCalled();
+    });
+
+    it("discards a warmup window whose route is retired mid-create", async () => {
+      const manager = new BrowserManager(makeConfig({ searchKeepMinWorkingWindows: 2 }));
+      const pool = manager.getEnginePool("duckduckgo");
+      const slowPage = { isClosed: () => false, close: vi.fn().mockResolvedValue(undefined), on: vi.fn() };
+      let resolvePage;
+      manager.newPage = vi.fn(() => new Promise((resolve) => { resolvePage = resolve; }));
+
+      const ensurePromise = manager.ensureMinWorkingWindows("duckduckgo", { reason: "warmup" });
+      await manager.retireSearchWindows("duckduckgo");
+      resolvePage(slowPage);
+      await ensurePromise;
+
+      expect(slowPage.close).toHaveBeenCalledOnce();
+      expect(pool.windows).toEqual([]);
+    });
+  });
+
   describe("page slot management", () => {
     it("acquirePageSlot increments when under max", async () => {
       const manager = new BrowserManager(makeConfig({ maxConcurrentPageOps: 5 }));

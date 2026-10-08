@@ -131,6 +131,7 @@ function makeMockManager(overrides = {}) {
     prelaunchIfConfigured: vi.fn().mockResolvedValue(undefined),
     relaunchDefaultBackend: vi.fn().mockImplementation(async (headless) => ({ ok: true, backend: "cloakbrowser", relaunched: true, headless: Boolean(headless) })),
     invalidateAddOn: vi.fn().mockReturnValue([]),
+    applyWarmupListChange: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -1139,6 +1140,42 @@ describe("mcp-server HTTP endpoints", () => {
         manager.config.searchEnabledEngines = origList;
         if (origEnvList === undefined) delete process.env.SEARCH_ENABLED_ENGINES;
         else process.env.SEARCH_ENABLED_ENGINES = origEnvList;
+      }
+    });
+
+    it("applies warmup-list changes to the window pools (plan 60 S9)", async () => {
+      const browserMod = await import("../src/browser.js");
+      const manager = await browserMod.getBrowserManager.mock.results[0].value;
+      const origWarmup = manager.config.searchRouteWarmupEngines;
+      const origEnvWarmup = process.env.SEARCH_ROUTE_WARMUP_ENGINES;
+      try {
+        manager.applyWarmupListChange.mockClear();
+        manager.config.searchRouteWarmupEngines = ["brave", "duckduckgo"];
+        const res = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_ROUTE_WARMUP_ENGINES: "brave,google" } }),
+        });
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.hotApplied).toContain("SEARCH_ROUTE_WARMUP_ENGINES");
+        expect(manager.config.searchRouteWarmupEngines).toEqual(["brave", "google"]);
+        expect(manager.applyWarmupListChange).toHaveBeenCalledTimes(1);
+        expect(manager.applyWarmupListChange).toHaveBeenCalledWith({ added: ["google"], removed: ["duckduckgo"] });
+
+        // an unchanged list must not touch the pools
+        manager.applyWarmupListChange.mockClear();
+        const res2 = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { SEARCH_ROUTE_WARMUP_ENGINES: "brave,google" } }),
+        });
+        expect((await res2.json()).ok).toBe(true);
+        expect(manager.applyWarmupListChange).not.toHaveBeenCalled();
+      } finally {
+        manager.config.searchRouteWarmupEngines = origWarmup;
+        if (origEnvWarmup === undefined) delete process.env.SEARCH_ROUTE_WARMUP_ENGINES;
+        else process.env.SEARCH_ROUTE_WARMUP_ENGINES = origEnvWarmup;
       }
     });
 

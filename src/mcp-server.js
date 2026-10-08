@@ -18,7 +18,7 @@ import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowse
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
-import { validateConfigValue, hotApplyConfig, setEngineBoundaryListener } from "./config-manager.js";
+import { validateConfigValue, hotApplyConfig, setEngineBoundaryListener, setWarmupBoundaryListener } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState } from "./search.js";
@@ -5091,6 +5091,16 @@ setEngineBoundaryListener((engines) => {
     if (disabled.length) purgeEngineRuntimeState(disabled);
   }
 }
+
+// Plan 60 S9: warmup-list edits converge the window pools — newly listed
+// browser routes warm their windows (when prelaunch is on), dropped routes
+// retire theirs. Fire-and-forget: the save response stays fast and the
+// window lifecycle settles asynchronously, exactly like startup warmup.
+setWarmupBoundaryListener((change) => {
+  manager.applyWarmupListChange(change).catch((error) => {
+    console.error("[warmup] hot apply failed:", error);
+  });
+});
 
 const HANG_TIMEOUT_CODE = "HANG_TIMEOUT";
 let shutdownInProgress = false;
