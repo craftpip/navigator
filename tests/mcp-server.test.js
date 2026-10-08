@@ -3487,6 +3487,129 @@ describe("mcp-server HTTP endpoints", () => {
       expect(text).not.toMatch(/cached result/i);
     });
   });
+
+  // ---- cache identity (plan 60 S10) --------------------------------------
+  // Args alone let a cached fetch outlive the producer context that shaped it:
+  // a static-hint save or a hot config change must make the next fetch re-run,
+  // not replay the pre-change entry.
+  describe("cache identity (plan 60 S10)", () => {
+    it("re-extracts after a static hint is created through the console API", async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-s10-hints-"));
+      const s10HintsPath = path.join(tempDir, "domain-hints.json");
+      fs.writeFileSync(s10HintsPath, "[]\n");
+      // The console handlers close over the boot manager, so point its
+      // domainHintsPath at the temp file (restored afterwards) — the fetch
+      // path reads the same object via getBrowserManager().
+      const browserMod = await import("../src/browser.js");
+      const bootManager = await browserMod.getBrowserManager();
+      const prevHintsPath = bootManager.config.domainHintsPath;
+      bootManager.config.domainHintsPath = s10HintsPath;
+      try {
+        const searchMod = await import("../src/search.js");
+        const url = `https://example.com/s10-hint-${Date.now()}`;
+        searchMod.browserOpenAndExtract.mockReset();
+        searchMod.browserOpenAndExtract.mockResolvedValueOnce({ text: "before hint", title: "Before", url });
+
+        const r1 = await mcpPost({
+          jsonrpc: "2.0", id: 90, method: "tools/call",
+          params: { name: "web_fetch", arguments: { url } },
+        });
+        expect(r1.status).toBe(200);
+        expect(r1.body.result.content[0].text).toContain("before hint");
+        expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(1);
+
+        // Static hint CRUD only bumps the hint revision (no bucket clear) —
+        // the key context is what must invalidate the cached entry.
+        const created = await fetch(`${MCP_BASE}/console/api/hints`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ hint: { domain: "example.com", pathPattern: "/**", pageType: "page", comment: "s10 cache identity" } }),
+        });
+        const createdBody = await created.json();
+        if (created.status !== 200) console.error("S10 create hint failed:", created.status, JSON.stringify(createdBody));
+        expect(created.status).toBe(200);
+        expect(createdBody.ok).toBe(true);
+
+        searchMod.browserOpenAndExtract.mockResolvedValueOnce({ text: "after hint", title: "After", url });
+        const r2 = await mcpPost({
+          jsonrpc: "2.0", id: 91, method: "tools/call",
+          params: { name: "web_fetch", arguments: { url } },
+        });
+        expect(r2.body.result.content[0].text).toContain("after hint");
+        expect(r2.body.result.content[0].text).not.toContain("before hint");
+        expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(2);
+      } finally {
+        bootManager.config.domainHintsPath = prevHintsPath;
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+      }
+    });
+
+    it("re-extracts after a hot config change", async () => {
+      const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-s10-env-"));
+      const envFile = path.join(envDir, ".env");
+      fs.writeFileSync(envFile, "# test env\n");
+      process.env.NAVIGATOR_ENV_FILE = envFile;
+      try {
+        const searchMod = await import("../src/search.js");
+        const url = `https://example.com/s10-cfg-${Date.now()}`;
+        searchMod.browserOpenAndExtract.mockReset();
+        searchMod.browserOpenAndExtract.mockResolvedValueOnce({ text: "before config", title: "Before", url });
+
+        const r1 = await mcpPost({
+          jsonrpc: "2.0", id: 92, method: "tools/call",
+          params: { name: "web_fetch", arguments: { url } },
+        });
+        expect(r1.status).toBe(200);
+        expect(r1.body.result.content[0].text).toContain("before config");
+
+        const put = await fetch(`${MCP_BASE}/console/config`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ updates: { ENABLE_SCREENSHOT_DOWNLOAD_LINK: true } }),
+        });
+        expect(put.status).toBe(200);
+        const putBody = await put.json();
+        expect(putBody.ok).toBe(true);
+        expect(putBody.hotApplied).toContain("ENABLE_SCREENSHOT_DOWNLOAD_LINK");
+
+        searchMod.browserOpenAndExtract.mockResolvedValueOnce({ text: "after config", title: "After", url });
+        const r2 = await mcpPost({
+          jsonrpc: "2.0", id: 93, method: "tools/call",
+          params: { name: "web_fetch", arguments: { url } },
+        });
+        expect(r2.body.result.content[0].text).toContain("after config");
+        expect(r2.body.result.content[0].text).not.toContain("before config");
+        expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(2);
+      } finally {
+        delete process.env.NAVIGATOR_ENV_FILE;
+        try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+      }
+    });
+
+    it("still hits the cache when nothing about the producer context changed", async () => {
+      const searchMod = await import("../src/search.js");
+      const url = `https://example.com/s10-stable-${Date.now()}`;
+      searchMod.browserOpenAndExtract.mockReset();
+      searchMod.browserOpenAndExtract.mockResolvedValueOnce({ text: "stable page", title: "Stable", url });
+
+      const r1 = await mcpPost({
+        jsonrpc: "2.0", id: 94, method: "tools/call",
+        params: { name: "web_fetch", arguments: { url } },
+      });
+      expect(r1.body.result.content[0].text).toContain("stable page");
+      expect(r1.body.result.cached).toBeFalsy();
+
+      const r2 = await mcpPost({
+        jsonrpc: "2.0", id: 95, method: "tools/call",
+        params: { name: "web_fetch", arguments: { url } },
+      });
+      expect(r2.body.result.content[0].text).toContain("stable page");
+      // fetch hits signal via the result flag (object response shape)
+      expect(r2.body.result.cached).toBe(true);
+      expect(r2.body.result.cacheAgeMs).toBeGreaterThanOrEqual(0);
+      expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe("logToolError", () => {

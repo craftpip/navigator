@@ -18,7 +18,7 @@ import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowse
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
 import { CONFIG_SCHEMA } from "./config-schema.js";
-import { validateConfigValue, hotApplyConfig, setEngineBoundaryListener, setWarmupBoundaryListener } from "./config-manager.js";
+import { validateConfigValue, hotApplyConfig, getConfigEpoch, setEngineBoundaryListener, setWarmupBoundaryListener } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState } from "./search.js";
@@ -32,7 +32,7 @@ import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
-import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
+import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 
 const require = createRequire(import.meta.url);
@@ -198,8 +198,25 @@ function stableStringify(value) {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
 }
 
-function getCacheKey(args) {
-  return stableStringify(args || {});
+// The identity a cached entry was produced under — args alone let a stale
+// result outlive the hints/config that shaped it (plan 60 S10). web_fetch is
+// stamped with the hint generation plus the hot-config epoch; web_search with
+// the enabled-engine pool (pool identity can change without a console save)
+// plus the same epoch. Other tools have no mutable producer context.
+function cacheKeyContext(toolName) {
+  if (toolName === "web_fetch") {
+    return { hint: getHintRevision(), cfg: getConfigEpoch() };
+  }
+  if (toolName === "web_search") {
+    return { engines: manager.config.searchEnabledEngines || null, cfg: getConfigEpoch() };
+  }
+  return null;
+}
+
+function getCacheKey(toolName, args) {
+  const context = cacheKeyContext(toolName);
+  if (!context) return stableStringify(args || {});
+  return stableStringify({ args: args || {}, context });
 }
 
 function getCacheArgs(args) {
@@ -218,7 +235,7 @@ function getCachedToolResult(toolName, args) {
   const bucket = toolResultCache[toolName];
   if (!bucket) return null;
   pruneToolCacheBucket(bucket);
-  const key = getCacheKey(args);
+  const key = getCacheKey(toolName, args);
   const entry = bucket.get(key);
   if (!entry) {
     cacheCounters.misses += 1;
@@ -240,7 +257,7 @@ function setCachedToolResult(toolName, args, value) {
   const bucket = toolResultCache[toolName];
   if (!bucket) return;
   pruneToolCacheBucket(bucket);
-  const key = getCacheKey(args);
+  const key = getCacheKey(toolName, args);
   bucket.set(key, {
     value,
     storedAt: Date.now(),

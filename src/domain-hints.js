@@ -6,6 +6,14 @@ import { EXTRACTOR_FORMATS } from "./extractors/index.js";
 
 let loadedHints = null;
 let loadedPath = null;
+// Bumped by clearDomainHintCache — the single choke point every hint
+// mutation funnels through — so callers can stamp extraction outputs with
+// the hint generation that produced them (plan 60 S10).
+let hintRevision = 0;
+
+export function getHintRevision() {
+  return hintRevision;
+}
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -189,6 +197,7 @@ export async function getDomainHints(config) {
 export function clearDomainHintCache() {
   loadedHints = null;
   loadedPath = null;
+  hintRevision += 1;
 }
 
 export function getExtractionMethod(hint) {

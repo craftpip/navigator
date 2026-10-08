@@ -5,6 +5,11 @@ import { clearDomainHintCache } from "./domain-hints.js";
 
 const WAIT_UNTIL_VALUES = new Set(["load", "domcontentloaded", "networkidle0", "networkidle2"]);
 const defaultHintsPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "domain-hints.json");
+let configEpoch = 0;
+
+export function getConfigEpoch() {
+  return configEpoch;
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -252,6 +257,10 @@ export function hotApplyConfig(config, key, value) {
   const applier = HOT_APPLYERS[key];
   if (!applier) return false;
   applier(config, value);
+  // Every hot applier execution may change what a cached tool result would
+  // look like fresh (UA, link refs, post-processor registry, engine pool…) —
+  // one epoch covers all of them without per-key wiring (plan 60 S10).
+  configEpoch += 1;
   return true;
 }
 
