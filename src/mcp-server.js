@@ -995,25 +995,62 @@ function applyBrowsersConfig(manager, value) {
 }
 
 async function reconcileExternalBrowsersConfig(manager, envPath) {
-  const browsersEntry = parseEnvFile(await readEnvFile(envPath)).keyToLine.get("BROWSERS");
-  const browsersValue = browsersEntry?.value ?? CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS")?.fallback;
-  const validation = validateConfigValue(
-    CONFIG_SCHEMA.find((entry) => entry.key === "BROWSERS"),
-    browsersValue
-  );
-  if (!validation.valid) {
-    envFileState.externalBrowsersApplied = [];
-    envFileState.externalBrowsersInvalidated = [];
-    envFileState.externalBrowsersError = validation.error || "invalid BROWSERS value";
-    return;
+  // Plan 60 S2: reconcile ALL hot-appliable keys from external .env edits
+  const parsedEnv = parseEnvFile(await readEnvFile(envPath));
+  const hotApplied = [];
+  const invalidatedBrowsers = [];
+  const forgotten = [];
+
+  // Track external browsers result separately for state
+  let browsersResult = null;
+  let browsersInvalid = null;
+
+  for (const [key, line] of parsedEnv.keyToLine) {
+    const entry = CONFIG_SCHEMA.find((item) => item.key === key);
+    if (!entry || entry.applies !== "hot") continue;
+    const parsed = validateConfigValue(entry, line.value);
+    if (!parsed.valid) {
+      if (key === "BROWSERS") {
+        envFileState.externalBrowsersApplied = [];
+        envFileState.externalBrowsersInvalidated = [];
+        envFileState.externalBrowsersError = parsed.error || "invalid BROWSERS value";
+      }
+      continue;
+    }
+    if (key === "BROWSERS") {
+      browsersResult = applyBrowsersConfig(manager, parsed.value);
+      browsersInvalid = browsersResult.invalidated;
+      forgotten.push(...browsersResult.forgottenRelayBrowsers);
+      hotApplied.push("BROWSERS→external");
+      process.env.BROWSERS = line.value;
+    } else {
+      const applied = hotApplyConfig(manager.config, key, parsed.value);
+      if (applied) {
+        hotApplied.push(key);
+        process.env[key] = line.value;
+      }
+    }
   }
 
-  const result = applyBrowsersConfig(manager, validation.value);
-  envFileState.externalBrowsersApplied = result.forgottenRelayBrowsers;
-  envFileState.externalBrowsersInvalidated = result.invalidated;
-  envFileState.externalBrowsersError = null;
-  if (browsersEntry) process.env.BROWSERS = browsersEntry.value;
-  else delete process.env.BROWSERS;
+  // also apply keys not present in file? config load sets from process.env initially
+  // but external edit means file changed; we only need to sync from file's hot keys
+  if (browsersResult) {
+    envFileState.externalBrowsersApplied = forgotten;
+    envFileState.externalBrowsersInvalidated = browsersInvalid || [];
+    envFileState.externalBrowsersError = null;
+  } else {
+    // no browsers in file, maybe deleted - reconcile with fallback?
+    const defaultBrowsers = CONFIG_SCHEMA.find((e) => e.key === "BROWSERS")?.fallback;
+    if (defaultBrowsers !== undefined) {
+      const res = applyBrowsersConfig(manager, defaultBrowsers);
+      envFileState.externalBrowsersApplied = res.forgottenRelayBrowsers;
+      envFileState.externalBrowsersInvalidated = res.invalidated;
+      envFileState.externalBrowsersError = null;
+      delete process.env.BROWSERS;
+    }
+  }
+  envFileState.changed = false;
+  return { hotApplied };
 }
 
 async function applyConfigUpdates(manager, body) {
