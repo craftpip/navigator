@@ -438,6 +438,8 @@ docker compose exec navigator npx vitest run              # Run all tests
 docker compose exec navigator npx vitest run tests/mcp-server.test.js  # Single file
 ```
 
+**`tests/setup.js` must never import node builtins** (`node:fs`/`node:os`/`node:path`): vitest 4.1.10 + `environment: "jsdom"` aborts collection with `Error: No such built-in module: node:` on any node builtin import in a setup file. The DB isolation it sets (`process.env.NAVIGATOR_DATA_DIR`) therefore keys on globals available in every environment — `/tmp/navigator-test-${process.pid}-${Date.now()}` (one dir per worker instance). Do NOT "simplify" this back to a single fixed shared dir: a plain `/tmp/navigator-test-data` was tried and proved unsafe — there is no cleanup, so cross-run or non-worker state accumulates in the shared `navigator.db` and the suite goes 843→840 green test count on a second run (SQLite cross-file contention). The pid+time scheme keeps the exact baseline across repeated runs. Note the default `include: ["tests/**/*.test.js"]` does NOT collect `.jsx` files — `tests/modal-dismiss.test.jsx` and the held `testing/console/console-driver-collapse.test.jsx` are jsdom but sit outside that glob, and each has its own unresolved import/`React` issues independent of the harness.
+
 ---
 
 ## Navigator CLI and Stats
