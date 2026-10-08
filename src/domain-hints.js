@@ -6,6 +6,10 @@ import { EXTRACTOR_FORMATS } from "./extractors/index.js";
 
 let loadedHints = null;
 let loadedPath = null;
+// plan 60 H2: signature of the file state the cache was loaded from — the
+// pre-read `mtimeMs:size` (null when absent). A change means an edit that
+// never went through clearDomainHintCache() (vi, git, docker cp, …).
+let loadedSig = null;
 // plan 60 H1: last-known-good per path — survives clearDomainHintCache() so a
 // corrupt domain-hints.json can never purge a previously working set. Path-
 // guarded so hints from one DOMAIN_HINTS_PATH never serve for another.
@@ -202,26 +206,47 @@ export function findDomainHint(urlStr, hints) {
   return findMatchingHints(urlStr, hints)[0] || null;
 }
 
+// plan 60 H2: cheap freshness probe — pre-read (taken BEFORE loadDomainHints
+// reads the file) so a change during the read is caught by the NEXT call
+// instead of being recorded as newer than the content.
+async function fileSignature(resolvedPath) {
+  try {
+    const st = await fs.stat(resolvedPath);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function getDomainHints(config) {
   const hintsPath = config?.domainHintsPath;
   if (!hintsPath) return [];
-  if (loadedPath === hintsPath && loadedHints !== null) return loadedHints;
   const resolvedPath = path.resolve(hintsPath);
+  const sig = await fileSignature(resolvedPath);
+  if (loadedPath === hintsPath && loadedHints !== null) {
+    if (sig === loadedSig) return loadedHints;
+    // plan 60 H2: the file changed outside our write path — invalidate
+    // through the single choke point so hintRevision (and the web_fetch
+    // cache key stamped with it) moves together with the hint set.
+    clearDomainHintCache();
+  }
   const loaded = await loadDomainHints(hintsPath);
   if (loaded === null) {
     // plan 60 H1: the file is broken — serve last-known-good for this exact
     // path, else degrade to wildcard-only. The fallback is cached like any
-    // load result (external repair is picked up on the next cache clear, the
-    // same semantics every hint edit already has).
+    // load result; the H2 signature check picks up an external repair on the
+    // very next call.
     const fallback = (lastGoodPath === resolvedPath && lastGoodHints !== null)
       ? lastGoodHints
       : ensureWildcardHint([]);
     loadedHints = fallback;
     loadedPath = hintsPath;
+    loadedSig = sig;
     return fallback;
   }
   loadedHints = loaded;
   loadedPath = hintsPath;
+  loadedSig = sig;
   lastGoodHints = loaded;
   lastGoodPath = resolvedPath;
   return loaded;
@@ -233,6 +258,7 @@ export function clearDomainHintCache() {
   // be servable.
   loadedHints = null;
   loadedPath = null;
+  loadedSig = null;
   hintRevision += 1;
 }
 
