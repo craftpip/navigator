@@ -67,6 +67,16 @@ The default `output` is inline base64 JPEG. `file` is available only when a scre
 {"ref_ids":[42],"quality":"low","fullPage":false}
 ```
 
+### `web_page_screenshot_crop`
+
+A cropped screenshot of one element or an explicit rectangle instead of the whole page. Provide **exactly one** crop form: `selector` (first CSS match), `xpath`, or `region` `{x, y, width, height}` in document CSS pixels. Target via `urls: string[]`, `ref_ids: number[]`, or a persistent `targetId` (the existing tab). Optional `padding` (non-negative integer, default 0) expands the rect on all sides; the result is then clamped to the page's scroll area with per-edge notes. There is no `fullPage` — a crop is never full-page. `quality` is `low` (30), `medium` (55, default), or `high` (75). `viewport` is accepted for the urls path.
+
+The response is small: the cropped rect plus metadata — target, matched/total counts (first match wins), the final rect after padding and clamping, and output size. A selector or xpath that matches nothing returns candidates of interactive elements; a zero-area target after clamping is rejected. Output is always inline base64 JPEG.
+
+```json
+{"urls":["https://example.com"],"selector":"h1","padding":4}
+```
+
 ### `web_page_links`
 
 Input: `ref_ids: number[]`. It resolves remembered references to full URLs without loading them. A missing mapping is returned as an unresolved reference, not fetched automatically.

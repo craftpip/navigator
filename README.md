@@ -357,6 +357,16 @@ Example input:
 { "urls": ["https://example.com"], "quality": "medium", "fullPage": true }
 ```
 
+### `web_page_screenshot_crop`
+
+Capture a small, tightly cropped JPEG of one element or an explicit rectangle. Provide **exactly one** of `selector`, `xpath`, or `region` (`{x, y, width, height}` in document CSS pixels), plus `urls`, `ref_ids`, or an existing DevTools `targetId`. Optional `padding` expands the crop; the rect is clamped to the page's scroll area. The response embeds the crop plus metadata (target, matched/total, final rect, clamping notes, output size).
+
+Example input:
+
+```json
+{ "urls": ["https://example.com"], "selector": "h1", "padding": 4 }
+```
+
 ### `web_page_links`
 
 Resolve inline link reference IDs from `web_fetch` output, such as `[documentation](88)`.

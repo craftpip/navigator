@@ -108,6 +108,29 @@ Captures rendered page appearance as images.
 
 ---
 
+### `web_page_screenshot_crop`
+
+Captures a **small, tightly cropped** JPEG of one element or an explicit rectangle — not the whole page.
+
+**Input** (choose one crop form, plus one target mode):
+
+- Crop form (`selector`, `xpath`, or `region` — **exactly one**, `additionalProperties: false`):
+  - `selector: string` — CSS selector; the **first** match is cropped
+  - `xpath: string` — XPath; the **first** match is cropped
+  - `region: { x, y, width, height }` — rectangle in **document CSS pixels** (page coordinates, not viewport)
+- `padding: number` (default `0`) — Non-negative pixels added on all sides; the expanded rect is then clamped to the page's scroll area
+- Target mode: `urls: string[]`, `ref_ids: number[]`, or `targetId` (existing persistent tab)
+- `quality: "low" | "medium" | "high"` (default `medium`) — JPEG quality presets (30, 55, 75)
+- `viewport: { width, height }` — Viewport for the urls path (unlike `web_page_screenshot`, there is **no `fullPage`** — a crop is never full-page)
+
+**Output:** Inline base64 JPEG plus crop metadata for each entry: the crop target (`selector "…"` / `xpath "…"` / `region x,y WxH`), `matched N of M` (first match wins), the final rect after padding + clamping (`Rect: x,y WxH (document CSS px)`), per-edge `Clamped:` notes, and output size (`Output: N KB jpeg (quality …)`). A selector/xpath that matches nothing returns interactive-element candidates; a rect that clamps to zero area (fully off-page) or a zero-area element is rejected with a readable error. The image is captured with `captureBeyondViewport: true` — the crop is taken in place, never scrolled into view.
+
+```json
+{"urls": ["https://example.com"], "selector": "h1", "padding": 4}
+```
+
+---
+
 ### `web_page_ascii`
 
 Captures a webpage as a chafa-style half-block render — the real screenshot downscaled to a grid, drawn with `▀`/`█` block characters and per-cell truecolor ANSI escape codes — plus an element legend mapping markers to selectors. Use it to understand layout, colors, and where interactive elements sit. Pair with `web_fetch` for full text (the render shows shapes/blobs, not readable small text).
