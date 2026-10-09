@@ -30,7 +30,6 @@ Each one should be a single reply away from done.
 
 ## Queue
 
-- [x] plans/60_configuration_lifecycle_integrity_audit.md  — resolved 2026-10-08
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done
