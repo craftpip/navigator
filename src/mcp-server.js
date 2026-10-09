@@ -5375,7 +5375,17 @@ async function maybeStartHttpServer(managerOverride) {
       server,
       host: relayHost,
       port: manager.config.mcpApiPort,
-      configuredBrowsers: manager.config.browsers
+      configuredBrowsers: manager.config.browsers,
+      navigatorGatewayKey: CONSOLE_API_KEY,
+      gatewayAuth: (req, url) => {
+        try {
+          const auth = authorizeCdpKey(req, url, manager.config);
+          if (auth.status) return { status: auth.status, error: auth.error };
+          return null;
+        } catch {
+          return { status: 401, error: "CDP requires an API key (?key= or Authorization header)" };
+        }
+      }
     });
   }
 

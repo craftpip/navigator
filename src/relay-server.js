@@ -101,12 +101,14 @@ export class RelayServer {
     this._heartbeat = null;
   }
 
-  init({ server, host, port, configuredBrowsers }) {
+  init({ server, host, port, configuredBrowsers, gatewayAuth, navigatorGatewayKey } = {}) {
     if (!server) throw new Error("relay init requires the HTTP server");
     this._server = server;
     if (host) this._host = host;
     if (port) this._port = port;
     this._wss = new WebSocketServer({ noServer: true });
+    this._gatewayAuth = typeof gatewayAuth === "function" ? gatewayAuth : null;
+    if (navigatorGatewayKey) this._navigatorGatewayKey = String(navigatorGatewayKey);
 
     // The db helpers are silent no-ops until the database is open, so
     // restoring persisted state here would quietly restore nothing when the
@@ -193,8 +195,17 @@ export class RelayServer {
     log(`mounted: /relay (extensions) + /browser/<name> (pure CDP, host=${this._host} port=${this._port})`);
   }
 
-  gatewayWsUrl(name) {
-    return `ws://${this._host}:${this._port}/browser/${encodeURIComponent(name)}`;
+  gatewayWsUrl(name, key = null) {
+    const base = `ws://${this._host}:${this._port}/browser/${encodeURIComponent(name)}`;
+    const useKey = key || this._navigatorGatewayKey;
+    if (!useKey) return base;
+    try {
+      const u = new URL(base);
+      u.searchParams.set("key", String(useKey));
+      return u.toString();
+    } catch {
+      return `${base}?key=${encodeURIComponent(String(useKey))}`;
+    }
   }
 
   // ---- Registry access for BrowserManager --------------------------------
@@ -585,9 +596,38 @@ export class RelayServer {
   }
 
   _handleGatewayUpgrade(name, req, socket, head) {
+    let url;
+    try {
+      url = new URL(req.url || "/", "http://localhost");
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (typeof this._gatewayAuth === "function") {
+      const result = this._gatewayAuth(req, url);
+      if (result && result.status) {
+        this._writeUpgradeError(socket, result.status, result.error);
+        return;
+      }
+    }
     this._wss.handleUpgrade(req, socket, head, (ws) => {
       this.attachGatewayClient(name, ws);
     });
+  }
+
+  _writeUpgradeError(socket, status, message) {
+    const reason = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict", 429: "Too Many Requests", 502: "Bad Gateway" }[status] || "Error";
+    const body = JSON.stringify({ ok: false, error: message });
+    try {
+      socket.write(
+        `HTTP/1.1 ${status} ${reason}\r\n` +
+        "Content-Type: application/json\r\n" +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+        "Connection: close\r\n\r\n" +
+        body
+      );
+    } catch {}
+    try { socket.destroy(); } catch {}
   }
 
   // ---- Extension side (/relay) -------------------------------------------

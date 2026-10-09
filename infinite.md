@@ -30,6 +30,9 @@ Each one should be a single reply away from done.
 
 ## Queue
 
+- [x] plans/72_gateway-api-key-auth.md — absorbed 2026-10-10 — user directive 2026-10-09: gateway auth on /browser/<name>, navigator's own gateway URL carries console key; live verified: unauthenticated/bad key rejected (401), valid console key rejected for unknown live token but gate works; relay/cdp/browser/mcp tests all pass (svg pre-existing). require an API key (`?key=` query param, mirroring `/cdp`) on the northbound `/browser/<name>` gateway, which today authenticates only "entry exists && connected" (flagged first in plan 49 §5.4, deferred there). Standalone single-leg fix: gateway only, navigator's own dial must carry the key too; `/relay` + `/cdp*` untouched; plan 49's other five items stay deferred.
+- [ ] plans/73_api-keys-page-system-key.md — API keys page: mark the internal "Web Tools UI" key non-revokable + label it as used by navigator (Web Tools page); also collapse the Access column to one line so rows aren't 3 lines tall.
+- [ ] plans/74_cloakbrowser-online-status.md — bug: plain CDP add-on (cloakbrowser) shows offline/available in console though reachable — status hardcoded in relay-server.js:461 and /health never probes, so /health and /stats disagree.
 - [ ] plans/49_browser-extension-security-hardening.md — **priority Low** (user 2026-09-29: "mark priority for later, not now") — deferred to last. Validated 0/6, nothing implemented; still needs your v2-only sequencing call before any code (see `## Needs your call` + plan §9).
 
 ## Done
