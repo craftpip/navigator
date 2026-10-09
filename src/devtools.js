@@ -9,6 +9,7 @@ import {
 import { resolveRefIdToUrl } from "./ref-memory.js";
 import { clearTab, touchTab } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
+import { parseCropArgs, expandAndClampRect, isValidCropRect, resolveCropRectInPage } from "./crop.js";
 
 const MAX_TARGETS = 20;
 const MAX_CONSOLE_MESSAGES = 200;
@@ -935,12 +936,18 @@ export async function captureTargetScreenshot(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
+  const cropArgsPresent =
+    args.selector !== undefined || args.xpath !== undefined ||
+    args.region !== undefined || args.padding !== undefined;
+  const crop = cropArgsPresent
+    ? parseCropArgs({ selector: args.selector, xpath: args.xpath, region: args.region, padding: args.padding })
+    : null;
   const normalizedFormat = "jpeg";
   const normalizedQuality =
     normalizedFormat === "jpeg"
       ? Math.max(1, Math.min(100, Math.floor(Number.isFinite(args.quality) ? args.quality : 75)))
       : undefined;
-  const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
+  const fullPage = crop ? false : args.fullPage === undefined ? true : Boolean(args.fullPage);
   const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 
   // ---- viewport handling: same style as Target.createTarget ----
@@ -968,7 +975,7 @@ export async function captureTargetScreenshot(args = {}) {
   }
 
   const vpLog = normalizedViewport ? `${normalizedViewport.width}x${normalizedViewport.height}` : "default";
-  console.error(`📸  target screenshot: targetId=${args.targetId} format=${normalizedFormat} quality=${normalizedQuality ?? "default"} fullPage=${fullPage} viewport=${vpLog} timeout=${timeoutMs}ms`);
+  console.error(`📸  target screenshot: targetId=${args.targetId} format=${normalizedFormat} quality=${normalizedQuality ?? "default"} fullPage=${fullPage} viewport=${vpLog} crop=${crop ? crop.form : "no"} timeout=${timeoutMs}ms`);
 
   let prevViewport = null;
   let didOverride = false;
@@ -988,6 +995,58 @@ export async function captureTargetScreenshot(args = {}) {
     }
   }
 
+  // ---- crop: resolve the element rect / region in the page and clamp to page bounds ----
+  let cropState = null;
+  if (crop) {
+    const dimensions = await state.page.evaluate(() => {
+      const docEl = document.documentElement;
+      const body = document.body;
+      const viewportWidth = window.innerWidth || docEl?.clientWidth || 0;
+      const viewportHeight = window.innerHeight || docEl?.clientHeight || 0;
+      const fullWidth = Math.max(docEl?.scrollWidth || 0, body?.scrollWidth || 0, viewportWidth);
+      const fullHeight = Math.max(docEl?.scrollHeight || 0, body?.scrollHeight || 0, viewportHeight);
+      return { viewportWidth, viewportHeight, fullWidth, fullHeight };
+    });
+
+    let rect;
+    let matched = 1;
+    let total = 1;
+    if (crop.form === "region") {
+      rect = { x: crop.region.x, y: crop.region.y, width: crop.region.width, height: crop.region.height };
+    } else {
+      const resolved = await state.page.evaluate(resolveCropRectInPage, {
+        selector: crop.selector,
+        xpath: crop.xpath
+      });
+      if (!resolved.found) {
+        const attempt = crop.form === "selector" ? `selector "${crop.selector}"` : `xpath "${crop.xpath}"`;
+        const candidates = resolved.candidates?.length
+          ? ` Matches nothing; interactive elements present: ${JSON.stringify(resolved.candidates)}`
+          : "";
+        throw new Error(
+          `Crop target not found: ${attempt} matched nothing on ${await state.page.url()} (${await state.page.title()}).${candidates} Use DOM querySelector/getDocument to discover a selector that exists on the page.`
+        );
+      }
+      rect = resolved.rect;
+      matched = resolved.matched;
+      total = resolved.total;
+    }
+
+    if (!isValidCropRect(rect)) {
+      const label = crop.form === "selector" ? `selector "${crop.selector}"` :
+        crop.form === "xpath" ? `xpath "${crop.xpath}"` :
+        `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`;
+      throw new Error(`Crop target has zero area: ${label} measured ${rect.width}x${rect.height} — element is collapsed, hidden, or outside the page`);
+    }
+
+    const { rect: cropRect, clamped } = expandAndClampRect(rect, crop.padding, dimensions.fullWidth, dimensions.fullHeight);
+    const cropLog = crop.form === "region"
+      ? `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`
+      : `${crop.form}=${crop.selector || crop.xpath}`;
+    console.error(`📸  target crop: targetId=${args.targetId} form=${crop.form} target=${cropLog} matched=${matched}/${total} rect=${rect.x},${rect.y} ${rect.width}x${rect.height} pad=${crop.padding} final=${cropRect.x},${cropRect.y} ${cropRect.width}x${cropRect.height} clamp=[${clamped.join("; ")}]`);
+    cropState = { rect, matched, total, cropRect, clamped };
+  }
+
   let screenshot;
   try {
     screenshot = await Promise.race([
@@ -995,6 +1054,10 @@ export async function captureTargetScreenshot(args = {}) {
         type: normalizedFormat,
         encoding: "base64",
         fullPage,
+        ...(cropState ? {
+          clip: cropState.cropRect,
+          captureBeyondViewport: true
+        } : {}),
         ...(normalizedFormat === "jpeg" && normalizedQuality ? { quality: normalizedQuality } : {})
       }),
       new Promise((_, reject) =>
@@ -1031,7 +1094,22 @@ export async function captureTargetScreenshot(args = {}) {
     contentType: normalizedFormat === "jpeg" ? "image/jpeg" : "image/png",
     sizeBytes: Buffer.byteLength(screenshot, "base64"),
     captureTimestamp: new Date().toISOString(),
-    screenshotBase64: screenshot
+    ...(cropState ? {
+      crop: {
+        form: crop.form,
+        target: crop.form === "region"
+          ? `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`
+          : (crop.form === "selector" ? crop.selector : crop.xpath),
+        matched: cropState.matched,
+        total: cropState.total,
+        requestedRect: { x: cropState.rect.x, y: cropState.rect.y, width: cropState.rect.width, height: cropState.rect.height },
+        padding: crop.padding,
+        rect: cropState.cropRect,
+        clamped: cropState.clamped
+      }
+    } : {}),
+    screenshotBase64: screenshot,
+    ...(crop ? { quality: normalizedQuality } : {})
   };
   });
 }

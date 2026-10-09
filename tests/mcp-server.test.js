@@ -34,6 +34,7 @@ vi.mock("../src/search.js", () => ({
   browserSearch: vi.fn(),
   browserOpenAndExtract: vi.fn(),
   browserCaptureScreenshot: vi.fn(),
+  browserCaptureCropScreenshot: vi.fn(),
   getSearchBackendHealth: vi.fn().mockReturnValue([]),
   getActivityCounters: vi.fn().mockReturnValue({ searches: 0, searchResults: 0, fetches: 0, screenshots: 0, botBlocks: 0 }),
   getEngineAttemptStats: vi.fn().mockReturnValue({ total: 0, ok: 0, fail: 0, skip: 0, byEngine: {}, recentFailures: [] }),
@@ -47,6 +48,7 @@ vi.mock("../src/devtools.js", () => ({
   formatDevtoolsToolResponse: vi.fn(),
   handleDevtoolsToolCall: vi.fn(),
   captureTargetScreenshot: vi.fn(),
+  getLastUsedBackend: vi.fn().mockReturnValue(null),
   getDevtoolsCounters: vi.fn().mockReturnValue({ targetsCreated: 0, targetsClosed: 0, targetsInactivityClosed: 0 }),
   releaseTargetsByBackend: vi.fn().mockReturnValue([]),
 }));
@@ -2436,6 +2438,24 @@ describe("mcp-server HTTP endpoints", () => {
       expect(webSearch.inputSchema.properties.engines).toBeUndefined();
     });
 
+    it("advertises web_page_screenshot_crop with crop surface (no fullPage, additionalProperties false)", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 61, method: "tools/list"
+      });
+
+      expect(status).toBe(200);
+      const cropTool = body.result.tools.find((tool) => tool.name === "web_page_screenshot_crop");
+      expect(cropTool).toBeDefined();
+      const props = Object.keys(cropTool.inputSchema.properties);
+      expect(props).not.toContain("fullPage");
+      expect(props).toContain("selector");
+      expect(props).toContain("xpath");
+      expect(props).toContain("region");
+      expect(props).toContain("padding");
+      expect(props).toContain("targetId");
+      expect(cropTool.inputSchema.additionalProperties).toBe(false);
+    });
+
     it("responds to initialize via session transport with SSE stream", async () => {
       const res = await fetch(`${MCP_BASE}/mcp`, {
         method: "POST",
@@ -3533,6 +3553,179 @@ describe("mcp-server HTTP endpoints", () => {
       );
     });
 
+    it("handles web_page_screenshot_crop with url + selector", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserCaptureCropScreenshot.mockResolvedValueOnce({
+        screenshotBase64: "dGVzdA==",
+        contentType: "image/jpeg",
+        format: "jpeg",
+        title: "Crop Page",
+        url: "https://crop.example.com",
+        sizeBytes: 8192,
+        quality: 55,
+        crop: {
+          form: "selector",
+          target: "h1",
+          matched: 1,
+          total: 2,
+          requestedRect: { x: 10, y: 20, width: 100, height: 50 },
+          padding: 0,
+          rect: { x: 10, y: 20, width: 100, height: 50 },
+          clamped: [],
+        },
+      });
+
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 31, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: { url: "https://crop.example.com", selector: "h1" },
+        },
+      });
+
+      expect(status).toBe(200);
+      const text = body.result.content[0].text;
+      expect(text).toContain("Crop Page");
+      expect(text).toContain("cropped screenshot");
+      expect(text).toContain('selector "h1" → matched 1 of 2 (first match)');
+      expect(text).toContain("Rect: 10,20 100x50 (document CSS px)");
+      expect(searchMod.browserCaptureCropScreenshot).toHaveBeenCalledWith(
+        expect.objectContaining({ selector: "h1", padding: 0 })
+      );
+    });
+
+    it("handles web_page_screenshot_crop with urls + region + padding + clamping", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserCaptureCropScreenshot.mockResolvedValueOnce({
+        screenshotBase64: "eA==",
+        contentType: "image/jpeg",
+        format: "jpeg",
+        title: "Region Crop",
+        url: "https://crop.example.com",
+        sizeBytes: 16384,
+        quality: 75,
+        crop: {
+          form: "region",
+          target: "region 5,5 300x200",
+          matched: 1,
+          total: 1,
+          requestedRect: { x: 5, y: 5, width: 300, height: 200 },
+          padding: 8,
+          rect: { x: 0, y: 0, width: 313, height: 208 },
+          clamped: ["left edge 0 (requested -3)", "top edge 0 (requested -3)"],
+        },
+      });
+
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 32, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: {
+            urls: ["https://crop.example.com"],
+            region: { x: 5, y: 5, width: 300, height: 200 },
+            padding: 8,
+            quality: "high",
+          },
+        },
+      });
+
+      expect(status).toBe(200);
+      const text = body.result.content[0].text;
+      expect(text).toContain("Region Crop");
+      expect(text).toContain("Crop: region 5,5 300x200");
+      expect(text).toContain("Padding: 8px applied on all sides → final 0,0 313x208");
+      expect(text).toContain("Clamped: left edge 0 (requested -3)");
+      expect(text).toContain("Output: 16 KB jpeg (quality high/75)");
+    });
+
+    it("handles web_page_screenshot_crop with targetId", async () => {
+      const devtoolsMod = await import("../src/devtools.js");
+      devtoolsMod.captureTargetScreenshot.mockResolvedValueOnce({
+        screenshotBase64: "Y3JvcA==",
+        contentType: "image/jpeg",
+        format: "jpeg",
+        title: "Target Crop",
+        url: "https://crop.example.com",
+        sizeBytes: 4096,
+        quality: 55,
+        crop: {
+          form: "xpath",
+          target: "//h2",
+          matched: 1,
+          total: 1,
+          requestedRect: { x: 1, y: 2, width: 50, height: 30 },
+          padding: 0,
+          rect: { x: 1, y: 2, width: 50, height: 30 },
+          clamped: [],
+        },
+      });
+
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 33, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: { targetId: "crop-tab-1", xpath: "//h2" },
+        },
+      });
+
+      expect(status).toBe(200);
+      const text = body.result.content[0].text;
+      expect(text).toContain("Target Crop");
+      expect(text).toContain('xpath "//h2" → matched 1 of 1');
+      expect(devtoolsMod.captureTargetScreenshot).toHaveBeenCalledWith(
+        expect.objectContaining({ targetId: "crop-tab-1", xpath: "//h2" })
+      );
+    });
+
+    it("rejects web_page_screenshot_crop with no crop form", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 34, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: { url: "https://crop.example.com" },
+        },
+      });
+
+      expect(status).toBe(200);
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toMatch(/requires exactly one crop form/);
+    });
+
+    it("rejects web_page_screenshot_crop with two crop forms", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 35, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: {
+            url: "https://crop.example.com",
+            selector: "h1",
+            region: { x: 0, y: 0, width: 10, height: 10 },
+          },
+        },
+      });
+
+      expect(status).toBe(200);
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toMatch(/requires exactly one crop form/);
+    });
+
+    it("rejects web_page_screenshot_crop with an invalid region", async () => {
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 36, method: "tools/call",
+        params: {
+          name: "web_page_screenshot_crop",
+          arguments: {
+            url: "https://crop.example.com",
+            region: { x: 0, y: 0, width: 0, height: 10 },
+          },
+        },
+      });
+
+      expect(status).toBe(200);
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toMatch(/width and height must be greater than 0/);
+    });
+
     it("returns 204 for notifications", async () => {
       const res = await fetch(`${MCP_BASE}/mcp`, {
         method: "POST",
@@ -3857,6 +4050,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(names).toEqual([
         "web_search",
         "web_fetch",
+        "web_page_screenshot_crop",
         "web_page_screenshot",
         "web_page_links",
         "web_page_ascii",

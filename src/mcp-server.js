@@ -21,7 +21,7 @@ import { CONFIG_SCHEMA } from "./config-schema.js";
 import { validateConfigValue, hotApplyConfig, getConfigEpoch, setEngineBoundaryListener, setWarmupBoundaryListener, setSearchQueueConfigListener } from "./config-manager.js";
 import { getEnvFilePath, parseEnvFile, readEnvFile, writeEnvFile, upsertEnvText, removeEnvKeysText, backupEnvFile, revertEnvFile, recordEnvChange, getEnvChangeHistory, latestBackupPath } from "./env-file.js";
 import { vncManager } from "./vnc-manager.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState, reconfigureEngineScheduler } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, browserCaptureCropScreenshot, getSearchBackendHealth, getActivityCounters, getEngineAttemptStats, getEngineProfiles, resetSearchEngine, purgeEngineRuntimeState, reconfigureEngineScheduler } from "./search.js";
 import { getActivityTrend, getMcpCallForActivity, getPageOpDetail, getRecentActivity, getSearchDetail, recordActivityEvent, recordMcpCall, recordPageOp, recordPageOpStart } from "./activity.js";
 import { mcpCallContext } from "./activity.js";
 import { createMcpApiKey, getUsageTotals, incrementUsageTotal, initDb, initializeMcpApiKeys, listMcpApiKeys, renameMcpApiKey, revokeMcpApiKey, setMcpApiKeyTools, setMcpApiKeyBrowsers, setMcpApiKeyMcpBrowsers } from "./db.js";
@@ -34,6 +34,7 @@ import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
+import { parseCropArgs } from "./crop.js";
 
 const require = createRequire(import.meta.url);
 const PACKAGE_JSON = require("../package.json");
@@ -2314,6 +2315,72 @@ function formatScreenshotResponse(payload) {
   return asMarkdownContent(lines.join("\n"));
 }
 
+function formatCropResponse(payload) {
+  const entries = normalizeResultEntries(payload);
+  if (!entries.length) {
+    return asMarkdownContent("No screenshot data available.");
+  }
+
+  const successCount = entries.filter((entry) => entry?.ok !== false).length;
+  const total = payload?.count ?? entries.length;
+  const lines = [`Captured ${total} crop screenshot(s); ${successCount} succeeded.`];
+
+  entries.forEach((entry, index) => {
+    const title = entry?.title || entry?.url || `Crop ${index + 1}`;
+    const refLabel = entry?.ref_id ? `[${title}](${entry.ref_id})` : `#${index + 1} ${title}`;
+    lines.push("", `### ${refLabel} — cropped screenshot`);
+    lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
+    if (entry?.url) {
+      lines.push(`- URL: ${entry.url}`);
+    }
+    if (entry?.browser) {
+      lines.push(`- Browser: ${entry.browser}`);
+    }
+    if (entry?.browserNote) {
+      lines.push(`- Browser: ${entry.browserNote}`);
+    }
+    if (entry?.error) {
+      lines.push(`- Error: ${entry.error}`);
+      return;
+    }
+    if (entry?.crop) {
+      const crop = entry.crop;
+      if (crop.form === "selector" || crop.form === "xpath") {
+        const kind = crop.form === "selector" ? `selector "${crop.target}"` : `xpath "${crop.target}"`;
+        lines.push(`- Crop: ${kind} → matched ${crop.matched} of ${crop.total}${crop.matched !== crop.total ? " (first match)" : ""}`);
+      } else {
+        lines.push(`- Crop: ${crop.target}`);
+      }
+      lines.push(`- Rect: ${crop.rect.x},${crop.rect.y} ${crop.rect.width}x${crop.rect.height} (document CSS px)`);
+      if (crop.padding) {
+        lines.push(`- Padding: ${crop.padding}px applied on all sides → final ${crop.rect.x},${crop.rect.y} ${crop.rect.width}x${crop.rect.height}`);
+      }
+      for (const clampNote of crop.clamped || []) {
+        lines.push(`- Clamped: ${clampNote}`);
+      }
+    }
+    const kb = entry?.sizeBytes ? Math.max(1, Math.round(entry.sizeBytes / 1024)) : null;
+    if (kb) {
+      const preset = { 30: "low", 55: "medium", 75: "high" }[entry?.quality] || entry?.quality || "";
+      const kv = typeof entry?.quality === "number" ? ` (quality ${preset}/${entry.quality})` : "";
+      lines.push(`- Output: ${kb} KB jpeg${kv}`);
+    }
+    if (entry?.filePath) {
+      lines.push(`- File: ${entry.filePath}`);
+    }
+    if (entry?.downloadUrl) {
+      lines.push(`- Download: ${entry.downloadUrl}`);
+    }
+    if (!entry?.downloadUrl && entry?.screenshotBase64) {
+      const mime = entry.contentType || (entry.format === "jpeg" ? "image/jpeg" : "image/png");
+      const dataUrl = `data:${mime};base64,${entry.screenshotBase64}`;
+      lines.push("", `![${title}](${dataUrl})`);
+    }
+  });
+
+  return asMarkdownContent(lines.join("\n"));
+}
+
 function resolveOpenTarget(args) {
   const MAX_BATCH_URLS = 10;
   const normalizedRef = args?.ref_id ?? args?.ref;
@@ -2473,6 +2540,39 @@ async function captureScreenshotsParallel(targetUrls, maxParallel, captureOption
     async (targetUrl, index) => {
       try {
         const capture = await browserCaptureScreenshot({ url: targetUrl, browser: captureOptions?.browser || "", allowedMcpBrowsers: captureOptions?.allowedMcpBrowsers || null, ...captureOptions });
+        return {
+          index,
+          ok: true,
+          ref_id: rememberLink(targetUrl),
+          ...capture
+        };
+      } catch (error) {
+        return {
+          index,
+          ok: false,
+          ref_id: rememberLink(targetUrl),
+          url: targetUrl,
+          error: String(error?.message || error)
+        };
+      }
+    }
+  );
+
+  return buildBatchResultPayload(targetUrls, opened);
+}
+
+async function captureCropsParallel(targetUrls, maxParallel, cropOptions = {}) {
+  const opened = await mapWithConcurrency(
+    targetUrls,
+    maxParallel,
+    async (targetUrl, index) => {
+      try {
+        const capture = await browserCaptureCropScreenshot({
+          url: targetUrl,
+          browser: cropOptions?.browser || "",
+          allowedMcpBrowsers: cropOptions?.allowedMcpBrowsers || null,
+          ...cropOptions
+        });
         return {
           index,
           ok: true,
@@ -3190,6 +3290,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     if (quality === undefined) quality = 55;
     const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
     const viewport = parseScreenshotViewport(args.viewport, fullPage);
+    const crop = isCrop ? parseCropArgs(args) : null;
 
     const allowedOutputModes = ["base64"];
     if (manager?.config?.screenshotPathPrefix) allowedOutputModes.push("file");
@@ -3201,7 +3302,8 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
       quality: quality ?? "default",
       fullPage,
       viewport: viewport || "default",
-      target: hasTargetId ? args.targetId.trim() : (args.urls || args.ref_ids || "unknown")
+      target: hasTargetId ? args.targetId.trim() : (args.urls || args.ref_ids || "unknown"),
+      ...(isCrop && crop ? { crop: { form: crop.form, target: crop.form === "region" ? `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}` : (crop.selector || crop.xpath), padding: crop.padding } } : {})
     };
     console.error(`📸  screenshot context: ${JSON.stringify(screenshotCtx)}`);
 
@@ -3216,7 +3318,8 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
             format,
             fullPage,
             ...(quality ? { quality } : {}),
-            ...(viewport ? { viewport } : {})
+            ...(viewport ? { viewport } : {}),
+            ...(crop ? { selector: crop.selector, xpath: crop.xpath, region: crop.region, padding: crop.padding } : {})
           })
         );
         recordPageOp({
@@ -3244,7 +3347,43 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
       }
       result = { ...result, ok: true };
     } else if (isCrop) {
-      // skip for now - will implement
+      let targetUrls;
+      try {
+        targetUrls = resolveOpenTarget(args);
+      } catch (error) {
+        console.error(`📸  screenshot failed [resolve_targets]: ${String(error?.message || error)}`);
+        timer.step("resolve_targets_failed", mark);
+        timer.end({ status: "error", error: String(error?.message || error) });
+        logEvent("mcp.error", {
+          tool: name,
+          error: String(error?.message || error)
+        });
+        throw error;
+      }
+      mark = timer.step("resolve_targets", mark);
+      const manager = await getBrowserManager();
+      mark = timer.step("prepare_execution", mark);
+
+      try {
+        result = await runWithHangGuard(`mcp:${name}`, () =>
+          captureCropsParallel(targetUrls, manager.config.openPageMaxParallel, {
+            selector: crop.selector,
+            xpath: crop.xpath,
+            region: crop.region,
+            padding: crop.padding,
+            ...(quality ? { quality } : {}),
+            ...(viewport ? { viewport } : {}),
+            browser: args.browser || "",
+            allowedMcpBrowsers
+          })
+        );
+      } catch (error) {
+        console.error(`📸  screenshot failed [url]: ${JSON.stringify(screenshotCtx)}`);
+        console.error(`📸  urls: ${JSON.stringify(targetUrls)}`);
+        console.error(`📸  error: ${String(error?.message || error)}`);
+        if (error?.stack) console.error(`📸  stack: ${truncateStr(error.stack, 500)}`);
+        throw error;
+      }
     } else {
       let targetUrls;
       try {
@@ -3285,7 +3424,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     mark = timer.step("capture_screenshots", mark);
     await applyScreenshotStorage(result, manager.config, { outputMode });
     mark = timer.step("store_screenshots", mark);
-    const response = formatScreenshotResponse(result);
+    const response = isCrop ? formatCropResponse(result) : formatScreenshotResponse(result);
     timer.step("format_response", mark);
     timer.end({ status: "ok" });
     return response;

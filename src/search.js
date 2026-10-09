@@ -43,6 +43,7 @@ import {
   normalizeUrl,
   readableErrorMessage
 } from "./engines/util.js";
+import { parseCropArgs, expandAndClampRect, isValidCropRect, resolveCropRectInPage } from "./crop.js";
 
 const DEFAULT_CONTENT_SELECTORS = [
   "main", "article", "[role='main']", ".content", "#content",
@@ -2893,6 +2894,175 @@ export async function browserCaptureScreenshot({
     return result;
   } catch (error) {
     recordPageOp({ id: pageOpId, tool: "web_page_screenshot", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tShotStart, ok: false, error: String(error?.message || error) });
+    throw error;
+  }
+}
+
+export async function browserCaptureCropScreenshot({
+  url,
+  quality,
+  viewport,
+  browser = "",
+  allowedMcpBrowsers = null,
+  selector,
+  xpath,
+  region,
+  padding
+}) {
+  const crop = parseCropArgs({ selector, xpath, region, padding });
+  activityCounters.screenshots += 1;
+  incrementUsageTotal("screenshots");
+  const manager = await getBrowserManager();
+  const tShotStart = performance.now();
+  const normalizedFormat = "jpeg";
+  const normalizedQuality =
+    normalizedFormat === "jpeg"
+      ? Math.max(1, Math.min(100, Math.floor(Number.isFinite(quality) ? quality : 75)))
+      : undefined;
+  const pageOpId = recordPageOpStart({ tool: "web_page_screenshot_crop", url, backend: manager.config.defaultBackend });
+
+  try {
+    const result = await manager.withPageSlot(async () => {
+    const { page, browser: usedBrowser, rollbackNotes = [] } = await resolveBrowserParam({ browser }, manager.config, manager, { allowedMcpBrowsers });
+
+    try {
+      if (viewport && typeof viewport === "object" && viewport.width) {
+        const vw = Math.floor(Number(viewport.width));
+        const vh = Math.floor(Number(viewport.height));
+        if (Number.isFinite(vw) && vw > 0 && Number.isFinite(vh) && vh > 0) {
+          try {
+            await page.setViewport({ width: vw, height: vh });
+          } catch (e) {
+            console.error(`📸  setViewport failed: ${String(e?.message || e)}`);
+          }
+        }
+      }
+      await page.goto(url, {
+        waitUntil: manager.config.navWaitUntil,
+        timeout: manager.config.browserOpTimeoutMs
+      });
+
+      await waitForContent(page, { maxWait: 5000 }).catch(() => {});
+
+      const dimensions = await page.evaluate(() => {
+        const docEl = document.documentElement;
+        const body = document.body;
+        const viewportWidth = window.innerWidth || docEl?.clientWidth || 0;
+        const viewportHeight = window.innerHeight || docEl?.clientHeight || 0;
+        const fullWidth = Math.max(docEl?.scrollWidth || 0, body?.scrollWidth || 0, viewportWidth);
+        const fullHeight = Math.max(docEl?.scrollHeight || 0, body?.scrollHeight || 0, viewportHeight);
+        return {
+          viewportWidth,
+          viewportHeight,
+          fullWidth,
+          fullHeight
+        };
+      });
+
+      let rect;
+      let matched;
+      let total;
+      if (crop.form === "region") {
+        rect = { x: crop.region.x, y: crop.region.y, width: crop.region.width, height: crop.region.height };
+        matched = 1;
+        total = 1;
+      } else {
+        const resolved = await page.evaluate(resolveCropRectInPage, {
+          selector: crop.selector,
+          xpath: crop.xpath
+        });
+        if (!resolved.found) {
+          const attempt = crop.form === "selector" ? `selector "${crop.selector}"` : `xpath "${crop.xpath}"`;
+          const candidates = resolved.candidates?.length
+            ? ` Matches nothing; interactive elements present: ${JSON.stringify(resolved.candidates)}`
+            : "";
+          throw new Error(
+            `Crop target not found: ${attempt} matched nothing on ${await page.url()} (${await page.title()}).${candidates} Use DOM querySelector/getDocument to discover a selector that exists on the page.`
+          );
+        }
+        rect = resolved.rect;
+        matched = resolved.matched;
+        total = resolved.total;
+      }
+
+      if (!isValidCropRect(rect)) {
+        const label = crop.form === "selector" ? `selector "${crop.selector}"` :
+          crop.form === "xpath" ? `xpath "${crop.xpath}"` :
+          `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`;
+        throw new Error(`Crop target has zero area: ${label} measured ${rect.width}x${rect.height} — element is collapsed, hidden, or outside the page`);
+      }
+
+      const { rect: cropRect, clamped } = expandAndClampRect(rect, crop.padding, dimensions.fullWidth, dimensions.fullHeight);
+
+      const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+      const vpLog = viewport ? `${viewport.width}x${viewport.height}` : "default";
+      const cropLog = crop.form === "region"
+        ? `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`
+        : `${crop.form}=${crop.selector || crop.xpath}`;
+      console.error(`📸  url crop: url=${url} form=${crop.form} target=${cropLog} matched=${matched}/${total} rect=${rect.x},${rect.y} ${rect.width}x${rect.height} pad=${crop.padding} final=${cropRect.x},${cropRect.y} ${cropRect.width}x${cropRect.height} clamp=[${clamped.join("; ")}] viewport=${vpLog} quality=${normalizedQuality ?? "default"} timeout=${timeoutMs}ms`);
+
+      let screenshot;
+      try {
+        screenshot = await Promise.race([
+          page.screenshot({
+            type: normalizedFormat,
+            encoding: "base64",
+            fullPage: false,
+            clip: cropRect,
+            captureBeyondViewport: true,
+            ...(normalizedFormat === "jpeg" && normalizedQuality ? { quality: normalizedQuality } : {})
+          }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Screenshot timed out after ${timeoutMs}ms`)), timeoutMs)
+          )
+        ]);
+      } catch (error) {
+        console.error(`📸  url crop failed: url=${url} final=${cropRect.x},${cropRect.y} ${cropRect.width}x${cropRect.height} error=${String(error?.message || error)}`);
+        if (error?.stack) console.error(`📸  stack: ${String(error.stack).slice(0, 500)}`);
+        throw error;
+      }
+
+      const [resolvedUrl, pageTitle] = await Promise.all([Promise.resolve(page.url()), page.title()]);
+
+      return {
+        url: resolvedUrl,
+        title: pageTitle,
+        format: normalizedFormat,
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength(screenshot, "base64"),
+        captureTimestamp: new Date().toISOString(),
+        dimensions,
+        screenshotBase64: screenshot,
+        browser: usedBrowser,
+        quality: normalizedQuality,
+        crop: {
+          form: crop.form,
+          target: crop.form === "region"
+            ? `region ${crop.region.x},${crop.region.y} ${crop.region.width}x${crop.region.height}`
+            : (crop.form === "selector" ? crop.selector : crop.xpath),
+          matched,
+          total,
+          requestedRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          padding: crop.padding,
+          rect: cropRect,
+          clamped
+        },
+        ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})
+      };
+    } finally {
+      try {
+        if (!page.isClosed()) {
+          await page.close();
+        }
+      } catch {
+        // Target may have been closed by timeout handler or concurrent operation
+      }
+    }
+    });
+    recordPageOp({ id: pageOpId, tool: "web_page_screenshot_crop", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tShotStart, responseChars: result.screenshotBase64?.length, ok: true });
+    return result;
+  } catch (error) {
+    recordPageOp({ id: pageOpId, tool: "web_page_screenshot_crop", url, backend: manager.config.defaultBackend, durationMs: performance.now() - tShotStart, ok: false, error: String(error?.message || error) });
     throw error;
   }
 }
