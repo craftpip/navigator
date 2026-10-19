@@ -126,11 +126,30 @@ it("raw gateway driver", async () => {
   const server = http.createServer(() => {});
   const port = await listen(server);
   const relay = new RelayServer();
-  relay.init({ server, host: "127.0.0.1", port });
+  const TEST_CONSOLE_KEY = "test-console-key";
+  relay.init({
+    server,
+    host: "127.0.0.1",
+    port,
+    navigatorGatewayKey: TEST_CONSOLE_KEY,
+    gatewayAuth: (req, url) => {
+      try {
+        const queryKey = String(url.searchParams.get("key") || "").trim();
+        const headerKey = String(req.headers?.authorization?.replace(/^Bearer\s+/i, "") || "").trim();
+        const presented = queryKey || headerKey;
+        if (presented !== TEST_CONSOLE_KEY) {
+          return { status: 401, error: "Invalid API key" };
+        }
+        return null;
+      } catch {
+        return { status: 401, error: "CDP requires an API key (?key= or Authorization header)" };
+      }
+    }
+  });
   const { ws } = await pairExtension(relay, `ws://127.0.0.1:${port}`, "fake-chrome");
   const fake = new FakeExtension(ws);
 
-  const gw = await open(`ws://127.0.0.1:${port}/browser/fake-chrome`);
+  const gw = await open(`ws://127.0.0.1:${port}/browser/fake-chrome?key=${TEST_CONSOLE_KEY}`);
   const pip = (m) => new Promise((res, rej) => {
     gw.send(JSON.stringify(m));
     const t = setTimeout(() => rej(new Error("resp timeout " + m.method)), 3000);

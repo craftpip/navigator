@@ -9,20 +9,33 @@ export function getMcpApiKey(headers = {}) {
   return typeof apiKey === "string" ? apiKey.trim() : "";
 }
 
-export function isAuthorizedMcpRequest(headers, config = {}) {
-  if (config.mcpAllowUnauthenticated !== false) return true;
-  const provided = Buffer.from(getMcpApiKey(headers));
-  const keys = Array.isArray(config.mcpApiKeys) ? config.mcpApiKeys : [];
+/** Return the full trusted key set: DB-backed keys + internal console key. */
+export function getTrustedApiKeys(config = {}, consoleKey = "") {
+  const dbKeys = Array.isArray(config.mcpApiKeys) ? config.mcpApiKeys : [];
+  if (consoleKey) return [...dbKeys, consoleKey];
+  return dbKeys;
+}
+
+/** Check if a presented key is in the trusted set (constant-time). */
+export function isTrustedApiKey(presented, config = {}, consoleKey = "") {
+  if (!presented) return false;
+  const provided = Buffer.from(presented);
+  const keys = getTrustedApiKeys(config, consoleKey);
   return keys.some((key) => {
     const expected = Buffer.from(key);
     return provided.length === expected.length && timingSafeEqual(provided, expected);
   });
 }
 
-export function getAuthorizedMcpKey(headers, config = {}) {
+export function isAuthorizedMcpRequest(headers, config = {}, consoleKey = "") {
+  if (config.mcpAllowUnauthenticated !== false) return true;
+  return isTrustedApiKey(getMcpApiKey(headers), config, consoleKey);
+}
+
+export function getAuthorizedMcpKey(headers, config = {}, consoleKey = "") {
   const provided = getMcpApiKey(headers);
   if (!provided) return null;
-  const keys = Array.isArray(config.mcpApiKeys) ? config.mcpApiKeys : [];
+  const keys = getTrustedApiKeys(config, consoleKey);
   return keys.find((key) => {
     const actual = Buffer.from(provided);
     const expected = Buffer.from(key);

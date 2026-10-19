@@ -37,7 +37,28 @@ async function ephemeralRelay() {
   const port = await listen(server);
   if (server.unref) server.unref();
   const relay = new RelayServer();
-  relay.init({ server, host: "127.0.0.1", port });
+  // Include gateway auth that accepts a test console key, mirroring production
+  // behavior where navigator's loopback dial uses CONSOLE_API_KEY.
+  const TEST_CONSOLE_KEY = "test-console-key";
+  relay.init({
+    server,
+    host: "127.0.0.1",
+    port,
+    navigatorGatewayKey: TEST_CONSOLE_KEY,
+    gatewayAuth: (req, url) => {
+      try {
+        const queryKey = String(url.searchParams.get("key") || "").trim();
+        const headerKey = String(req.headers?.authorization?.replace(/^Bearer\s+/i, "") || "").trim();
+        const presented = queryKey || headerKey;
+        if (presented !== TEST_CONSOLE_KEY) {
+          return { status: 401, error: "Invalid API key" };
+        }
+        return null;
+      } catch {
+        return { status: 401, error: "CDP requires an API key (?key= or Authorization header)" };
+      }
+    }
+  });
   cleanups.push(() => {
     for (const entry of relay._entries.values()) {
       try { entry.ws?.close(); } catch {}
@@ -48,7 +69,7 @@ async function ephemeralRelay() {
     });
   });
   cleanups.push(() => relay._entries.clear());
-  return { server, relay, port, wsBase: `ws://127.0.0.1:${port}` };
+  return { server, relay, port, wsBase: `ws://127.0.0.1:${port}`, testConsoleKey: TEST_CONSOLE_KEY };
 }
 
 function open(rawUrl, timeoutMs = 4000) {
@@ -760,12 +781,12 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
   }
 
   it("drives browser.version(), newPage, goto, evaluate, screenshot, pages() through the gateway", async () => {
-    const { relay, wsBase } = await ephemeralRelay();
+    const { relay, wsBase, testConsoleKey } = await ephemeralRelay();
     const { token, ws } = await pairExtension(relay, wsBase, "fake-chrome");
     const fake = new FakeExtension(ws);
 
     const browser = await puppeteer.connect({
-      browserWSEndpoint: `${wsBase}/browser/fake-chrome`,
+      browserWSEndpoint: `${wsBase}/browser/fake-chrome?key=${testConsoleKey}`,
       defaultViewport: { width: 800, height: 600 }
     });
     cleanups.push(() => { try { browser.disconnect(); } catch {} });
@@ -807,10 +828,10 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
   }, 30000);
 
   it("createTarget ack is held until the new tab attaches (attachedToTarget precedes the ack)", async () => {
-    const { relay, wsBase } = await ephemeralRelay();
+    const { relay, wsBase, testConsoleKey } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "hold-browser");
     const fake = new FakeExtension(ws);
-    const gw = await open(`${wsBase}/browser/hold-browser`);
+    const gw = await open(`${wsBase}/browser/hold-browser?key=${testConsoleKey}`);
     flushAll(gw);
     gw.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
     await nextMessage(gw, (m) => m.id === 1);
@@ -825,10 +846,10 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
   });
 
   it("preserves sessionId for session-scoped Target.setAutoAttach", async () => {
-    const { relay, wsBase } = await ephemeralRelay();
+    const { relay, wsBase, testConsoleKey } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "auto-attach-session-browser");
     new FakeExtension(ws);
-    const gw = await open(`${wsBase}/browser/auto-attach-session-browser`);
+    const gw = await open(`${wsBase}/browser/auto-attach-session-browser?key=${testConsoleKey}`);
     flushAll(gw);
 
     gw.send(JSON.stringify({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } }));
@@ -848,10 +869,10 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
   });
 
   it("forwards Target.getBrowserContexts and threads browserContextId through created targets", async () => {
-    const { relay, wsBase } = await ephemeralRelay();
+    const { relay, wsBase, testConsoleKey } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "ctx-browser");
     const fake = new FakeExtension(ws);
-    const gw = await open(`${wsBase}/browser/ctx-browser`);
+    const gw = await open(`${wsBase}/browser/ctx-browser?key=${testConsoleKey}`);
     flushAll(gw);
 
     // 1. getBrowserContexts — the relay returns the extension's list, not the
@@ -876,7 +897,7 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
   });
 
   it("createTarget errors fast (not a 30s hang) when the extension never attaches — flapped attach", async () => {
-    const { relay, wsBase } = await ephemeralRelay();
+    const { relay, wsBase, testConsoleKey } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "flap-browser");
     const orphanCloses = [];
     const fake = new FakeExtension(ws);
@@ -890,7 +911,7 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
       return baseCommand(msg);
     };
 
-    const gw = await open(`${wsBase}/browser/flap-browser`);
+    const gw = await open(`${wsBase}/browser/flap-browser?key=${testConsoleKey}`);
     flushAll(gw);
     gw.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
     await nextMessage(gw, (m) => m.id === 1);

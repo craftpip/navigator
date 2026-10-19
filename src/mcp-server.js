@@ -31,7 +31,7 @@ import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
 import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord, clearLinkRefMemory } from "./ref-memory.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
-import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest } from "./mcp-api-auth.js";
+import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest, getTrustedApiKeys, isTrustedApiKey } from "./mcp-api-auth.js";
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 import { parseCropArgs } from "./crop.js";
@@ -658,25 +658,23 @@ function getToolGroups() {
 // One lookup for both per-key permission lists. Returns null when the request
 // carries no API key, the console's own internal key, or an unauthorized key —
 // all of which mean "no restriction".
-function getAuthorizedKeyRecord(headers, config) {
+function getAuthorizedKeyRecord(headers, config, consoleKey = "") {
   const key = getMcpApiKey(headers);
   if (!key || key === CONSOLE_API_KEY) return null;
-  const authorizedKey = getAuthorizedMcpKey(headers, config);
+  const authorizedKey = getAuthorizedMcpKey(headers, config, consoleKey);
   if (!authorizedKey) return null;
   return listMcpApiKeys().find((entry) => entry.secret === authorizedKey) || null;
 }
 
-function getAllowedToolsForRequest(headers, config) {
-  const record = getAuthorizedKeyRecord(headers, config);
+function getAllowedToolsForRequest(headers, config, consoleKey = "") {
+  const record = getAuthorizedKeyRecord(headers, config, consoleKey);
   if (!record) return null;
   const allowedTools = parseAllowedTools(record.allowed_tools);
   return allowedTools === null ? null : new Set(allowedTools);
 }
 
-// Plan 57: the MCP-side browser allow-list, independent of allowed_browsers
-// (which only gates the raw /cdp endpoint). null = unrestricted.
-function getAllowedMcpBrowsersForRequest(headers, config) {
-  const record = getAuthorizedKeyRecord(headers, config);
+function getAllowedMcpBrowsersForRequest(headers, config, consoleKey = "") {
+  const record = getAuthorizedKeyRecord(headers, config, consoleKey);
   if (!record) return null;
   const names = parseAllowedBrowsers(record.allowed_mcp_browsers);
   // Normalize to lower case: resolveBrowserParam matches add-on names
@@ -709,6 +707,7 @@ async function getConsoleApiKeysPayload(manager) {
       name: key.name,
       preview: maskApiKey(key.secret),
       createdAt: key.created_at,
+      system: key.name === CONSOLE_TOOLS_KEY_NAME,
       allowedTools: parseAllowedTools(key.allowed_tools),
       allowedBrowsers: parseAllowedBrowsers(key.allowed_browsers),
       allowedMcpBrowsers: parseAllowedBrowsers(key.allowed_mcp_browsers)
@@ -773,6 +772,11 @@ async function persistMcpApiAuth(manager, { allowUnauthenticated = manager.confi
 
 const CONSOLE_TOOLS_KEY_NAME = "Web Tools UI";
 
+function isSystemApiKeyId(id) {
+  const key = listMcpApiKeys().find((k) => k.id === id);
+  return key?.name === CONSOLE_TOOLS_KEY_NAME;
+}
+
 function ensureConsoleToolsApiKey() {
   const existing = listMcpApiKeys().find((key) => key.name === CONSOLE_TOOLS_KEY_NAME);
   if (existing) return existing;
@@ -810,7 +814,13 @@ async function handleConsoleApiKeys(manager, body) {
 
   if (action === "revoke") {
     const id = Number(body?.id);
-    if (!Number.isInteger(id) || !revokeMcpApiKey(id)) {
+    if (!Number.isInteger(id)) {
+      return { ok: false, error: "Unknown API key" };
+    }
+    if (isSystemApiKeyId(id)) {
+      return { ok: false, error: "The system key used by the web tools page cannot be revoked." };
+    }
+    if (!revokeMcpApiKey(id)) {
       return { ok: false, error: "Unknown API key" };
     }
     syncMcpApiKeys(manager);
@@ -824,6 +834,9 @@ async function handleConsoleApiKeys(manager, body) {
     const name = String(body?.name || "").trim();
     if (!name || name.length > 80) {
       return { ok: false, error: "Key name must be between 1 and 80 characters" };
+    }
+    if (isSystemApiKeyId(id)) {
+      return { ok: false, error: "The system key used by the web tools page cannot be renamed." };
     }
     if (!Number.isInteger(id) || !renameMcpApiKey(id, name)) {
       return { ok: false, error: "Unknown API key" };
@@ -877,6 +890,9 @@ async function handleConsoleApiKeys(manager, body) {
     const name = typeof body?.name === "string" ? body.name.trim() : undefined;
     if (name !== undefined && (!name || name.length > 80)) {
       return { ok: false, error: "Key name must be between 1 and 80 characters" };
+    }
+    if (isSystemApiKeyId(id) && name !== undefined) {
+      return { ok: false, error: "The system key used by the web tools page cannot be renamed." };
     }
     const availableTools = new Set(getToolGroups().flatMap((group) => group.tools));
     let allowedTools = undefined;
@@ -4296,16 +4312,12 @@ async function maybeStartHttpServer(managerOverride) {
             console.error(`📡  ${reqSum}`);
           }
 
-          const authConfig = {
-            ...manager.config,
-            mcpApiKeys: [...(manager.config.mcpApiKeys || []), CONSOLE_API_KEY]
-          };
-          if (!isAuthorizedMcpRequest(req.headers, authConfig)) {
+          if (!isAuthorizedMcpRequest(req.headers, manager.config, CONSOLE_API_KEY)) {
             sendMcpUnauthorized(res);
             return;
           }
-          const allowedTools = getAllowedToolsForRequest(req.headers, authConfig);
-          const allowedMcpBrowsers = getAllowedMcpBrowsersForRequest(req.headers, authConfig);
+          const allowedTools = getAllowedToolsForRequest(req.headers, manager.config, CONSOLE_API_KEY);
+          const allowedMcpBrowsers = getAllowedMcpBrowsersForRequest(req.headers, manager.config, CONSOLE_API_KEY);
 
           if (isInitializeRequest(body)) {
             // If client sends initialize with an existing session ID, the old
@@ -4344,7 +4356,7 @@ async function maybeStartHttpServer(managerOverride) {
             // K2: bind the session to its key id; permissions re-resolve from
             // the DB on every request so set_tools/mcp_browsers/revoke affect
             // live sessions, not just the next session.
-            const sessionKeyRecord = getAuthorizedKeyRecord(req.headers, authConfig);
+            const sessionKeyRecord = getAuthorizedKeyRecord(req.headers, manager.config, CONSOLE_API_KEY);
             const mcpServer = createMcpServer(createSessionPermissionResolver(sessionKeyRecord ? sessionKeyRecord.id : null));
             await mcpServer.connect(transport);
             await transport.handleRequest(req, res, body);
@@ -4649,9 +4661,7 @@ async function maybeStartHttpServer(managerOverride) {
           sendJson(res, 405, { ok: false, error: "Method not allowed" });
           return;
         }
-        const providedKey = getMcpApiKey(req.headers);
-        const validKeys = [...(manager.config.mcpApiKeys || []), CONSOLE_API_KEY];
-        if (!providedKey || !validKeys.some((key) => key === providedKey)) {
+        if (!isTrustedApiKey(getMcpApiKey(req.headers), manager.config, CONSOLE_API_KEY)) {
           sendMcpUnauthorized(res);
           return;
         }
@@ -5379,8 +5389,12 @@ async function maybeStartHttpServer(managerOverride) {
       navigatorGatewayKey: CONSOLE_API_KEY,
       gatewayAuth: (req, url) => {
         try {
-          const auth = authorizeCdpKey(req, url, manager.config);
-          if (auth.status) return { status: auth.status, error: auth.error };
+          const queryKey = String(url.searchParams.get("key") || "").trim();
+          const headerKey = getMcpApiKey(req.headers);
+          const presented = queryKey || headerKey;
+          if (!isTrustedApiKey(presented, manager.config, CONSOLE_API_KEY)) {
+            return { status: 401, error: "Invalid API key" };
+          }
           return null;
         } catch {
           return { status: 401, error: "CDP requires an API key (?key= or Authorization header)" };
