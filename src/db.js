@@ -296,6 +296,25 @@ export function deleteRelayTombstone(name) {
   return getDb().prepare("DELETE FROM relay_tombstones WHERE name = ?").run(name).changes > 0;
 }
 
+// Small key/value store for module state that must survive restarts.
+export function getAppState(key) {
+  if (!db) return null;
+  const row = getDb().prepare("SELECT value FROM app_state WHERE key = ?").get(key);
+  return row ? row.value : null;
+}
+
+export function setAppState(key, value) {
+  if (!db) return;
+  getDb()
+    .prepare("INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(key, String(value));
+}
+
+export function deleteAppState(key) {
+  if (!db) return false;
+  return getDb().prepare("DELETE FROM app_state WHERE key = ?").run(key).changes > 0;
+}
+
 export function incrementUsageTotal(key, amount = 1) {
   if (!db) return;
   getDb()

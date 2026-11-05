@@ -31,6 +31,7 @@ async function ephemeralRelay() {
   for (const k of loadKnownRelayBrowsers()) deleteKnownRelayBrowser(k.name);
   for (const s of loadRelaySessions()) deleteRelaySession(s.name);
   for (const t of loadRelayTombstones()) deleteRelayTombstone(t.name);
+  (await import("../src/db.js")).deleteAppState("relay_configured_names");
 
   const server = http.createServer(() => {});
   server.on("error", () => {});
@@ -586,40 +587,66 @@ describe("browser description (plan 45) — auth gate, hello, live update, lifec
     expect(loadRelayBrowserMetas().find((r) => r.name === "persisted")).toBeUndefined();
   });
 
-  it("restores persisted pairings only for names still configured navigator-cdp (plan 60 B1)", async () => {
+  it("restores persisted pairings for configured names, never for names removed from BROWSERS (plan 60 B1)", async () => {
     const { relay, wsBase } = await ephemeralRelay();
     const { token, ws } = await pairExtension(relay, wsBase, "configured-relay");
     ws.close();
+    const fresh = (configuredBrowsers) => {
+      const r = new RelayServer();
+      r.init({ server: http.createServer(() => {}), host: "127.0.0.1", port: 0, ...(configuredBrowsers ? { configuredBrowsers } : {}) });
+      return r;
+    };
 
-    // A brand new server instance (a navigator restart). The persisted pairing
-    // is authorized only when the fresh server's BROWSERS config still names
-    // the browser as navigator-cdp; otherwise the row is kept but the token is
-    // NOT restored, so a removed relay cannot silently route traffic again.
-    const retained = new RelayServer();
-    retained.init({
-      server: http.createServer(() => {}),
-      host: "127.0.0.1",
-      port: 0,
-      configuredBrowsers: [{ name: "something-else", type: "navigator-cdp" }]
+    // Run 1: the browser is configured — its pairing is restored.
+    expect(fresh([{ name: "configured-relay", type: "navigator-cdp" }])._tokenToName.get(token)).toBe("configured-relay");
+
+    // Run 2: it was removed from BROWSERS while navigator was down. The
+    // pairing row is kept, but the token is NOT restored, so a removed relay
+    // cannot silently route traffic again.
+    const removed = fresh([{ name: "something-else", type: "navigator-cdp" }]);
+    expect(removed._tokenToName.has(token)).toBe(false);
+    expect(removed._tokenToName.size).toBe(0);
+
+    // Re-adding it re-authorizes the same pairing.
+    expect(fresh([{ name: "configured-relay", type: "navigator-cdp" }])._tokenToName.get(token)).toBe("configured-relay");
+
+    // Without any browser config (standalone embedder), legacy restore-all applies.
+    expect(fresh(null)._tokenToName.get(token)).toBe("configured-relay");
+  });
+
+  it("an ad-hoc pairing (never in BROWSERS) survives a navigator restart — no re-PIN", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const { token, ws } = await pairExtension(relay, wsBase, "ChromeLinux");
+    ws.close();
+    const restarted = new RelayServer();
+    restarted.init({
+      server: http.createServer(() => {}), host: "127.0.0.1", port: 0,
+      configuredBrowsers: [{ name: "Chrome", type: "navigator-cdp" }, { name: "chromium", type: "inbuilt" }],
     });
-    expect(retained._tokenToName.has(token)).toBe(false);
-    expect(retained._tokenToName.size).toBe(0);
+    expect(restarted._tokenToName.get(token)).toBe("ChromeLinux");
+    // ...and again on the restart after that.
+    const again = new RelayServer();
+    again.init({ server: http.createServer(() => {}), host: "127.0.0.1", port: 0, configuredBrowsers: [{ name: "Chrome", type: "navigator-cdp" }] });
+    expect(again._tokenToName.get(token)).toBe("ChromeLinux");
+  });
 
-    const authorized = new RelayServer();
-    authorized.init({
-      server: http.createServer(() => {}),
-      host: "127.0.0.1",
-      port: 0,
-      configuredBrowsers: [{ name: "configured-relay", type: "navigator-cdp" }]
+  it("does not restore an ad-hoc pairing that was explicitly removed, or that collides with a direct browser", async () => {
+    const { relay, wsBase } = await ephemeralRelay();
+    const a = await pairExtension(relay, wsBase, "removed-adhoc");
+    a.ws.close();
+    const b = await pairExtension(relay, wsBase, "collides");
+    b.ws.close();
+    const { saveRelaySession, saveRelayTombstone } = await import("../src/db.js");
+    // remove() deletes the pairing; simulate a stale row + tombstone surviving.
+    saveRelayTombstone("removed-adhoc");
+    saveRelaySession?.("removed-adhoc", a.token);
+    const restarted = new RelayServer();
+    restarted.init({
+      server: http.createServer(() => {}), host: "127.0.0.1", port: 0,
+      configuredBrowsers: [{ name: "collides", type: "cdp", cdpUrl: "http://x:9222" }],
     });
-    expect(authorized._tokenToName.get(token)).toBe("configured-relay");
-
-    // Without any browser config (standalone embedder), legacy restore-all
-    // still applies so the relay does not silently drop pairings it knows
-    // nothing about.
-    const legacy = new RelayServer();
-    legacy.init({ server: http.createServer(() => {}), host: "127.0.0.1", port: 0 });
-    expect(legacy._tokenToName.get(token)).toBe("configured-relay");
+    expect(restarted._tokenToName.has(a.token)).toBe(false);
+    expect(restarted._tokenToName.has(b.token)).toBe(false);
   });
 });
 

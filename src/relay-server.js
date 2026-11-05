@@ -29,8 +29,10 @@
 
 import { WebSocketServer } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
-import { deleteKnownRelayBrowser, deleteRelayBrowserMeta, deleteRelaySession, initDb, loadKnownRelayBrowsers, loadRelayBrowserMetas, loadRelaySessions, loadRelayTombstones, saveKnownRelayBrowser, saveRelayBrowserMeta, saveRelaySession, saveRelayTombstone } from "./db.js";
+import { deleteKnownRelayBrowser, deleteRelayBrowserMeta, deleteRelaySession, getAppState, setAppState, initDb, loadKnownRelayBrowsers, loadRelayBrowserMetas, loadRelaySessions, loadRelayTombstones, saveKnownRelayBrowser, saveRelayBrowserMeta, saveRelaySession, saveRelayTombstone } from "./db.js";
 import { PLUGIN_PLATFORMS } from "./config.js";
+
+const RELAY_CONFIGURED_NAMES_KEY = "relay_configured_names";
 
 const PIN_EXPIRY_MS = 60_000;
 // A browser's self-description is read by the model on every list_browsers
@@ -130,8 +132,39 @@ export class RelayServer {
     // it presents as recoverable unmanaged state (known, unpaired) until the
     // user explicitly re-PINs (plan 60 §5 restart row). When no browsers
     // config is supplied (standalone relay tests), legacy restore-all applies.
+    //
+    // Ad-hoc pairings — a browser PIN-paired while it was never listed in
+    // BROWSERS — survive restarts too: at runtime the hello gate admits such
+    // names, so dropping their token on restart only forced a pointless re-PIN
+    // after every deploy. What B1 protects against is a browser that WAS
+    // configured and has since been removed. Removal while running already
+    // deletes the pairing and tombstones the name (reconcileBrowserChanges →
+    // remove()); for a removal made while navigator was down, the previous
+    // run's configured names are persisted (RELAY_CONFIGURED_NAMES_KEY), and a
+    // name configured then but not now is not restored.
+    let previouslyConfigured = new Set();
+    let previousKnown = false;
+    if (configuredBrowsers) {
+      try {
+        const raw = getAppState(RELAY_CONFIGURED_NAMES_KEY);
+        if (raw) {
+          previouslyConfigured = new Set(JSON.parse(raw));
+          previousKnown = true;
+        }
+      } catch {}
+    }
+    let tombstoned = new Set();
+    try { tombstoned = new Set(loadRelayTombstones().map((t) => t.name)); } catch {}
     this.updateConfiguredBrowsers(configuredBrowsers);
-    const restoreAllowed = configuredBrowsers ? (name) => this._configuredRelayNames.has(name) : () => true;
+    const restoreAllowed = configuredBrowsers
+      ? (name) => {
+          if (this._configuredRelayNames.has(name)) return true;
+          if (this._configuredDirectNames.has(name)) return false; // B7 collision
+          if (tombstoned.has(name)) return false; // explicitly removed
+          if (previousKnown && previouslyConfigured.has(name)) return false; // removed from BROWSERS while down
+          return true; // ad-hoc pairing, never configured
+        }
+      : () => true;
     try {
       const sessions = loadRelaySessions();
       let restored = 0;
@@ -329,6 +362,11 @@ export class RelayServer {
     const list = browsers || [];
     this._configuredRelayNames = new Set(list.filter((b) => b && b.type === "navigator-cdp").map((b) => b.name));
     this._configuredDirectNames = new Set(list.filter((b) => b && b.type !== "navigator-cdp").map((b) => b.name));
+    // Remember which relay names this run treats as configured, so the next
+    // startup can tell "removed from BROWSERS while down" from "ad-hoc".
+    if (browsers) {
+      try { setAppState(RELAY_CONFIGURED_NAMES_KEY, JSON.stringify([...this._configuredRelayNames])); } catch {}
+    }
     // Plan 60 B7: a live dynamic relay must not keep a name the config now
     // owns as a direct browser — otherwise its gateway still routes commands
     // to the replaced browser while the dashboard/routing reads the direct
