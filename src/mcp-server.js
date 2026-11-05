@@ -35,6 +35,7 @@ import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest, getTrustedAp
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 import { parseCropArgs } from "./crop.js";
+import { assertAllowedUrls } from "./url-policy.js";
 import { getConsolePassword, checkConsoleAuth, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys, CONSOLE_LOGIN_LOGO_PATH } from "./console-auth.js";
 
 const require = createRequire(import.meta.url);
@@ -2399,6 +2400,10 @@ function formatCropResponse(payload) {
 }
 
 function resolveOpenTarget(args) {
+  return assertAllowedUrls(resolveOpenTargetUnchecked(args));
+}
+
+function resolveOpenTargetUnchecked(args) {
   const MAX_BATCH_URLS = 10;
   const normalizedRef = args?.ref_id ?? args?.ref;
   const normalizedRefs = args?.ref_ids ?? args?.refs;
@@ -2612,6 +2617,10 @@ async function captureCropsParallel(targetUrls, maxParallel, cropOptions = {}) {
 }
 
 function parseHttpExtractTargets(searchParams) {
+  return assertAllowedUrls(parseHttpExtractTargetsUnchecked(searchParams));
+}
+
+function parseHttpExtractTargetsUnchecked(searchParams) {
   const refsParam = String(searchParams.get("ref_ids") || "")
     .split(",")
     .map((item) => item.trim())
@@ -4369,6 +4378,13 @@ async function maybeStartHttpServer(managerOverride) {
   const mcpTransports = new Map();
   const mcpServers = new Map();
   let defaultMcpSessionId = null;
+  // sessionId -> last request time (ms). Sessions with no traffic and no open
+  // SSE stream for MCP_SESSION_IDLE_TTL_MS are closed by the sweeper below.
+  // Safe for clients: a POST carrying an unknown session id falls through to
+  // the stateless handler, and the MCP spec has clients re-initialize on 404.
+  const mcpSessionLastSeen = new Map();
+  const MCP_SESSION_IDLE_TTL_MS = Math.max(60_000, Number(process.env.MCP_SESSION_IDLE_TTL_MS) || 24 * 60 * 60 * 1000);
+  const MCP_SESSION_SWEEP_MS = Math.min(10 * 60 * 1000, MCP_SESSION_IDLE_TTL_MS);
 
   const SSE_KEEPALIVE_MS = 30_000;
   const SSE_RETRY_INTERVAL_MS = 30_000;
@@ -4392,6 +4408,7 @@ async function maybeStartHttpServer(managerOverride) {
         const sessionId = typeof req.headers["mcp-session-id"] === "string"
           ? req.headers["mcp-session-id"]
           : undefined;
+        if (sessionId && mcpTransports.has(sessionId)) mcpSessionLastSeen.set(sessionId, Date.now());
         const resolveTransport = () => {
           if (sessionId) {
             const bySessionId = mcpTransports.get(sessionId);
@@ -4443,6 +4460,7 @@ async function maybeStartHttpServer(managerOverride) {
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: () => randomUUID(),
               onsessioninitialized: (sid) => {
+                mcpSessionLastSeen.set(sid, Date.now());
                 defaultMcpSessionId = sid;
                 mcpTransports.set(sid, transport);
               },
@@ -5546,6 +5564,31 @@ async function maybeStartHttpServer(managerOverride) {
     }
   }, SSE_KEEPALIVE_MS);
   keepaliveInterval.unref();
+
+  const sessionSweepInterval = setInterval(() => {
+    const now = Date.now();
+    let closed = 0;
+    for (const [sid, transport] of [...mcpTransports.entries()]) {
+      const lastSeen = mcpSessionLastSeen.get(sid) ?? now;
+      if (!mcpSessionLastSeen.has(sid)) mcpSessionLastSeen.set(sid, now);
+      if (now - lastSeen < MCP_SESSION_IDLE_TTL_MS) continue;
+      // A client holding an SSE stream open is still connected — keep it.
+      try {
+        if (transport._webStandardTransport?._streamMapping?.size > 0) continue;
+      } catch {}
+      mcpTransports.delete(sid);
+      mcpServers.delete(sid);
+      mcpSessionLastSeen.delete(sid);
+      if (defaultMcpSessionId === sid) defaultMcpSessionId = mcpTransports.keys().next().value || null;
+      transport.close?.()?.catch?.(() => {});
+      closed += 1;
+    }
+    for (const sid of mcpSessionLastSeen.keys()) {
+      if (!mcpTransports.has(sid)) mcpSessionLastSeen.delete(sid);
+    }
+    if (closed) console.log(`[mcp] closed ${closed} idle session(s) (no traffic for ${Math.round(MCP_SESSION_IDLE_TTL_MS / 60000)}m, no open stream); ${mcpTransports.size} remain`);
+  }, MCP_SESSION_SWEEP_MS);
+  sessionSweepInterval.unref();
 
   server.listen(manager.config.mcpApiPort, "0.0.0.0", () => {
     if (getConsolePassword()) {

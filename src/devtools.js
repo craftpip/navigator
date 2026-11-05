@@ -7,6 +7,7 @@ import {
   RELAY_CLOSE_TIMEOUT_MS,
 } from "./browser.js";
 import { resolveRefIdToUrl } from "./ref-memory.js";
+import { assertAllowedUrl, assertAllowedCdpParams } from "./url-policy.js";
 import { clearTab, touchTab } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
 import { parseCropArgs, expandAndClampRect, isValidCropRect, resolveCropRectInPage } from "./crop.js";
@@ -613,6 +614,102 @@ function safePageListener(label, handler) {
   };
 }
 
+// ---- Console capture fallback for browsers that suppress CDP console events --
+// Stealth CDP browsers (CloakBrowser) accept Runtime.enable / Log.enable but
+// never emit Runtime.consoleAPICalled, Log.entryAdded, exceptionThrown or
+// bindingCalled — so page.on("console") is silent and Runtime.getConsoleMessages
+// always returned 0. For agent-owned targets on CDP add-on backends we install a
+// tiny in-page recorder (wrapped console.* + error/unhandledrejection) on every
+// new document, and drain it with page.evaluate when the buffer is read. It is
+// only drained when a one-time per-backend probe shows native events are
+// missing, so backends with working console events never see duplicates.
+const CONSOLE_BUFFER_HOOK = `(() => {
+  const K = Symbol.for("navigator.console.buffer");
+  if (window[K]) return;
+  const buf = [];
+  Object.defineProperty(window, K, { value: buf, enumerable: false });
+  const fmt = (a) => { try { return typeof a === "string" ? a : (a instanceof Error ? (a.stack || a.message) : JSON.stringify(a)); } catch (e) { return String(a); } };
+  const push = (type, args) => { try { buf.push({ type, text: args.map(fmt).join(" ").slice(0, 2000), ts: Date.now() }); if (buf.length > 500) buf.shift(); } catch (e) {} };
+  for (const type of ["log", "info", "warn", "error", "debug"]) {
+    const orig = console[type];
+    if (typeof orig !== "function") continue;
+    const wrapped = function (...args) { push(type === "warn" ? "warning" : type, args); return orig.apply(this, args); };
+    try { Object.defineProperty(wrapped, "toString", { value: () => orig.toString(), enumerable: false }); } catch (e) {}
+    console[type] = wrapped;
+  }
+  addEventListener("error", (e) => push("pageerror", [(e.error && e.error.stack) || e.message]));
+  addEventListener("unhandledrejection", (e) => push("pageerror", ["Unhandled rejection: " + ((e.reason && e.reason.stack) || e.reason)]));
+})();`;
+const CONSOLE_BUFFER_DRAIN = `(() => { const b = window[Symbol.for("navigator.console.buffer")]; return b ? b.splice(0) : null; })()`;
+const CONSOLE_PROBE_TEXT = "navigator-console-probe";
+const CONSOLE_DRAIN_TIMEOUT_MS = 1500;
+// backend name -> Promise<boolean> (true = native console events are delivered)
+const nativeConsoleSupport = new Map();
+
+function probeNativeConsole(page, backend) {
+  if (nativeConsoleSupport.has(backend)) return nativeConsoleSupport.get(backend);
+  const probe = (async () => {
+    let probePage = null;
+    try {
+      const browser = typeof page.browser === "function" ? page.browser() : null;
+      if (!browser || typeof browser.newPage !== "function") return true;
+      probePage = await browser.newPage();
+      let seen = false;
+      probePage.on("console", (msg) => { try { if (msg.text() === CONSOLE_PROBE_TEXT) seen = true; } catch {} });
+      await probePage.evaluate((text) => console.debug(text), CONSOLE_PROBE_TEXT);
+      const deadline = Date.now() + 1000;
+      while (!seen && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      console.log(`[devtools] console events on "${backend}": ${seen ? "native" : "suppressed — using in-page capture"}`);
+      return seen;
+    } catch (error) {
+      // Probe failure is not proof of suppression; keep native behavior.
+      console.error(`⚠️  devtools console probe failed on "${backend}": ${String(error?.message || error)}`);
+      nativeConsoleSupport.delete(backend);
+      return true;
+    } finally {
+      try { await probePage?.close(); } catch {}
+    }
+  })();
+  nativeConsoleSupport.set(backend, probe);
+  return probe;
+}
+
+async function installConsoleBufferFallback(manager, state) {
+  if (state.adopted || backendKind(manager, state.backend) !== "cdp") return;
+  try {
+    await state.page.evaluateOnNewDocument(CONSOLE_BUFFER_HOOK);
+    state.page.evaluate(CONSOLE_BUFFER_HOOK).catch(() => {});
+    state.consoleBufferFallback = true;
+    void probeNativeConsole(state.page, state.backend);
+  } catch (error) {
+    console.error(`⚠️  devtools console fallback install failed on "${state.backend}": ${String(error?.message || error)}`);
+  }
+}
+
+async function drainConsoleBuffer(state) {
+  if (!state?.consoleBufferFallback || !state.page || state.page.isClosed()) return;
+  try {
+    if (await probeNativeConsole(state.page, state.backend)) return;
+    const entries = await Promise.race([
+      state.page.evaluate(CONSOLE_BUFFER_DRAIN),
+      new Promise((resolve) => setTimeout(() => resolve(null), CONSOLE_DRAIN_TIMEOUT_MS))
+    ]);
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      recordConsoleMessage(state, {
+        type: String(entry?.type || "log"),
+        text: cleanWhitespace(String(entry?.text || "")),
+        args: [],
+        location: { url: (() => { try { return state.page.url(); } catch { return ""; } })() },
+        timestamp: new Date(Number(entry?.ts) || Date.now()).toISOString(),
+        capturedBy: "page-hook"
+      });
+    }
+  } catch {
+    // Navigation in flight / context gone — the next read drains the new page.
+  }
+}
+
 function installPageObservers(state) {
   const { page } = state;
   const pendingRequests = new Map();
@@ -737,6 +834,7 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
     }
     url = resolveRefIdToUrl(ref);
   }
+  assertAllowedUrl(url, "url");
 
   // Lightpanda is single-tab (+ pinned about:blank): only one usable page at a
   // time. If the user explicitly asks for another lightpanda target, proactively
@@ -787,6 +885,7 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
     sourceUrl: url
   };
 
+  await installConsoleBufferFallback(manager, state);
   installPageObservers(state);
   targetsById.set(state.targetId, state);
   devtoolsCounters.targetsCreated += 1;
@@ -1130,6 +1229,7 @@ export async function captureTargetScreenshot(args = {}) {
 async function navigatePage(args = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.url, "url");
+  assertAllowedUrl(args.url, "url");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   let state;
@@ -1159,6 +1259,7 @@ async function navigatePage(args = {}) {
     }
   }
   return withStaleRetry(args.targetId, async (liveState) => {
+    await drainConsoleBuffer(liveState);
     await liveState.page.goto(args.url.trim(), {
       waitUntil: manager.config.navWaitUntil,
       timeout: opTimeoutMsForOwnership(liveState.ownership, manager.config)
@@ -1174,6 +1275,7 @@ async function reloadPage(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
+  await drainConsoleBuffer(state);
   const ignoreCache = Boolean(args.ignoreCache);
   let cacheToggled = false;
 
@@ -1495,6 +1597,7 @@ async function getConsoleMessages(args = {}) {
       note: `No console buffer for target ${tid}. The buffer fills while the tab is observed — run a devtools call that drives this target first, or create one with Target.createTarget.`
     };
   }
+  await drainConsoleBuffer(state);
   const limit = Math.max(1, Math.min(100, Number(args.limit) || 30));
   return {
     targetId: state.targetId,
@@ -2542,6 +2645,7 @@ async function sendRawCommand(args = {}) {
     }
     params = args.params;
   }
+  assertAllowedCdpParams(params);
   const timeoutMs = clampTimeout(args.timeoutMs);
   const manager = await getBrowserManager();
   assertEnabled(manager);

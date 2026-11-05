@@ -551,6 +551,100 @@ describe("handleDevtoolsToolCall", () => {
     expect(page.close).toHaveBeenCalled();
   });
 
+  function consoleFallbackManager(page, backend, extra = {}) {
+    return {
+      config: { enableDevtoolsMcp: true, devtoolsBackend: backend, defaultBackend: backend, navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 60000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([{ name: backend, type: "cdp" }]),
+      newPage: vi.fn().mockResolvedValue(page),
+      ...extra,
+    };
+  }
+
+  function fallbackPage({ probeEmitsConsole, drained = [] }) {
+    const probePage = {
+      _listeners: {},
+      on(event, fn) { this._listeners[event] = fn; },
+      evaluate: vi.fn(async (_fn, text) => {
+        if (probeEmitsConsole) probePage._listeners.console?.({ text: () => text });
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    let pending = [...drained];
+    const page = {
+      on: vi.fn(),
+      url: vi.fn().mockReturnValue("https://example.com/"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      goto: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      evaluateOnNewDocument: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn(async (script) => {
+        if (typeof script === "string" && script.includes("splice(0)")) { const out = pending; pending = []; return out; }
+        return undefined;
+      }),
+      browser: () => ({ newPage: vi.fn().mockResolvedValue(probePage) }),
+    };
+    return { page, probePage };
+  }
+
+  it("console capture: drains the in-page buffer when the CDP backend suppresses console events (CloakBrowser)", async () => {
+    const { page, probePage } = fallbackPage({
+      probeEmitsConsole: false,
+      drained: [
+        { type: "log", text: "boot-log", ts: 1700000000000 },
+        { type: "pageerror", text: "Error: boom", ts: 1700000000001 },
+      ],
+    });
+    getBrowserManager.mockResolvedValue(consoleFallbackManager(page, "cloak-suppressed"));
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", { browser: "cloak-suppressed" });
+    expect(page.evaluateOnNewDocument).toHaveBeenCalledTimes(1);
+    expect(page.evaluateOnNewDocument.mock.calls[0][0]).toContain("navigator.console.buffer");
+
+    const res = await handleDevtoolsToolCall("Runtime.getConsoleMessages", { targetId: created.targetId });
+    expect(res.count).toBe(2);
+    expect(res.messages.map((m) => m.type)).toEqual(["log", "pageerror"]);
+    expect(res.messages[0]).toMatchObject({ text: "boot-log", capturedBy: "page-hook" });
+    expect(probePage.close).toHaveBeenCalled();
+
+    // Drained once — no duplicates on the next read.
+    const again = await handleDevtoolsToolCall("Runtime.getConsoleMessages", { targetId: created.targetId });
+    expect(again.count).toBe(2);
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId: created.targetId });
+  });
+
+  it("console capture: never drains the buffer when the backend delivers native console events", async () => {
+    const { page } = fallbackPage({ probeEmitsConsole: true, drained: [{ type: "log", text: "dup", ts: 1 }] });
+    getBrowserManager.mockResolvedValue(consoleFallbackManager(page, "cdp-native"));
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", { browser: "cdp-native" });
+    const res = await handleDevtoolsToolCall("Runtime.getConsoleMessages", { targetId: created.targetId });
+    expect(res.count).toBe(0);
+    expect(page.evaluate.mock.calls.some(([script]) => typeof script === "string" && script.includes("splice(0)"))).toBe(false);
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId: created.targetId });
+  });
+
+  it("console capture: the in-page hook is never installed on the built-in chromium", async () => {
+    const { page } = fallbackPage({ probeEmitsConsole: false });
+    getBrowserManager.mockResolvedValue({ ...consoleFallbackManager(page, "chromium"), _effectiveAddOns: vi.fn().mockReturnValue([]) });
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    const created = await handleDevtoolsToolCall("Target.createTarget", { browser: "chromium" });
+    expect(page.evaluateOnNewDocument).not.toHaveBeenCalled();
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId: created.targetId });
+  });
+
+  it("blocks file:// URLs on Target.createTarget, Page.navigate and raw Target.sendCommand", async () => {
+    const { page } = fallbackPage({ probeEmitsConsole: true });
+    getBrowserManager.mockResolvedValue(consoleFallbackManager(page, "chromium"));
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await expect(handleDevtoolsToolCall("Target.createTarget", { url: "file:///etc/passwd" })).rejects.toThrow(/file:\/\/ URLs are blocked/);
+    const created = await handleDevtoolsToolCall("Target.createTarget", { url: "https://example.com" });
+    await expect(handleDevtoolsToolCall("Page.navigate", { targetId: created.targetId, url: "FILE:///app/.env" })).rejects.toThrow(/file:\/\/ URLs are blocked/);
+    await expect(handleDevtoolsToolCall("Target.sendCommand", { targetId: created.targetId, method: "Page.navigate", params: { url: "file:///etc/passwd" } })).rejects.toThrow(/file:\/\/ URLs are blocked/);
+    expect(page.goto).not.toHaveBeenCalledWith(expect.stringMatching(/^file:/i), expect.anything());
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId: created.targetId });
+  });
+
   it("operation deadline: a hung read-only command rejects with a structured, retry-safe timeout", async () => {
     const browserSession = {
       send: vi.fn(() => new Promise(() => {})), // never settles
