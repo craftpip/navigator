@@ -102,6 +102,7 @@ export function isConsolePublicPath(pathname) {
     pathname === "/health" ||
     pathname === "/cdp" ||
     pathname === "/console/login" ||
+    pathname === CONSOLE_LOGIN_LOGO_PATH ||
     pathname === "/console/logout" ||
     pathname === "/docs" ||
     pathname.startsWith("/docs/") ||
@@ -150,38 +151,84 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+export const CONSOLE_LOGIN_LOGO_PATH = "/console/login/logo.png";
+
+// Same tokens, font and header treatment as the React console
+// (src/web-console/src/style.css + components/Layout.jsx), inlined because the
+// console bundle itself is behind the login.
 export function renderLoginPage({ next = "/console", error = "" } = {}) {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Navigator Login</title>
+<title>Navigator Console — Sign in</title>
+<link rel="icon" type="image/png" href="${CONSOLE_LOGIN_LOGO_PATH}">
+<script>
+  try {
+    var t = localStorage.getItem("navigator-theme") ||
+      (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#f6f7f9; --card:#ffffff; --fg:#1c1f24; --muted:#5d6470; --border:#d9dde3; --accent:#2f6f4f; --err:#b42318; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#121417; --card:#1b1e23; --fg:#e8eaed; --muted:#9aa1ab; --border:#2c3138; --accent:#5fb98a; --err:#f97066; } }
+  :root {
+    --bg: #f3f4f6; --panel: #fff; --panel2: #f8f9fa; --line: #d6d9de; --line2: #e7e9ec;
+    --text: #202124; --muted: #68707c; --blue: #2563eb; --blue-bg: #dbeafe;
+    --red: #b91c1c; --red-bg: #fee2e2;
+    --sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+  html[data-theme="dark"] {
+    --bg: #101217; --panel: #191c24; --panel2: #1f232c; --line: #303541; --line2: #262b35;
+    --text: #e6e9ef; --muted: #9aa3b2; --blue: #7aa2ff; --blue-bg: #22304a;
+    --red: #f07178; --red-bg: #3a1c20;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; padding:16px; }
-  form { width:100%; max-width:340px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:28px 24px; }
-  h1 { margin:0 0 4px; font-size:20px; }
-  p { margin:0 0 20px; color:var(--muted); font-size:14px; }
-  label { display:block; font-size:13px; margin-bottom:6px; color:var(--muted); }
-  input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); font-size:15px; }
-  input:focus { outline:2px solid var(--accent); outline-offset:1px; }
-  button { margin-top:16px; width:100%; padding:10px; border:0; border-radius:6px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; }
-  .err { color:var(--err); font-size:13px; margin:12px 0 0; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  button, input { font: inherit; }
+  body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+  .login { width: 100%; max-width: 360px; }
+  .logo { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 18px;
+    color: var(--text); font: 700 14px var(--sans); letter-spacing: 0.6px; white-space: nowrap; }
+  .logo img { width: 64px; height: 64px; display: block; }
+  .logo span { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; }
+  h2 { margin: 0 0 4px; font: 700 12px var(--sans); letter-spacing: 0.4px; text-transform: uppercase; color: var(--text); }
+  .sub { margin: 0 0 16px; font: 400 12px/1.5 var(--sans); color: var(--muted); }
+  label { display: block; margin-bottom: 6px; font: 500 10px var(--sans); letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }
+  input[type="password"] { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--panel); color: var(--text); font-size: 13px; }
+  input[type="password"]:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-bg); }
+  .button { display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 34px; margin-top: 14px;
+    padding: 0 10px; border: 1px solid #2563eb; border-radius: 6px; background: #2563eb; color: #fff;
+    font: 700 12px var(--sans); letter-spacing: 0.2px; cursor: pointer; }
+  .button:hover { background: #1d4ed8; border-color: #1d4ed8; }
+  .button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--blue-bg); }
+  .error { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 8px 10px; border-radius: 6px;
+    background: var(--red-bg); color: var(--red); font: 600 12px var(--sans); }
+  .foot { margin: 12px 0 0; text-align: center; font: 400 11px var(--sans); color: var(--muted); }
 </style>
 </head>
 <body>
-<form method="post" action="/console/login">
-  <h1>Navigator</h1>
-  <p>Sign in to the web console.</p>
-  <label for="password">Password</label>
-  <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
-  <input type="hidden" name="next" value="${escapeHtml(next)}">
-  <button type="submit">Sign in</button>
-  ${error ? `<p class="err" role="alert">${escapeHtml(error)}</p>` : ""}
-</form>
+<main class="login">
+  <div class="logo">
+    <img src="${CONSOLE_LOGIN_LOGO_PATH}" alt="Navigator alligator logo" width="64" height="64">
+    NAVIGATOR <span>CONSOLE</span>
+  </div>
+  <form class="panel" method="post" action="/console/login">
+    <h2>Sign in</h2>
+    <p class="sub">Enter the console password to continue.</p>
+    ${error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : ""}
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+    <input type="hidden" name="next" value="${escapeHtml(next)}">
+    <button class="button" type="submit">Sign in</button>
+  </form>
+  <p class="foot">Set with CONSOLE_PASSWORD in the server's .env</p>
+</main>
 </body>
 </html>`;
 }

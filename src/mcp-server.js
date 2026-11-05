@@ -35,7 +35,7 @@ import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest, getTrustedAp
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 import { parseCropArgs } from "./crop.js";
-import { getConsolePassword, checkConsoleAuth, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys } from "./console-auth.js";
+import { getConsolePassword, checkConsoleAuth, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys, CONSOLE_LOGIN_LOGO_PATH } from "./console-auth.js";
 
 const require = createRequire(import.meta.url);
 const PACKAGE_JSON = require("../package.json");
@@ -2698,6 +2698,17 @@ async function readFormBody(req, maxBytes = 16 * 1024) {
 async function handleConsoleAuthGate(req, res, method, url) {
   const password = getConsolePassword();
   if (!password) return false;
+
+  if (url.pathname === CONSOLE_LOGIN_LOGO_PATH && method === "GET") {
+    try {
+      const png = await fs.readFile(path.join(process.cwd(), "navigator-logo.png"));
+      res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
+      res.end(png);
+    } catch {
+      sendJson(res, 404, { ok: false, error: "Not found" });
+    }
+    return true;
+  }
 
   if (url.pathname === "/console/login") {
     const next = safeNextPath(url.searchParams.get("next"));

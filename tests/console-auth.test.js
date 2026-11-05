@@ -71,7 +71,7 @@ describe("checkConsoleAuth", () => {
 
 describe("isConsolePublicPath", () => {
   it("keeps MCP, health, docs, downloads, login and CDP/relay paths public", () => {
-    for (const p of ["/mcp", "/health", "/cdp", "/cdp/Chrome", "/relay", "/browser/Chrome131", "/docs", "/docs/guide/", "/download/abc.jpg", "/console/login", "/console/logout"]) {
+    for (const p of ["/mcp", "/health", "/cdp", "/cdp/Chrome", "/relay", "/browser/Chrome131", "/docs", "/docs/guide/", "/download/abc.jpg", "/console/login", "/console/login/logo.png", "/console/logout"]) {
       expect(isConsolePublicPath(p), p).toBe(true);
     }
   });
@@ -118,9 +118,12 @@ describe("helpers", () => {
 
   it("renderLoginPage escapes next and error", () => {
     const html = renderLoginPage({ next: '/x"><script>', error: "<b>bad</b>" });
-    expect(html).not.toContain("<script>");
+    expect(html).not.toContain('/x"><script>');
+    expect(html).toContain('value="/x&quot;&gt;&lt;script&gt;"');
     expect(html).toContain("&lt;b&gt;bad&lt;/b&gt;");
     expect(html).toContain('action="/console/login"');
+    expect(html).toContain('src="/console/login/logo.png"');
+    expect(html).toContain("navigator-theme");
   });
 
   it("redactUrlKeys strips key= values anywhere in a nested payload", () => {
