@@ -60,13 +60,13 @@
     "@hono/node-server": "^2.0.5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@mozilla/readability": "^0.6.0",
     "@xmldom/xmldom": "^0.9.12",
     "better-sqlite3": "^11.10.0",
     "cloakbrowser": "^0.5.7",
     "jsdom": "^27.0.0",
-    "puppeteer-core": "^24.21.0",
+    "puppeteer-core": "^25.16.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "trafilatura": "^0.2.0",
