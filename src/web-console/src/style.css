@@ -1361,6 +1361,17 @@ html[data-theme="dark"] .mode-switch button.active {
 }
 
 /* Relay PIN authorization — pending navigator-cdp browser */
+/* PIN prompt sits below the driver row, outside the toggle <button> (a
+   disabled button swallows clicks on everything inside it). 30px lines it up
+   with .item-main (chevron + gap + dot + gap). */
+.driver-relay-auth {
+  flex-basis: 100%;
+  min-width: 0;
+  padding-left: 30px;
+}
+.driver-relay-auth .relay-auth {
+  margin-top: 4px;
+}
 .relay-auth {
   margin-top: 8px;
   border: 1px solid var(--amber);

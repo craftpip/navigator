@@ -186,7 +186,6 @@ export function Drivers({ health, instances, reload, height }) {
                     {backend} {typePill} {statusPill} {detectedPill}
                   </div>
                   <div className="item-detail">{detail}</div>
-                  {pending && <RelayAuth browser={browser} />}
                 </div>
               </button>
               <div className="driver-actions">
@@ -247,6 +246,14 @@ export function Drivers({ health, instances, reload, height }) {
                   </div>
                 )}
               </div>
+              {/* PIN prompt: outside the toggle <button>, which is disabled for
+                  rows without tabs — a disabled button swallows every click
+                  inside it, so the Copy button never fired. */}
+              {pending && (
+                <div className="driver-relay-auth">
+                  <RelayAuth browser={browser} />
+                </div>
+              )}
               {hasTabs ? (
                 <div id={`driver-tabs-${backend}`} className={`driver-tabs ${isExpanded ? "open" : "collapsed"}`} aria-hidden={!isExpanded}>
                   <div className="driver-tabs-inner">
