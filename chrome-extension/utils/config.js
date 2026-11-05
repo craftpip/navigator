@@ -20,9 +20,49 @@ var Config = {
     chrome.storage.local.set({ serverUrl: url }, callback || function() {});
   },
 
+  // Random two-word default (e.g. "amber-falcon") instead of a fixed
+  // "Chrome"/"Firefox": the name is this browser's identity on the navigator
+  // server, so two browsers both left on the default would collide. Generated
+  // once, saved, and reused — it only changes when the user types a new name.
+  _NAME_ADJECTIVES: ['amber', 'bold', 'brisk', 'calm', 'clever', 'cosmic', 'crimson', 'dapper', 'eager', 'electric',
+    'fancy', 'frosty', 'gentle', 'golden', 'happy', 'hidden', 'icy', 'jolly', 'keen', 'lively',
+    'lucky', 'lunar', 'mellow', 'misty', 'nimble', 'noble', 'odd', 'olive', 'plucky', 'polar',
+    'quick', 'quiet', 'rapid', 'royal', 'rusty', 'shiny', 'silent', 'silver', 'sly', 'snowy',
+    'solar', 'spicy', 'steady', 'sunny', 'swift', 'teal', 'tidy', 'tiny', 'vivid', 'wild',
+    'witty', 'zesty', 'azure', 'breezy', 'cheery', 'dusty', 'fuzzy', 'grand', 'hazy', 'jade',
+    'mighty', 'proud', 'ruby', 'velvet'],
+  _NAME_NOUNS: ['badger', 'beacon', 'bison', 'canyon', 'comet', 'condor', 'coral', 'cricket', 'dolphin', 'eagle',
+    'falcon', 'ferret', 'fjord', 'fox', 'gecko', 'glacier', 'harbor', 'hawk', 'heron', 'jaguar',
+    'koala', 'lagoon', 'lemur', 'lynx', 'maple', 'meadow', 'meteor', 'moose', 'nebula', 'newt',
+    'oasis', 'orca', 'otter', 'owl', 'panda', 'pebble', 'pine', 'puffin', 'quokka', 'raven',
+    'reef', 'river', 'robin', 'sparrow', 'summit', 'tiger', 'toucan', 'tundra', 'valley', 'walrus',
+    'willow', 'wombat', 'yak', 'zebra', 'acorn', 'bramble', 'cedar', 'delta', 'ember', 'grove',
+    'island', 'marten', 'pelican', 'thistle'],
+
+  randomBrowserName: function() {
+    function pick(list) {
+      var n = 0;
+      try {
+        var buf = new Uint32Array(1);
+        crypto.getRandomValues(buf);
+        n = buf[0];
+      } catch (e) {
+        n = Math.floor(Math.random() * 4294967296);
+      }
+      return list[n % list.length];
+    }
+    return pick(Config._NAME_ADJECTIVES) + '-' + pick(Config._NAME_NOUNS);
+  },
+
   getBrowserName: function(callback) {
     chrome.storage.local.get(['browserName'], function(result) {
-      callback(result.browserName || 'Chrome');
+      var name = String(result.browserName || '').trim();
+      if (name) {
+        callback(name);
+        return;
+      }
+      name = Config.randomBrowserName();
+      chrome.storage.local.set({ browserName: name }, function() { callback(name); });
     });
   },
 

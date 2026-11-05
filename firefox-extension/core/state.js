@@ -7,7 +7,7 @@ var State = (function() {
     pinRequired: false,
     sessionToken: null,
     pendingPin: null,
-    browserName: 'Firefox',
+    browserName: '', // set from storage (Config.getBrowserName); never a hardcoded default
     serverUrl: '',
     reconnectTimer: null,
     heartbeatTimer: null,

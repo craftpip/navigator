@@ -1160,5 +1160,88 @@ let env0;
     restored.pending === true && restored.browserDescription === '');
 }
 
+// 35. The browser name persists across disconnect + worker restart, and a fresh
+// install gets a random two-word default instead of a fixed "Chrome". The
+// in-memory State used to start as "Chrome", so the popup's "use the saved
+// name if the in-memory one is empty" fallback never ran: after a disconnect or
+// a worker restart the field showed "Chrome" again and the next Connect
+// saved it over the user's name.
+{
+  const bootBackground = (env) => {
+    const listeners = { installed: [], startup: [], message: [], alarm: [] };
+    env.chrome.runtime.onInstalled = { addListener: (f) => listeners.installed.push(f) };
+    env.chrome.runtime.onStartup = { addListener: (f) => listeners.startup.push(f) };
+    env.chrome.runtime.onMessage = { addListener: (f) => listeners.message.push(f) };
+    env.chrome.alarms.onAlarm = { addListener: (f) => listeners.alarm.push(f) };
+    const order = [
+      'utils/config.js', 'utils/logger.js', 'utils/helpers.js',
+      'core/state.js', 'core/debugger.js', 'core/connection-manager.js',
+      'cdp/response.js', 'cdp/handler/local.js', 'cdp/handler/special.js',
+      'cdp/handler/forward.js', 'cdp/index.js',
+      'features/tab-list.js', 'features/tab-isolation.js', 'features/badge.js'
+    ];
+    env.importScripts = (...rels) => {
+      for (const rel of rels) vm.runInContext(readFileSync(`${ROOT}${rel}`, 'utf8'), env, { filename: rel });
+    };
+    vm.runInContext(readFileSync(ROOT + 'background.js', 'utf8'), env, { filename: 'background.js' });
+    return (message) => new Promise((resolve) => {
+      let done = false;
+      const reply = (r) => { if (!done) { done = true; resolve(r); } };
+      for (const fn of listeners.message) fn(message, {}, reply);
+      setTimeout(() => reply(undefined), 500);
+    });
+  };
+  const sharedChrome = () => {
+    const base = makeChromeMock();
+    return (into) => {
+      into.storage.local.get = base.storage.local.get;
+      into.storage.local.set = base.storage.local.set;
+      into.storage.local.remove = base.storage.local.remove;
+      into._storage = base._storage;
+      return into;
+    };
+  };
+  const share = sharedChrome();
+
+  // Fresh install: no stored name.
+  const env1 = buildEnvFromChrome(share(makeChromeMock()));
+  loadExtension(env1);
+  const send1 = bootBackground(env1);
+  const snap1 = await send1({ type: 'popup-query' });
+  const generated = snap1 && snap1.browserName;
+  test('35a. a fresh install defaults to a random two-word name, not "Chrome"', () =>
+    typeof generated === 'string' && /^[a-z]+-[a-z]+$/.test(generated) && generated !== 'Chrome');
+  // Resolve before moving on: test() does not await async checks, and the
+  // connect below would otherwise race the storage read.
+  const again1 = await send1({ type: 'popup-query' });
+  const stored1 = await new Promise((res) => env1.Config.getBrowserName(res));
+  test('35b. the generated default is saved and stable across queries', () =>
+    again1 && again1.browserName === generated && stored1 === generated);
+
+  // User renames it, connects, then disconnects.
+  await send1({ type: 'connect', serverUrl: 'ws://relay', browserName: 'ChromeLinux', browserDescription: '' });
+  await sleep(40);
+  await send1({ type: 'disconnect' });
+  await sleep(20);
+  const snapAfterDisconnect = await send1({ type: 'popup-query' });
+  test('35c. after disconnect the popup still shows the typed name', () =>
+    snapAfterDisconnect && snapAfterDisconnect.browserName === 'ChromeLinux');
+
+  // Worker / event page is killed and restarted from the same storage.
+  const env2 = buildEnvFromChrome(share(makeChromeMock()));
+  loadExtension(env2);
+  const send2 = bootBackground(env2);
+  const snapAfterRestart = await send2({ type: 'popup-query' });
+  test('35d. after a worker restart the popup still shows the typed name (was "Chrome")', () =>
+    snapAfterRestart && snapAfterRestart.browserName === 'ChromeLinux');
+
+  // Reconnecting uses the saved name in the hello.
+  await send2({ type: 'connect', serverUrl: 'ws://relay', browserName: snapAfterRestart.browserName, browserDescription: '' });
+  await sleep(60);
+  const client = env2.State.getWs();
+  const hello = client && client._sent.find((m) => m.type === 'navigator-hello');
+  test('35e. the reconnect hello carries the persisted name', () => !!hello && hello.browserName === 'ChromeLinux');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

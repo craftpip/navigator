@@ -8,7 +8,7 @@ var State = (function() {
     sessionToken: null,
     pendingPin: null,
     pinError: null,
-    browserName: 'Chrome',
+    browserName: '', // set from storage (Config.getBrowserName); never a hardcoded default
     serverUrl: '',
     reconnectTimer: null,
     heartbeatTimer: null,

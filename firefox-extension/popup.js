@@ -315,7 +315,7 @@
 
   function updateConnectedSummary(snapshot) {
     if (!connectedSummary) return;
-    var bName = snapshot.browserName || browserNameInput.value.trim() || 'Firefox';
+    var bName = snapshot.browserName || browserNameInput.value.trim();
     var sUrl = snapshot.serverUrl || serverUrlInput.value.trim() || '—';
     if (summaryBrowser) summaryBrowser.textContent = bName;
     // Description row only when there is one — an empty field adds noise to
@@ -515,7 +515,7 @@
       }
 
       if (!_browserNameDirty) {
-        browserNameInput.value = snapshot.browserName || 'Firefox';
+        browserNameInput.value = snapshot.browserName || '';
       }
       if (!_urlDirty) {
         serverUrlInput.value = snapshot.serverUrl || '';
@@ -570,7 +570,7 @@
       chrome.runtime.sendMessage({
         type: 'connect',
         serverUrl: serverUrlInput.value.trim(),
-        browserName: browserNameInput.value.trim() || 'Firefox',
+        browserName: browserNameInput.value.trim(),
         browserDescription: currentDescription()
       }, function() {
         _urlDirty = false;

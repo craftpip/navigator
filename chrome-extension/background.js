@@ -54,7 +54,7 @@ importScripts('features/badge.js');
               // A connect was in flight (or the popup closed during it).
               // Restore the attempted values + spinner from the durable flag.
               state.serverUrl = pending.serverUrl || result.serverUrl || '';
-              state.browserName = pending.browserName || result.browserName || 'Chrome';
+              state.browserName = pending.browserName || result.browserName || state.browserName || '';
               // The pending flag is the user's *current* intent, so an empty
               // description there means "cleared" — falling back to the stored
               // value would resurrect a stale one.
@@ -66,7 +66,14 @@ importScripts('features/badge.js');
               }
             } else {
               if (!state.serverUrl) state.serverUrl = result.serverUrl || '';
-              if (!state.browserName) state.browserName = result.browserName || 'Chrome';
+              // The saved name is canonical. (The in-memory value used to start
+              // as a hardcoded default, so this fallback never ran and the popup
+              // reverted to that default after a disconnect / worker restart.)
+              state.browserName = String(result.browserName || '').trim() || state.browserName || '';
+              if (!state.browserName) {
+                state.browserName = Config.randomBrowserName();
+                Config.saveBrowserName(state.browserName);
+              }
               state.browserDescription = result.browserDescription || '';
             }
             var attachedIds = State.getAttachedTabIds();
@@ -95,7 +102,7 @@ importScripts('features/badge.js');
                   pinError: State.getPinError(),
                   lastError: State.getLastError(),
                   serverUrl: state.serverUrl || result.serverUrl || '',
-                  browserName: state.browserName || result.browserName || 'Chrome',
+                  browserName: state.browserName || result.browserName || '',
                   autoConnect: result.autoConnect !== false,
                   paired: !!result.sessionToken,
                   hasToken: !!result.sessionToken,
@@ -130,7 +137,7 @@ importScripts('features/badge.js');
         // attempted values and the connecting spinner.
         var st = State.getState();
         st.serverUrl = message.serverUrl || st.serverUrl || '';
-        st.browserName = message.browserName || st.browserName || 'Chrome';
+        st.browserName = String(message.browserName || '').trim() || st.browserName || '';
         st.browserDescription = message.browserDescription != null
           ? String(message.browserDescription)
           : (st.browserDescription || '');
@@ -150,7 +157,7 @@ importScripts('features/badge.js');
         ConnectionManager.notify({ type: 'connection-status-changed' });
         Badge.update();
         Config.saveServerUrl(message.serverUrl || '', function() {
-          Config.saveBrowserName(message.browserName || 'Chrome', function() {
+          Config.saveBrowserName(st.browserName, function() {
             Config.saveBrowserDescription(st.browserDescription, function() {
               Config.setAutoConnect(true, function() {
                 ConnectionManager.connect();

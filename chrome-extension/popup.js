@@ -297,7 +297,7 @@
 
   function updateConnectedSummary(snapshot) {
     if (!connectedSummary) return;
-    var bName = snapshot.browserName || browserNameInput.value.trim() || 'Chrome';
+    var bName = snapshot.browserName || browserNameInput.value.trim();
     var sUrl = snapshot.serverUrl || serverUrlInput.value.trim() || '—';
     if (summaryBrowser) summaryBrowser.textContent = bName;
     // Description row only when there is one — an empty field adds noise to
@@ -515,7 +515,7 @@
       // they're editing on the 3s refresh. Also never overwrite when connected
       // (summary is shown instead) — but keep inputs in sync for next disconnect.
       if (!_browserNameDirty) {
-        browserNameInput.value = snapshot.browserName || 'Chrome';
+        browserNameInput.value = snapshot.browserName || '';
       }
       if (!_urlDirty) {
         serverUrlInput.value = snapshot.serverUrl || '';
@@ -566,7 +566,7 @@
       chrome.runtime.sendMessage({
         type: 'connect',
         serverUrl: serverUrlInput.value.trim(),
-        browserName: browserNameInput.value.trim() || 'Chrome',
+        browserName: browserNameInput.value.trim(),
         browserDescription: currentDescription()
       }, function() {
         _urlDirty = false;
