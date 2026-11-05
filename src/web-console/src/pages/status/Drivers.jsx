@@ -5,23 +5,8 @@ import { BrowserEditModal } from "../manage/BrowserEditModal.jsx";
 import { parseBrowsersEntries, serializeBrowsersEntries } from "../manage/browser-utils.js";
 import { BROWSER_TYPE_LABEL } from "../manage/constants.js";
 import { usePopup } from "../../components/popup.jsx";
+import { copyToClipboard } from "../../lib/clipboard.js";
 
-function copyText(text) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text);
-    return true;
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
-  ta.remove();
-  return ok;
-}
 
 function RelayAuth({ browser }) {
   const [left, setLeft] = useState(Math.max(0, (browser.pinExpiresAt || 0) - Date.now()));
@@ -52,8 +37,8 @@ function RelayAuth({ browser }) {
         <button
           type="button"
           className="relay-copy"
-          onClick={() => {
-            if (browser.pin && copyText(browser.pin)) {
+          onClick={async () => {
+            if (browser.pin && (await copyToClipboard(browser.pin))) {
               setCopied(true);
               setTimeout(() => setCopied(false), 1500);
             }

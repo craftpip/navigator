@@ -4,6 +4,7 @@ import { formatKeyDate } from "../../lib/format.js";
 import { Panel, Empty, Pill, Check, Loading, Spinner } from "../../components/ui.jsx";
 import { usePopup } from "../../components/popup.jsx";
 import { useModalDismiss } from "../../components/modal.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
 
 function sameTools(a, b) {
   const sa = [...new Set(a)].sort();
@@ -171,11 +172,10 @@ export function Keys() {
     current.includes(browser) ? current.filter((name) => name !== browser) : [...current, browser],
   );
   const copyText = async (text, okMessage) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyToClipboard(text)) {
       setMessage(okMessage);
       setKind("ok");
-    } catch {
+    } else {
       setMessage("Copy failed. Select the text manually.");
       setKind("err");
     }
