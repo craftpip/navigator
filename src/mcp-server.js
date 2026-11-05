@@ -35,6 +35,7 @@ import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest, getTrustedAp
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 import { parseCropArgs } from "./crop.js";
+import { getConsolePassword, checkConsoleAuth, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys } from "./console-auth.js";
 
 const require = createRequire(import.meta.url);
 const PACKAGE_JSON = require("../package.json");
@@ -2671,6 +2672,99 @@ async function readJsonBody(req) {
   return JSON.parse(raw);
 }
 
+async function readFormBody(req, maxBytes = 16 * 1024) {
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > maxBytes) {
+      const error = new Error(`Request body too large (max ${maxBytes} bytes)`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  const type = String(req.headers["content-type"] || "");
+  if (type.includes("application/json")) {
+    try { return JSON.parse(raw || "{}") || {}; } catch { return {}; }
+  }
+  return Object.fromEntries(new URLSearchParams(raw));
+}
+
+// Console login gate (src/console-auth.js). Returns true when the request was
+// fully handled here (login/logout or a rejection) and the caller must stop.
+async function handleConsoleAuthGate(req, res, method, url) {
+  const password = getConsolePassword();
+  if (!password) return false;
+
+  if (url.pathname === "/console/login") {
+    const next = safeNextPath(url.searchParams.get("next"));
+    if (method === "GET") {
+      if (checkConsoleAuth(req, password).ok) {
+        res.writeHead(303, { location: next });
+        res.end();
+        return true;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(renderLoginPage({ next }));
+      return true;
+    }
+    if (method === "POST") {
+      // Socket address, not X-Forwarded-For: the rate limit must not be spoofable.
+      const ip = (req.socket?.remoteAddress || "unknown").slice(0, 100);
+      const form = await readFormBody(req);
+      const formNext = safeNextPath(form.next);
+      if (loginRateLimited(ip)) {
+        res.writeHead(429, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(renderLoginPage({ next: formNext, error: "Too many failed attempts. Try again in 15 minutes." }));
+        return true;
+      }
+      if (typeof form.password === "string" && form.password && safeEqual(form.password, password)) {
+        clearLoginFailures(ip);
+        console.log(`[console-auth] login ok from ${ip}`);
+        res.writeHead(303, { location: formNext, "set-cookie": consoleCookieHeader(issueConsoleToken(password)), "cache-control": "no-store" });
+        res.end();
+        return true;
+      }
+      recordLoginFailure(ip);
+      console.warn(`[console-auth] failed login from ${ip}`);
+      res.writeHead(401, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(renderLoginPage({ next: formNext, error: "Wrong password." }));
+      return true;
+    }
+    sendJson(res, 405, { ok: false, error: "Method not allowed" });
+    return true;
+  }
+
+  if (url.pathname === "/console/logout") {
+    res.writeHead(303, { location: "/console/login", "set-cookie": clearConsoleCookieHeader(), "cache-control": "no-store" });
+    res.end();
+    return true;
+  }
+
+  if (isConsolePublicPath(url.pathname)) return false;
+
+  const auth = checkConsoleAuth(req, password);
+  if (auth.ok) {
+    if (shouldRenewConsoleToken(auth.exp)) {
+      res.setHeader("set-cookie", consoleCookieHeader(issueConsoleToken(password)));
+    }
+    return false;
+  }
+
+  const wantsHtml = method === "GET" && String(req.headers.accept || "").includes("text/html");
+  if (wantsHtml) {
+    const next = safeNextPath(url.pathname + url.search);
+    res.writeHead(302, { location: `/console/login?next=${encodeURIComponent(next)}`, "cache-control": "no-store" });
+    res.end();
+    return true;
+  }
+  sendJson(res, 401, { ok: false, error: "Console login required (sign in at /console/login)" });
+  return true;
+}
+
 function getDisabledToolsSet() {
   const list = manager?.config?.disableTools || [];
   return new Set(list.map((name) => String(name).trim().toLowerCase()).filter(Boolean));
@@ -4273,6 +4367,8 @@ async function maybeStartHttpServer(managerOverride) {
       const method = req.method || "GET";
       const url = new URL(req.url || "/", "http://localhost");
 
+      if (await handleConsoleAuthGate(req, res, method, url)) return;
+
         if (manager.config.enableHttpMcp && url.pathname === "/mcp") {
           setCorsHeaders(res);
 
@@ -4475,9 +4571,13 @@ async function maybeStartHttpServer(managerOverride) {
             lastError: vncManager.lastError
           }
         };
+        // /health is public (extension probe, liveness). Relay cdpUrls embed
+        // navigator's internal gateway key — only a logged-in console sees it.
+        const consolePassword = getConsolePassword();
+        const healthOut = consolePassword && !checkConsoleAuth(req, consolePassword).ok ? redactUrlKeys(health) : health;
         logEvent("http.request", { method, path: url.pathname });
-        logEvent("http.response", { method, path: url.pathname, result: health });
-        sendJson(res, 200, health);
+        logEvent("http.response", { method, path: url.pathname, result: healthOut });
+        sendJson(res, 200, healthOut);
         return;
       }
 
@@ -5437,6 +5537,11 @@ async function maybeStartHttpServer(managerOverride) {
   keepaliveInterval.unref();
 
   server.listen(manager.config.mcpApiPort, "0.0.0.0", () => {
+    if (getConsolePassword()) {
+      console.log("[console-auth] web console login enabled (CONSOLE_PASSWORD set)");
+    } else {
+      console.warn("[console-auth] CONSOLE_PASSWORD is not set — the web console and its API (/console/*, /stats, /search, /extract, /screenshot) are open to anyone who can reach this port");
+    }
     logEvent("boot.ready", {
       transport: "http",
       host: manager.config.mcpApiHost,

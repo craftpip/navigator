@@ -480,7 +480,7 @@ describe("handleDevtoolsToolCall", () => {
       isClosed: vi.fn().mockReturnValue(false),
       evaluate: vi.fn().mockImplementation(() => {
         evalCount++;
-        if (evalCount === 1) throw new Error("Execution context was destroyed");
+        if (evalCount === 1) throw new Error("Session closed. Most likely the page has been closed.");
         return Promise.resolve({ json: JSON.stringify({ answer: 42 }) });
       }),
     };
@@ -508,6 +508,47 @@ describe("handleDevtoolsToolCall", () => {
     expect(reacquirePage.evaluate).toHaveBeenCalledTimes(1);
     expect(successPage.evaluate).toHaveBeenCalledTimes(1);
     await handleDevtoolsToolCall("Target.closeTarget", { targetId: "read-stale-retry" });
+  });
+
+  it("keeps an agent target alive when Runtime.evaluate races an in-page navigation (no orphaned tab)", async () => {
+    // Repro of the live bug: Enter submits a form, the next Runtime.evaluate hits
+    // "Execution context was destroyed". The handle used to be purged, and an
+    // agent-created targetId can never be re-acquired, so every later call failed
+    // with "Unknown targetId" and the tab leaked. The tab is fine — keep it.
+    let evalCount = 0;
+    const page = {
+      on: vi.fn(),
+      url: vi.fn().mockReturnValue("https://html.duckduckgo.com/html/"),
+      title: vi.fn().mockResolvedValue(""),
+      isClosed: vi.fn().mockReturnValue(false),
+      close: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn().mockImplementation(() => {
+        evalCount++;
+        if (evalCount === 1) throw new Error("Execution context was destroyed, most likely because of a navigation.");
+        return Promise.resolve("https://html.duckduckgo.com/html/?q=x");
+      }),
+    };
+    const attachToExistingTarget = vi.fn().mockResolvedValue(null);
+    getBrowserManager.mockResolvedValue({
+      config: { enableDevtoolsMcp: true, devtoolsBackend: "chromium", defaultBackend: "chromium", navWaitUntil: "domcontentloaded", browserOpTimeoutMs: 60000 },
+      _effectiveAddOns: vi.fn().mockReturnValue([]),
+      newPage: vi.fn().mockResolvedValue(page),
+      attachToExistingTarget,
+    });
+
+    const { handleDevtoolsToolCall } = await import("../src/devtools.js");
+    await handleDevtoolsToolCall("Target.createTarget", { targetId: "nav-race-keep" });
+    const result = await handleDevtoolsToolCall("Runtime.evaluate", { targetId: "nav-race-keep", expression: "location.href" });
+    expect(result.result).toBe("https://html.duckduckgo.com/html/?q=x");
+    expect(evalCount).toBe(2); // retried on the same live page
+    expect(attachToExistingTarget).not.toHaveBeenCalled();
+
+    // Still drivable and closable afterwards.
+    const again = await handleDevtoolsToolCall("Runtime.evaluate", { targetId: "nav-race-keep", expression: "1" });
+    expect(again.targetId).toBe("nav-race-keep");
+    const closed = await handleDevtoolsToolCall("Target.closeTarget", { targetId: "nav-race-keep" });
+    expect(closed.closed).toBe(true);
+    expect(page.close).toHaveBeenCalled();
   });
 
   it("operation deadline: a hung read-only command rejects with a structured, retry-safe timeout", async () => {

@@ -349,6 +349,18 @@ function isStaleError(err) {
   return STALE_ERROR_RE.test(String(err?.message || err || ""));
 }
 
+// A navigation inside a live tab (form submit, link click, Enter) destroys the
+// page's JS execution context, but the CDP session and the tab are still fine.
+// Purging the handle for these errors is wrong: an agent-created target has a
+// navigator-only targetId that attachToExistingTarget can never re-acquire, so
+// the purge orphaned the tab (every later call "Unknown targetId", page never
+// closed by the inactivity reaper). Keep the handle; retry on the same page.
+const NAVIGATION_CONTEXT_ERROR_RE = /Execution context was destroyed|Cannot find context/i;
+
+function isNavigationContextError(err) {
+  return NAVIGATION_CONTEXT_ERROR_RE.test(String(err?.message || err || ""));
+}
+
 /**
  * Run `action(state)` with a live devtools handle, auto-recovering from a
  * stale detached handle. The user can close the "started debugging this
@@ -392,9 +404,10 @@ function unknownAfterDispatch(targetId, operation, cause) {
 async function withStaleRetry(targetId, action, { retryable = true, operation = "devtools command" } = {}) {
   const tid = String(targetId || "").trim();
   if (!tid) throw new Error("targetId is required");
-  const purgeStale = () => {
+  const purgeStale = (err) => {
     const stale = targetsById.get(tid);
     if (stale) {
+      if (isNavigationContextError(err) && stale.page && !stale.page.isClosed()) return;
       targetsById.delete(tid);
       clearTab(stale.backend, tid);
     }
@@ -406,7 +419,7 @@ async function withStaleRetry(targetId, action, { retryable = true, operation = 
     // Handle was stale before any work was dispatched — safe to purge and
     // re-acquire for every caller, read or mutation. Nothing has been sent yet.
     if (!isStaleError(err) || closedTargets.has(tid)) throw err;
-    purgeStale();
+    purgeStale(err);
     await new Promise((r) => setTimeout(r, 450));
     try {
       state = await getTargetState(tid);
@@ -419,7 +432,7 @@ async function withStaleRetry(targetId, action, { retryable = true, operation = 
     return await action(state);
   } catch (err) {
     if (!isStaleError(err) || closedTargets.has(tid)) throw err;
-    purgeStale();
+    purgeStale(err);
     // The session died mid-dispatch. Only re-run actions that are safe to
     // repeat (reads). A mutation may already have landed — report the outcome
     // as explicitly unknown instead of silently double-dispatching the write.

@@ -240,8 +240,18 @@ Options:
   --help`);
 }
 
+// Console-only endpoints (/stats, /engines/reset) require the web console
+// login when CONSOLE_PASSWORD is set; send it from the env / .env.
+function consoleAuthHeaders() {
+  const password = process.env.CONSOLE_PASSWORD || ENV_VARS.CONSOLE_PASSWORD || "";
+  return password ? { "x-console-password": password } : {};
+}
+
 async function fetchJson(urlPath) {
-  const res = await fetch(`${baseUrl}${urlPath}`, { signal: AbortSignal.timeout(10000) });
+  const res = await fetch(`${baseUrl}${urlPath}`, { headers: consoleAuthHeaders(), signal: AbortSignal.timeout(10000) });
+  if (res.status === 401) {
+    throw new Error(`${urlPath} returned HTTP 401 — set CONSOLE_PASSWORD (env or .env) to the web console password`);
+  }
   if (!res.ok) {
     throw new Error(`${urlPath} returned HTTP ${res.status}`);
   }
@@ -251,7 +261,7 @@ async function fetchJson(urlPath) {
 async function postJson(urlPath, body) {
   const res = await fetch(`${baseUrl}${urlPath}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...consoleAuthHeaders() },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
