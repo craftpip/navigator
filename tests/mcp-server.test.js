@@ -2382,7 +2382,7 @@ describe("mcp-server HTTP endpoints", () => {
       ]);
     });
 
-    it("advertises plural-only inputs for web_search, web_page_screenshot, and web_page_links", async () => {
+    it("advertises the search query alias and plural screenshot and link inputs", async () => {
       const { status, body } = await mcpPost({
         jsonrpc: "2.0", id: 58, method: "tools/list"
       });
@@ -2393,7 +2393,10 @@ describe("mcp-server HTTP endpoints", () => {
       const webSearch = tools.find((tool) => tool.name === "web_search");
       const searchProps = Object.keys(webSearch.inputSchema.properties);
       expect(searchProps).toContain("queries");
-      expect(searchProps).not.toContain("query");
+      expect(searchProps).toContain("query");
+      expect(webSearch.inputSchema.properties.query.anyOf).toEqual([
+        { type: "string" }, { type: "array", items: { type: "string" } }
+      ]);
 
       const screenshot = tools.find((tool) => tool.name === "web_page_screenshot");
       const screenshotProps = Object.keys(screenshot.inputSchema.properties);
@@ -2513,6 +2516,22 @@ describe("mcp-server HTTP endpoints", () => {
       expect(status).toBe(200);
       const text = body.result.content[0].text;
       expect(text).toContain("Multi Result");
+      expect(searchMod.browserSearch.mock.calls.at(-1)[0].queries).toEqual(["first query", "second query"]);
+    });
+
+    it("handles query as an array and applies the same normalization and limits", async () => {
+      const searchMod = await import("../src/search.js");
+      searchMod.browserSearch.mockResolvedValueOnce(makeMockSearchPayload({ query: "alias", results: [] }));
+      const input = ["  first alias  ", "", "x".repeat(510), "third", "fourth", "fifth", "sixth", "seventh"];
+      const { status, body } = await mcpPost({
+        jsonrpc: "2.0", id: 141, method: "tools/call",
+        params: { name: "web_search", arguments: { query: input } },
+      });
+      expect(status).toBe(200);
+      expect(body.result.isError).not.toBe(true);
+      expect(searchMod.browserSearch.mock.calls.at(-1)[0].queries).toEqual([
+        "first alias", "x".repeat(500), "third", "fourth", "fifth", "sixth"
+      ]);
     });
 
     it("caps query count at 6", async () => {

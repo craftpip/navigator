@@ -178,11 +178,27 @@ export function RequestActivityTrend({ trend, range, error, setRange, engine, se
         <Empty>Could not load activity trend: {error}</Empty>
       ) : !trend ? (
         <Loading>Loading activity trend…</Loading>
-      ) : empty ? (
-        <Empty>No request activity in this period.</Empty>
       ) : (
         <>
-          <ActivityLineChart buckets={buckets} range={range} series={series} />
+          <div style={{ position: "relative" }}>
+            <ActivityLineChart buckets={buckets} range={range} series={series} />
+            {empty && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  pointerEvents: "none",
+                  color: "var(--muted)",
+                  font: "12px var(--sans)",
+                }}
+              >
+                No request activity in this period.
+              </div>
+            )}
+          </div>
           <div className="request-trend-detail request-trend-engine">
             <span>Search engines</span>
             <select aria-label="Search engine" value={engine || "all"} onChange={(event) => setEngine?.(event.target.value)}>

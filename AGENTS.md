@@ -9,7 +9,6 @@
 - [Search Engine Drivers](#search-engine-drivers)
 - [Agent Flow](#agent-flow)
 - [Chat Testing Protocol](#chat-testing-protocol)
-- [Infinite loop](#infinite-loop)
 - [Item Files (Plan Workflow)](#item-files-plan-workflow)
 - [User Preferences](#user-preferences)
 - [Configuration](#configuration)
@@ -313,35 +312,6 @@ Check the documented Tool Contract against observed behavior first — if they d
 
 ---
 
-## Infinite loop
-
-`infinite.md` (repo root) is the forever task queue. It is a **convention, not a feature** — no source file reads it. The user brain-dumps work as plain `- [ ] plans/<file>.md` lines under `## Queue` and says "check infinite" / "keep going" / "drain".
-
-**Infinite means infinite**: once started on the queue ("check infinite" / "keep going" / "drain" or any work-the-queue instruction), keep working item after item without stopping until the queue is empty. Never stop after one task to ask what is next. Never build a daemon around it unless the user explicitly asks for unattended runs.
-
-The loop, in order:
-
-1. **Read `infinite.md` first**, before picking anything up, even when the message names no item. Work the **first `- [ ]` line** — order IS priority. **Then read `## Needs your call` and surface any entries in your report.**
-2. **Claim before working**: rewrite the line to `- [~] plans/<file> — started <date>` as your FIRST act. A crash or a truncated turn then leaves an honest trace instead of silently re-picking the same item forever.
-3. **A path whose file is gone is DONE, not an error** — the item was absorbed into the docs and moved to `plans/archive/` per the item-file workflow. Move the line to `## Done` with today's date and continue. Never report a missing file as a blocker.
-4. **Do the item**, following the normal workflow in this file: build it, verify it, and keep the item's own `## Status:` header / checklist current.
-5. **Test it, commit it, then tick it** — run the relevant tests, verify the thing actually works, then `git add` only intended files + `git commit`. **Tick `[x]` only on real completion**: the work is tested, committed and verified, and the item has been absorbed into the docs and its file moved to `plans/archive/`. Then move the line into `## Done` as `- [x] <path> — absorbed <date>`.
-   - **Tests (in-container only — the entrypoint prunes dev deps on every start):**
-     ```bash
-     docker compose exec navigator npm install --include=dev
-     docker compose exec navigator npx vitest run                        # all
-     docker compose exec navigator npx vitest run tests/mcp-server.test.js # one file
-     docker compose exec navigator npm run lint
-     ```
-   - **Console changes** need a rebuild to be visible: `docker exec navigator npm install --include=dev && docker exec navigator npm run console:build`; server-side changes need `docker restart navigator` before live MCP verification.
-   - **Commits** must be authored/committed by `Boniface Pereira <bonifacepereira@gmail.com>` (see Project Learnings → Git Push Safety). Drain runs **commit**; pushing is a separate, explicit instruction.
-6. **Blocked is not done**: leave the line `- [ ]` and append the blocker to it (`— blocked: <what is needed>`), commit what IS done, then move to the next item immediately — never stop the run for a blocker. A partial item stays `[ ]` and gets finished next time; never tick something with open items.
-7. **Never stop after one — move to the next**: after test + commit + tick, immediately start the next `- [ ]` line in the same run. Repeat until the queue is empty. Report progress between items but do not wait for input. "One item per turn" is abolished — **infinite means keep going**.
-8. **An empty queue means STOP.** Report "queue empty" and do nothing else. **Never invent a task, feature or todo to fill an empty queue** — that is the single failure mode that turns an unattended agent into a machine building things nobody asked for.
-9. Keep `## Queue` and `## Done` tidy as you go: exactly one `[~]` line exists at a time, finished lines leave the queue, and the file stays short enough to read at a glance.
-
----
-
 ## Item Files (Plan Workflow)
 
 `plans/<NN>_<topic>.md` — one `.md` per work item; `plans/README.md` documents the convention in full.
@@ -368,7 +338,7 @@ The user brain-dumps tasks and can't hold a list in their head — they drop a n
 - Whenever the user gives a new task while one is already going, **add it to the todo list immediately** (verbatim intent, not the full wording) and finish it later. Do not treat it as a context switch.
 - Keep the todo list updated one by one as items complete.
 - If the user repeats or clarifies an item later, that's a **steer on an existing item**, not a new task.
-- Anything that is real, durable work (not a question) belongs in the forever queue as an item file + `- [ ] plans/<file>.md` line in `infinite.md` — see [Infinite loop](#infinite-loop) and [Item Files](#item-files-plan-workflow).
+- Anything that is real, durable work (not a question) belongs in the plan queue as an item file + an entry in `plans/QUEUE.md` — see `plans/INDEX.md`, `plans/QUEUE.md` and [Item Files](#item-files-plan-workflow).
 
 ---
 
@@ -1395,3 +1365,11 @@ For each site:
 **Lesson:** raw CDP commands against the relay gateway (`ws://10.69.1.164:1994/browser/maclap2`) for createTarget/closeTarget are visible to (and interfere with) the puppeteer session's auto-attach bookkeeping; prefer the devtools MCP tools.
 
 **Tests:** `tests/browser.test.js` + `tests/devtools.test.js` = 71 pass. Plan: `plans/42_browser-ownership-metadata.md`.
+
+### Host Shell Limits — Root-Owned Outputs, Passwordless Sudo, Console Component Tests (Plan 75)
+
+**Created:** 2026-10-16
+
+**What:** This agent shell runs as `node`, has no docker socket access, and the served `src/web-console/dist/` plus `node_modules/.vite-temp` are root-owned from in-container builds. Three workarounds, in order: (1) `rm -rf node_modules/.vite-temp` unblocks host vitest (recreated as node on next run); (2) NEVER `rm` inside root-owned served output — deleting `dist/index.html` while failing on `dist/assets/*` takes the console down with `Web console not available` (restore = rebuild to temp, swap hashes back to the served filenames, write the single file in place; never rename the `dist/` dir itself — that would detach a live bind mount); (3) passwordless `sudo -n` works here, so `sudo npm run console:build` refreshes served dist when docker is unavailable.
+
+**Console render tests without a harness:** vitest include is `tests/**/*.test.js` in node env, but a test file can opt into jsdom per-file (`// @vitest-environment jsdom`) and import the real `.jsx` component. Two gotchas: call the component via `createElement` + `renderToStaticMarkup` (calling it as a plain function throws on `useState`), and set `globalThis.React ??= React` (`ActivityChart.jsx` compiles under the classic JSX runtime). Effects (ResizeObserver) do not run under SSR — assert on rendered structure. The full server cannot start on the host (config load hard-requires a Chromium binary), so SSR render + production build stand in for a live browser eyeball.

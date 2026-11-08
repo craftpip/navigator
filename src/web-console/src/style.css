@@ -3138,7 +3138,7 @@ select.config-input option {
 }
 .api-key-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 110px 116px;
+  grid-template-columns: minmax(160px, 1fr) 150px minmax(210px, 1.25fr) 1fr 116px;
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -3186,8 +3186,8 @@ select.config-input option {
   white-space: nowrap;
 }
 .api-key-row small {
-  display: grid;
-  gap: 2px;
+  display: flex;
+  gap: 6px;
   color: var(--muted);
   font: 10px var(--sans);
   white-space: nowrap;

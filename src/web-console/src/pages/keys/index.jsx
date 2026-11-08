@@ -348,23 +348,24 @@ export function Keys() {
           ) : state.keys?.length
             ? state.keys.map((key) => (
                 <div className="api-key-row" key={key.id}>
-                  <b>{key.name}</b>
+                  <b>{key.name}{key.system && <span style={{ marginLeft: 8, fontWeight: 400, fontSize: "10px", color: "var(--muted)" }}> (System)</span>}</b>
+                  {key.system && <small style={{ gridColumn: "1 / -1", marginTop: 2, color: "var(--muted)" }}>Used by navigator for the Web Tools page.</small>}
                   <time dateTime={new Date(key.createdAt).toISOString()}>{formatKeyDate(key.createdAt)}</time>
                   <code>{key.preview}</code>
                   <small>
-                    <span>{key.allowedTools == null ? "all tools" : `${key.allowedTools.length} tools`}</span>
-                    <span>{key.allowedBrowsers == null ? "all CDP browsers" : `${key.allowedBrowsers.length} CDP browsers`}</span>
-                    <span>{key.allowedMcpBrowsers == null ? "all MCP browsers" : `${key.allowedMcpBrowsers.length} MCP browsers`}</span>
+                    {key.allowedTools == null ? "all tools" : `${key.allowedTools.length} tools`} \u00b7 {key.allowedBrowsers == null ? "all CDP browsers" : `${key.allowedBrowsers.length} CDP browsers`} \u00b7 {key.allowedMcpBrowsers == null ? "all MCP browsers" : `${key.allowedMcpBrowsers.length} MCP browsers`}
                   </small>
                   <div className="api-key-row-actions">
                     <button className="button" onClick={() => openEdit(key)}>Edit</button>
-                    <button
-                      className="button danger"
-                      disabled={revoking === key.id}
-                      onClick={() => revokeKey(key)}
-                    >
-                      {revoking === key.id ? <><Spinner small /> Revoking…</> : "Revoke"}
-                    </button>
+                    {!key.system && (
+                      <button
+                        className="button danger"
+                        disabled={revoking === key.id}
+                        onClick={() => revokeKey(key)}
+                      >
+                        {revoking === key.id ? <><Spinner small /> Revoking…</> : "Revoke"}
+                      </button>
+                    )}
                   </div>
                 </div>
               ))

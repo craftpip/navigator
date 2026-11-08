@@ -2811,6 +2811,10 @@ function getToolsListResponse(allowedTools = null) {
               items: { type: "string" },
               description: "One or more search queries to run (query variations; max 6, each capped at 500 chars)"
             },
+            query: {
+              anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+              description: "Alias for queries: a single query string or an array of query strings. A non-empty queries array takes precedence."
+            },
             limit: { type: "number", default: 5 },
             bypassCache: {
               type: "boolean",
@@ -2823,7 +2827,7 @@ function getToolsListResponse(allowedTools = null) {
               description: "Preferred default: `select_best`, which uses only SEARCH_ENABLED_ENGINES. A registered route may be named explicitly even when it is not enabled for `select_best`."
             }
           },
-          description: "Provide queries (string[]). Use queries for one or more search variations.",
+          description: "Provide queries (string[]) or query (string or string[]). Use queries for one or more search variations.",
           additionalProperties: false
         }
       },
@@ -3168,11 +3172,9 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     }
     mark = timer.step("cache_miss", mark);
     const queries = parseQueryList(args.queries);
-    if (!queries.length && typeof args.query === "string" && args.query.trim()) {
-      queries.push(args.query.trim());
-    }
+    if (!queries.length) queries.push(...parseQueryList(args.query));
     if (!queries.length) {
-      throw new Error("Missing queries: provide at least one search query (string[])");
+      throw new Error("Missing queries: provide at least one search query in queries or query");
     }
     const limit = parseSearchLimit(args.limit, 5);
     const engine = typeof args.engine === "string" ? String(args.engine).trim().toLowerCase() : "";

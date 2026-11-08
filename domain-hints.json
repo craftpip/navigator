@@ -1152,7 +1152,9 @@
       "https://www.bseindia.com/markets/Derivatives/DeriReports/DeriOptionchain"
     ],
     "default": {
-      "waitForSelector": [],
+      "waitForSelector": [
+        ".table-th-center"
+      ],
       "stabilizeStrategy": "network_idle",
       "waitForContent": [],
       "skipSelectors": [],

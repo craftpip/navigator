@@ -7,5 +7,5 @@ directly under the `#` title, dated, stating exactly how much is complete, plus 
 
 When an item is complete, absorb what it taught into `AGENTS.md` (Project Learnings)
 or `docs/`, then move the file to `plans/archive/`. An item never just vanishes —
-absorb first, then archive. The queue that sequences these items is `infinite.md`
-at the repo root.
+absorb first, then archive. The queue that sequences these items is `QUEUE.md`
+in this folder (see `INDEX.md` for the plan lifecycle).

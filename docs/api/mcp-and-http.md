@@ -17,7 +17,7 @@ The complete per-tool input/output contract is in [Tool Reference](tool-referenc
 
 | Tool | Input modes | Core behavior |
 |---|---|---|
-| `web_search` | `queries`, `limit`, `engine`, `bypassCache` | Runs explicit routes or automatic fallback search |
+| `web_search` | `queries` or `query`, `limit`, `engine`, `bypassCache` | Runs explicit routes or automatic fallback search |
 | `web_fetch` | `urls` or `ref_ids`, `maxChars`, `bypassCache` | Opens pages and returns readable text with tables and numeric markdown references |
 | `web_page_screenshot` | URL/ref input or persistent `targetId`, `quality`, `fullPage` | Captures a JPEG screenshot; storage output depends on config |
 | `web_page_links` | link `ref_ids` | Resolves inline link references from a prior fetch |

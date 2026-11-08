@@ -31,7 +31,7 @@ Use `web_page_screenshot` for visual confirmation, or create a persistent target
 
 ### `web_search`
 
-Input: `queries` is a non-empty string array. Optional `limit` defaults to `5`; `engine` defaults to `select_best`; `bypassCache` defaults to `false`.
+Input: `queries` is a non-empty string array. Alternatively, `query` accepts a single string or an array of strings. If both are supplied, a non-empty `queries` takes precedence. Both forms accept up to six queries, each truncated to 500 characters. Optional `limit` defaults to `5`; `engine` defaults to `select_best`; `bypassCache` defaults to `false`.
 
 `select_best` uses the configured automatic routes, scheduler, fallback, and circuit breakers. Use an explicit registered engine only when a caller specifically needs that route; it may be called even if it is not in `SEARCH_ENABLED_ENGINES`. Results are grouped by query and contain title, URL, snippet, readable text, and numeric reference ID. An independent DuckDuckGo Instant Answer may appear before results when enabled. Per-route failures are reported with the search response where possible.
 
