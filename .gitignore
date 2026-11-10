@@ -1,8 +1,10 @@
 node_modules/
 .env
 .env.backup-*
+.env.bak*
 npm-debug.log*
 screenshots/*.png
+screenshots/*.jpg
 !screenshots/.gitkeep
 
 # svg-diff benchmark artifacts (PNG/SVG pairs from scripts/svg-diff.mjs)
