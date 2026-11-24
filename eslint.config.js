@@ -36,6 +36,10 @@ export default [
     },
     rules: {
       "no-empty": ["error", { allowEmptyCatch: true }],
+      // Added to js.configs.recommended in ESLint 10. Warn for now so the
+      // upgrade does not add errors; existing findings are cleaned up separately.
+      "no-useless-assignment": "warn",
+      "preserve-caught-error": "warn",
       "no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_", ignoreRestSiblings: true }

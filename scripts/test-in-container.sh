@@ -3,12 +3,21 @@
 # navigator container. Nothing in /app (the bind-mounted repo) is modified.
 #   /tmp/navtest                 copy of the repo (no node_modules/.git/data/...)
 #   /tmp/navtest/node_modules -> /app/node_modules   (runtime deps)
-#   /tmp/node_modules         -> /opt/vt/node_modules (vitest 4.1.10; found by
-#                                 Node's parent-directory lookup, ESM-safe)
+#   /tmp/node_modules         -> /opt/vt/node_modules (vitest at the version
+#                                 pinned in package-lock.json; found by Node's
+#                                 parent-directory lookup, ESM-safe)
 #   /opt/node_modules         -> /app/node_modules   (jsdom for vitest itself)
 # Usage: docker exec -i navigator sh -s -- [vitest args] < navtest.sh
 set -e
-[ -x /opt/vt/node_modules/.bin/vitest ] || { mkdir -p /opt/vt && cd /opt/vt && npm install --no-audit --no-fund vitest@4.1.10 >/dev/null; }
+# /app/node_modules has production deps only, so vitest lives in /opt/vt.
+# Keep it at the version package-lock.json pins; reinstall when that changes.
+VT_WANT=$(node -p 'require("/app/package-lock.json").packages["node_modules/vitest"].version')
+VT_HAVE=$(node -p 'try { require("/opt/vt/node_modules/vitest/package.json").version } catch { "" }')
+if [ "$VT_HAVE" != "$VT_WANT" ]; then
+  rm -rf /opt/vt /opt/node_modules && mkdir -p /opt/vt && cd /opt/vt
+  echo '{"private":true}' > package.json
+  npm install --no-audit --no-fund --legacy-peer-deps "vitest@$VT_WANT" >/dev/null
+fi
 rm -rf /tmp/navtest
 mkdir -p /tmp/navtest
 cd /app
@@ -29,6 +38,7 @@ LEAK=/tmp/navigator-test-env.missing
 rm -f "$LEAK"
 cd /tmp/navtest
 set +e
+echo "navtest: $(/opt/vt/node_modules/.bin/vitest --version)" >&2
 /opt/vt/node_modules/.bin/vitest run "$@"
 rc=$?
 if [ -e "$LEAK" ]; then echo "navtest: WARNING a test wrote $LEAK (env-file isolation leak)" >&2; rc=1; fi
