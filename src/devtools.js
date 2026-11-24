@@ -22,8 +22,156 @@ const INACTIVITY_CHECK_INTERVAL_MS = 30_000;
 const CLOSED_TARGET_RETENTION_MS = 600_000;
 const MAX_FORMAT_OUTPUT_CHARS = 120000;
 
-const targetsById = new Map();
-const closedTargets = new Map();
+/**
+ * Why a targetId stopped being drivable. Each reason renders its own message so
+ * an agent is never told "inactivity" for a tab it closed itself.
+ */
+const CLOSE_REASONS = {
+  closed: "was closed with Target.closeTarget",
+  inactivity: `was closed due to inactivity (no interaction for ${INACTIVITY_TIMEOUT_MS / 60000} minutes)`,
+  evicted: "was closed to make room for a new lightpanda target (lightpanda holds one tab at a time)",
+  "backend-removed": "was closed because its browser was removed or reconfigured",
+  "page-closed": "was closed by the browser (the tab or its debugger session went away)"
+};
+
+/**
+ * Serializes mutating operations per target: two writes on one tab (e.g. two
+ * parallel Input.insertText calls) must never interleave keystrokes. Each
+ * acquire waits for the previous holder; a waiter whose call already timed out
+ * (signal aborted) gives up without ever running, and a holder's slot is freed
+ * when its call times out, so one hung operation cannot wedge the target.
+ */
+class TargetLocks {
+  #tails = new Map();
+
+  async acquire(targetId, signal = null) {
+    const prev = this.#tails.get(targetId) || Promise.resolve();
+    let releaseSlot;
+    const slot = new Promise((resolve) => { releaseSlot = resolve; });
+    const tail = prev.then(() => slot);
+    this.#tails.set(targetId, tail);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal?.removeEventListener?.("abort", release);
+      releaseSlot();
+      if (this.#tails.get(targetId) === tail) this.#tails.delete(targetId);
+    };
+    if (signal?.aborted) { release(); throw abortReason(signal); }
+    signal?.addEventListener?.("abort", release, { once: true });
+    if (signal) {
+      let onAbort;
+      const aborted = new Promise((_, reject) => {
+        onAbort = () => reject(abortReason(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      aborted.catch(() => {});
+      try {
+        await Promise.race([prev, aborted]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    } else {
+      await prev;
+    }
+    return release;
+  }
+}
+
+function abortReason(signal) {
+  return signal?.reason instanceof Error ? signal.reason : new Error("devtools operation was cancelled");
+}
+
+/**
+ * Every devtools target navigator knows about: the live handles, the
+ * tombstones of closed agent targets (with the reason they closed), and the
+ * per-target write locks. The live map always wins over a tombstone, and
+ * re-creating a closed id clears its tombstone, so an id is reusable at once.
+ */
+class TargetRegistry {
+  #live = new Map();
+  #tombstones = new Map();
+  locks = new TargetLocks();
+
+  get size() { return this.#live.size; }
+  get(targetId) { return this.#live.get(targetId); }
+  has(targetId) { return this.#live.has(targetId); }
+  values() { return this.#live.values(); }
+  entries() { return this.#live.entries(); }
+
+  /** The live handle for `targetId`, or null when it is gone or its page closed. */
+  live(targetId) {
+    const state = this.#live.get(targetId);
+    return state && state.page && !state.page.isClosed() ? state : null;
+  }
+
+  add(state) {
+    this.#tombstones.delete(state.targetId);
+    this.#live.set(state.targetId, state);
+  }
+
+  /** Drop our handle without tombstoning (adopted user tabs, page close events). */
+  forget(targetId) {
+    const state = this.#live.get(targetId);
+    this.#live.delete(targetId);
+    if (state) clearTab(state.backend, targetId);
+    return state || null;
+  }
+
+  /**
+   * Retire a handle for `reason` (a CLOSE_REASONS key). Agent targets are
+   * tombstoned and, unless `closePage` is false, their page is closed. Adopted
+   * handles point at a user's real tab: they are only released, never closed.
+   */
+  retire(targetId, reason, { closePage = true } = {}) {
+    const state = this.forget(targetId);
+    if (state?.adopted) return state;
+    this.#tombstones.set(targetId, { closedAt: new Date().toISOString(), reason });
+    if (state && closePage) state.page.close?.()?.catch(() => {});
+    return state;
+  }
+
+  /** The tombstone of a closed id that is not live again, or null. */
+  tombstone(targetId) {
+    if (this.#live.has(targetId)) return null;
+    return this.#tombstones.get(targetId) || null;
+  }
+
+  sweepTombstones(now = Date.now()) {
+    for (const [targetId, entry] of [...this.#tombstones.entries()]) {
+      if (now - new Date(entry.closedAt).getTime() >= CLOSED_TARGET_RETENTION_MS) this.#tombstones.delete(targetId);
+    }
+  }
+
+  /** Mark a live handle as used now: resets its inactivity clock. */
+  touch(state) {
+    state.lastActiveAt = new Date().toISOString();
+    touchTab(state.backend, state.targetId);
+  }
+}
+
+const registry = new TargetRegistry();
+
+function closedTargetError(targetId, entry) {
+  const why = CLOSE_REASONS[entry?.reason] || "was closed";
+  const err = new Error(`Target ${targetId} ${why}. Create it again with Target.createTarget (the same targetId may be reused), or navigate it with Page.navigate, which re-creates it.`);
+  err.code = "TARGET_CLOSED";
+  return err;
+}
+
+/**
+ * Per-key MCP browser allow-list for devtools targets (plan 57). `allowed` is a
+ * Set of lower-case browser names, or null = unrestricted. Same wording as
+ * resolveBrowserParam so both enforcement points read alike.
+ */
+function assertBackendAllowed(backend, allowed) {
+  if (!(allowed instanceof Set)) return;
+  if (allowed.has(String(backend || "").toLowerCase())) return;
+  throw new Error(
+    `browser "${backend}" is not permitted for this API key (allowed MCP browsers: ${[...allowed].join(", ") || "none"})`
+  );
+}
 
 const devtoolsCounters = { targetsCreated: 0, targetsClosed: 0, targetsInactivityClosed: 0 };
 
@@ -98,6 +246,30 @@ function clampTimeout(value, fallback = 15000) {
   return Math.min(30000, Math.floor(v));
 }
 
+/**
+ * Settle `promise`, or reject with `makeError()` after `timeoutMs`. A falsy
+ * timeout means no deadline. The timer is always cleared.
+ */
+function withDeadline(promise, timeoutMs, makeError) {
+  if (!timeoutMs) return promise;
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(typeof makeError === "function" ? makeError() : new Error(String(makeError))), timeoutMs);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Budget for one in-page step (evaluate, element resolution, click, typing) on
+ * a target. It scales with the target's ownership exactly like the whole-call
+ * timeout in handleDevtoolsToolCall, and stays a margin below it, so a hung
+ * step surfaces its own specific error instead of the generic call timeout.
+ */
+function stepTimeoutMs(state, manager) {
+  const outer = opTimeoutMsForOwnership(state?.ownership || "agent", manager.config);
+  return Math.max(1000, outer - Math.min(5000, Math.floor(outer * 0.1)));
+}
+
 function domainOf(method) {
   const m = String(method || "").split(".");
   return m.length > 1 ? m[0] : m[0] || "";
@@ -154,7 +326,15 @@ async function sendWindowCommand(state, method, params, { realTargetId: rid = nu
     const browserLevel = BROWSER_LEVEL_DOMAINS.has(domainOf(method));
     const session = await getCdpSession(state, method);
     try {
-      result = await session.send(method, params || {});
+      // Relay commands carry timeoutMs to the relay; a puppeteer session has
+      // no per-command deadline, so enforce the caller's here.
+      result = await withDeadline(session.send(method, params || {}), timeoutMs, () => new DevtoolsOperationTimeoutError({
+        operation: method,
+        targetId: state.targetId,
+        backend: state.backend,
+        timeoutMs,
+        retrySafe: rawCommandIsReadOnly(method)
+      }));
     } finally {
       if (browserLevel && state._browserSession) {
         await state._browserSession.detach().catch(() => {});
@@ -221,10 +401,14 @@ function truncate(value, maxChars = 300) {
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+// Largest HTML maxChars: the formatted reply (HTML + a small metadata block)
+// must fit MAX_FORMAT_OUTPUT_CHARS, so the HTML is cut exactly once, in-page.
+const MAX_HTML_CHARS = MAX_FORMAT_OUTPUT_CHARS - 4000;
+
 function parseMaxChars(value, fallback = DEFAULT_HTML_LIMIT) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(120000, Math.floor(parsed));
+  return Math.min(MAX_HTML_CHARS, Math.floor(parsed));
 }
 
 function assertString(value, field) {
@@ -262,50 +446,55 @@ function assertEnabled(manager) {
 export function releaseTargetsByBackend(backendName) {
   if (!backendName) return [];
   const released = [];
-  for (const [targetId, state] of [...targetsById.entries()]) {
+  for (const [targetId, state] of [...registry.entries()]) {
     if (String(state.backend || "").toLowerCase() !== String(backendName).toLowerCase()) continue;
-    targetsById.delete(targetId);
-    clearTab(state.backend, targetId);
-    if (state.adopted) {
-      released.push(`${targetId}: released adopted handle`);
-    } else {
-      closedTargets.set(targetId, { closedAt: new Date().toISOString() });
-      state.page.close?.()?.catch(() => {});
-      released.push(`${targetId}: closed navigator target`);
-    }
+    registry.retire(targetId, "backend-removed");
+    released.push(state.adopted ? `${targetId}: released adopted handle` : `${targetId}: closed navigator target`);
   }
   return released;
 }
 
-export async function getTargetState(targetId) {
+/**
+ * Resolve a targetId to its live devtools handle. This is the single point
+ * where every devtools tool reaches a target, so it is also where the per-key
+ * browser allow-list (`access.allowedMcpBrowsers`) is enforced: a restricted
+ * key can neither drive nor adopt a tab on a browser it is not allowed.
+ *
+ * @param {string} targetId
+ * @param {{ allowedMcpBrowsers?: Set<string>|null }} [access]
+ */
+export async function getTargetState(targetId, access = {}) {
   const tid = String(targetId || "").trim();
   if (!tid) throw new Error(`targetId is required`);
-  if (closedTargets.has(tid)) {
-    throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
-  }
-  const existing = targetsById.get(tid);
-  if (existing && existing.page && !existing.page.isClosed()) {
-    existing.lastActiveAt = new Date().toISOString();
-    touchTab(existing.backend, existing.targetId);
+  const allowed = access?.allowedMcpBrowsers instanceof Set ? access.allowedMcpBrowsers : null;
+  const existing = registry.live(tid);
+  if (existing) {
+    assertBackendAllowed(existing.backend, allowed);
+    registry.touch(existing);
     return existing;
   }
+  const tombstone = registry.tombstone(tid);
+  if (tombstone) throw closedTargetError(tid, tombstone);
 
   // Not yet adopted — try to adopt the existing browser-origin tab by its
   // exact targetId so the user can drive any of their open tabs directly.
+  // Only browsers this key may use are searched, so a denied key never even
+  // attaches the debugger to a tab it cannot drive.
   const manager = await getBrowserManager();
   let lastAttachError = "";
   try {
-    const adopted = await manager.attachToExistingTarget(tid);
+    const adopted = await manager.attachToExistingTarget(tid, { allowedBackends: allowed });
     if (adopted && adopted.page && !adopted.page.isClosed()) {
+      assertBackendAllowed(adopted.backend, allowed);
       const state = registerAdoptedTarget(manager, adopted.page, adopted.backend, tid);
-      state.lastActiveAt = new Date().toISOString();
-      touchTab(state.backend, state.targetId);
+      registry.touch(state);
       return state;
     }
     if (adopted && adopted.failure) {
       lastAttachError = `attach to "${adopted.backend}" failed: ${adopted.failure}`;
     }
   } catch (error) {
+    if (/is not permitted for this API key/.test(String(error?.message || ""))) throw error;
     // fall through to "unknown targetId" — but preserve the root cause so the
     // thrown message distinguishes "wrong id" from "browser/attach problem"
     lastAttachError = error?.message || String(error || "");
@@ -337,14 +526,14 @@ function registerAdoptedTarget(manager, page, backend, targetId) {
     adopted: true
   };
   installPageObservers(state);
-  targetsById.set(state.targetId, state);
+  registry.add(state);
   devtoolsCounters.targetsCreated += 1;
   touchTab(backend, state.targetId);
   void refreshTitle(state);
   return state;
 }
 
-const STALE_ERROR_RE = /Tab not attached|Cannot find context|Execution context was destroyed|Target closed|Session closed/i;
+const STALE_ERROR_RE = /Tab not attached|Cannot find context|Execution context was destroyed|Inspected target navigated or closed|Target closed|Session closed/i;
 
 function isStaleError(err) {
   return STALE_ERROR_RE.test(String(err?.message || err || ""));
@@ -356,7 +545,7 @@ function isStaleError(err) {
 // navigator-only targetId that attachToExistingTarget can never re-acquire, so
 // the purge orphaned the tab (every later call "Unknown targetId", page never
 // closed by the inactivity reaper). Keep the handle; retry on the same page.
-const NAVIGATION_CONTEXT_ERROR_RE = /Execution context was destroyed|Cannot find context/i;
+const NAVIGATION_CONTEXT_ERROR_RE = /Execution context was destroyed|Cannot find context|Inspected target navigated or closed/i;
 
 function isNavigationContextError(err) {
   return NAVIGATION_CONTEXT_ERROR_RE.test(String(err?.message || err || ""));
@@ -388,75 +577,110 @@ export function getLastUsedBackend(targetId) {
 }
 
 function unknownAfterDispatch(targetId, operation, cause) {
-  const err = new Error(
-    `${operation} for target ${targetId}: the browser debugger session was lost while the command may have been in flight ` +
-    `(${cause.message}). The action MAY have been applied — outcome unknown. ` +
-    `Verify the page/target state first (e.g. DOM.getDocument or Runtime.evaluate) before retrying; ` +
-    `a blind retry can double-dispatch a write.`
-  );
+  // A navigation (the page reloaded or followed a link while the command ran)
+  // and a lost debugger session are different stories for the caller: tell
+  // them which one happened. Either way the command is never re-run.
+  const navigated = isNavigationContextError(cause);
+  const what = navigated
+    ? `the page navigated while the command was running, which destroyed its JavaScript context (${cause.message}). ` +
+      `The command was NOT re-run; anything it did before the navigation (and the navigation itself) has already happened. ` +
+      `Split the work into separate calls instead: trigger the action, then Page.navigate/Page.reload or a wait, then a fresh read.`
+    : `the browser debugger session was lost while the command may have been in flight (${cause.message}). ` +
+      `The action MAY have been applied — outcome unknown. ` +
+      `Verify the page/target state first (e.g. DOM.getDocument) before retrying; a blind retry can double-dispatch a write.`;
+  const err = new Error(`${operation} for target ${targetId}: ${what}`);
   err.name = "UnknownDispatchError";
   err.targetId = targetId;
   err.operation = operation;
   err.retrySafe = false;
   err.stage = "dispatch";
+  if (navigated) err.navigated = true;
   return err;
 }
 
-async function withStaleRetry(targetId, action, { retryable = true, operation = "devtools command" } = {}) {
-  const tid = String(targetId || "").trim();
-  if (!tid) throw new Error("targetId is required");
-  const purgeStale = (err) => {
-    const stale = targetsById.get(tid);
-    if (stale) {
-      if (isNavigationContextError(err) && stale.page && !stale.page.isClosed()) return;
-      targetsById.delete(tid);
-      clearTab(stale.backend, tid);
-    }
-  };
-  let state;
-  try {
-    state = await getTargetState(tid);
-  } catch (err) {
-    // Handle was stale before any work was dispatched — safe to purge and
-    // re-acquire for every caller, read or mutation. Nothing has been sent yet.
-    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
-    purgeStale(err);
-    await new Promise((r) => setTimeout(r, 450));
-    try {
-      state = await getTargetState(tid);
-    } catch (e) {
-      throw err;
-    }
-  }
-  rememberUsedBackend(tid, state.backend);
-  try {
-    return await action(state);
-  } catch (err) {
-    if (!isStaleError(err) || closedTargets.has(tid)) throw err;
-    purgeStale(err);
-    // The session died mid-dispatch. Only re-run actions that are safe to
-    // repeat (reads). A mutation may already have landed — report the outcome
-    // as explicitly unknown instead of silently double-dispatching the write.
-    if (!retryable) throw unknownAfterDispatch(tid, operation, err);
-    await new Promise((r) => setTimeout(r, 450));
-    try {
-      state = await getTargetState(tid);
-    } catch (e) {
-      throw err;
-    }
-    rememberUsedBackend(tid, state.backend);
-    return await action(state);
+/**
+ * Drop a handle whose debugger session went stale so the next resolution
+ * re-acquires it. Only handles that CAN be re-acquired are dropped:
+ *  - a navigation inside a live tab keeps every handle (the session is fine);
+ *  - adopted handles are re-adopted by their real browser targetId;
+ *  - an agent target's id exists only in navigator, so its handle is kept
+ *    while its page is alive (dropping it would orphan a live tab no later
+ *    call or the inactivity reaper could reach) and tombstoned once the page
+ *    is really gone.
+ */
+function purgeStaleHandle(targetId, err) {
+  const stale = registry.get(targetId);
+  if (!stale) return;
+  const pageAlive = stale.page && !stale.page.isClosed();
+  if (isNavigationContextError(err) && pageAlive) return;
+  if (stale.adopted) {
+    registry.forget(targetId);
+  } else if (!pageAlive) {
+    registry.retire(targetId, "page-closed", { closePage: false });
   }
 }
 
+/**
+ * Run `action(state)` against a target's live handle.
+ *
+ * - `ctx` is the per-call context from handleDevtoolsToolCall:
+ *   `{ allowedMcpBrowsers, signal }` (allow-list + the call's timeout signal).
+ * - `mutating: true` marks a write (click, type, navigate, user JS, raw
+ *   non-read CDP). Writes run one at a time per target and are never
+ *   re-dispatched after they were sent; reads run freely and are retried once
+ *   when the handle went stale mid-call.
+ */
+async function withStaleRetry(targetId, action, { mutating = false, operation = "devtools command", ctx = {} } = {}) {
+  const tid = String(targetId || "").trim();
+  if (!tid) throw new Error("targetId is required");
+  const release = mutating ? await registry.locks.acquire(tid, ctx.signal) : null;
+  try {
+    let state;
+    try {
+      state = await getTargetState(tid, ctx);
+    } catch (err) {
+      // Handle was stale before any work was dispatched — safe to purge and
+      // re-acquire for every caller, read or mutation. Nothing has been sent yet.
+      if (!isStaleError(err) || registry.tombstone(tid)) throw err;
+      purgeStaleHandle(tid, err);
+      await new Promise((r) => setTimeout(r, 450));
+      try {
+        state = await getTargetState(tid, ctx);
+      } catch {
+        throw err;
+      }
+    }
+    rememberUsedBackend(tid, state.backend);
+    try {
+      return await action(state);
+    } catch (err) {
+      if (!isStaleError(err) || registry.tombstone(tid)) throw err;
+      purgeStaleHandle(tid, err);
+      // The command was dispatched. A write may already have landed — report
+      // the outcome instead of silently double-dispatching it.
+      if (mutating) throw unknownAfterDispatch(tid, operation, err);
+      await new Promise((r) => setTimeout(r, 450));
+      try {
+        state = await getTargetState(tid, ctx);
+      } catch {
+        throw err;
+      }
+      rememberUsedBackend(tid, state.backend);
+      return await action(state);
+    }
+  } finally {
+    release?.();
+  }
+}
+
+// Raw CDP reads. Runtime.evaluate / callFunctionOn run arbitrary page code, so
+// they are writes: never re-dispatched, and serialized per target.
 function rawCommandIsReadOnly(method) {
-  return /^(Page|DOM|Runtime|Network|CSS|Accessibility|Browser|Target|IO|SystemInfo|Memory|Performance)\.(get|query|describe|resolve|search)/i.test(method) ||
-    /^Runtime\.(evaluate|callFunctionOn)/i.test(method);
+  return /^(Page|DOM|Runtime|Network|CSS|Accessibility|Browser|Target|IO|SystemInfo|Memory|Performance)\.(get|query|describe|resolve|search)/i.test(method);
 }
 
 const READ_ONLY_OPERATIONS = new Set([
   "Target.getTargets",
-  "Runtime.evaluate",
   "Runtime.getConsoleMessages",
   "Network.getRequests",
   "DOM.getDocument",
@@ -505,7 +729,7 @@ async function devtoolsOperationTimeoutMs(targetId = "") {
   // hops plus the extension message bus, so a headless-sized budget cuts the
   // call off while it is still progressing (plan 51). Unknown targets fall
   // back to the headless baseline via opTimeoutMs().
-  const state = targetId ? targetsById.get(String(targetId)) : null;
+  const state = targetId ? registry.get(String(targetId)) : null;
   if (state?.ownership) return opTimeoutMsForOwnership(state.ownership, manager.config);
   return Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 }
@@ -562,31 +786,19 @@ async function refreshTitle(state) {
 let inactivityInterval = null;
 
 export function runInactivityTick(now = Date.now()) {
-  for (const [targetId, state] of [...targetsById.entries()]) {
+  for (const [targetId, state] of [...registry.entries()]) {
     if (state.page.isClosed()) {
-      targetsById.delete(targetId);
-      clearTab(state.backend, targetId);
+      registry.forget(targetId);
       continue;
     }
     const lastActive = new Date(state.lastActiveAt).getTime();
     if (now - lastActive >= INACTIVITY_TIMEOUT_MS) {
       devtoolsCounters.targetsInactivityClosed += 1;
-      targetsById.delete(targetId);
-      clearTab(state.backend, targetId);
-      if (state.adopted) {
-        // Adopted targets are handles to the user's real browser tab. Releasing
-        // our handle must never send Target.closeTarget or close the user's tab.
-      } else {
-        closedTargets.set(targetId, { closedAt: new Date().toISOString() });
-        state.page.close?.()?.catch(() => {});
-      }
+      // Adopted handles are only released (never closes the user's real tab).
+      registry.retire(targetId, "inactivity");
     }
   }
-  for (const [targetId, entry] of [...closedTargets.entries()]) {
-    if (now - new Date(entry.closedAt).getTime() >= CLOSED_TARGET_RETENTION_MS) {
-      closedTargets.delete(targetId);
-    }
-  }
+  registry.sweepTombstones(now);
 }
 
 function startInactivityCleanup() {
@@ -653,7 +865,9 @@ function probeNativeConsole(page, backend) {
     try {
       const browser = typeof page.browser === "function" ? page.browser() : null;
       if (!browser || typeof browser.newPage !== "function") return true;
-      probePage = await browser.newPage();
+      // Its own window, like every agent page on a CDP add-on: a tab opened
+      // in a target's window would push that target into the background.
+      probePage = await browser.newPage({ type: "window" });
       let seen = false;
       probePage.on("console", (msg) => { try { if (msg.text() === CONSOLE_PROBE_TEXT) seen = true; } catch {} });
       await probePage.evaluate((text) => console.debug(text), CONSOLE_PROBE_TEXT);
@@ -807,22 +1021,30 @@ function installPageObservers(state) {
   }));
 
   page.on("close", safePageListener("close", () => {
-    targetsById.delete(state.targetId);
+    // Only drop the handle if it is still ours: a re-created target with the
+    // same id must not be removed by the old page's late close event.
+    // Agent targets are tombstoned so later calls say the tab is gone.
+    if (registry.get(state.targetId) === state) registry.retire(state.targetId, "page-closed", { closePage: false });
   }));
 }
 
-async function createTarget(args = {}, allowedMcpBrowsers = null) {
+/**
+ * @param {object} args  Target.createTarget input.
+ * @param {{ allowedMcpBrowsers?: Set<string>|null }} [access]  per-key allow-list.
+ */
+async function createTarget(args = {}, access = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
+  const allowedMcpBrowsers = access?.allowedMcpBrowsers instanceof Set ? access.allowedMcpBrowsers : null;
 
-  if (targetsById.size >= MAX_TARGETS) {
+  if (registry.size >= MAX_TARGETS) {
     throw new Error(`Too many open targets. Close a target before creating a new one (max ${MAX_TARGETS}).`);
   }
 
   const customTargetId = typeof args.targetId === "string" && args.targetId.trim()
     ? args.targetId.trim()
     : null;
-  if (customTargetId && targetsById.has(customTargetId)) {
+  if (customTargetId && registry.live(customTargetId)) {
     throw new Error(`Target ${customTargetId} already exists. Use a different targetId or close the existing one.`);
   }
 
@@ -849,14 +1071,12 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
     // Never evict an adopted target: those are real tabs in a user's browser, and
     // releasing a devtools handle must never close one. Only agent-owned pages
     // this server created are fair game for the single-tab eviction.
-    const existing = [...targetsById.values()]
+    const existing = [...registry.values()]
       .filter((s) => String(s.backend).toLowerCase() === "lightpanda" && !s.adopted && s.page && !s.page.isClosed());
     if (existing.length >= 1) {
       const oldest = existing[0];
       try { await oldest.page.close(); } catch {}
-      targetsById.delete(oldest.targetId);
-      clearTab(oldest.backend, oldest.targetId);
-      closedTargets.set(oldest.targetId, { closedAt: new Date().toISOString() });
+      registry.retire(oldest.targetId, "evicted", { closePage: false });
       console.error(`🔄  lightpanda single-tab eviction: closed previous target ${oldest.targetId} to make room`);
     }
   }
@@ -887,14 +1107,15 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
 
   await installConsoleBufferFallback(manager, state);
   installPageObservers(state);
-  targetsById.set(state.targetId, state);
+  // Clears any tombstone: a closed targetId is reusable immediately.
+  registry.add(state);
   devtoolsCounters.targetsCreated += 1;
   touchTab(backend, state.targetId);
 
   if (url !== "about:blank") {
     page.goto(url, {
       waitUntil: manager.config.navWaitUntil,
-      timeout: manager.config.browserOpTimeoutMs
+      timeout: opTimeoutMsForOwnership(state.ownership, manager.config)
     }).then(
       () => {
         refreshTitle(state);
@@ -913,28 +1134,46 @@ async function createTarget(args = {}, allowedMcpBrowsers = null) {
   return { ...buildTargetSummary(state), url, navigating: url !== "about:blank", ...(rollbackNotes?.length ? { rollbackNotes } : {}) };
 }
 
-async function listTargets() {
+/**
+ * @param {{ browser?: string }} [args]  optional browser-name filter.
+ * @param {{ allowedMcpBrowsers?: Set<string>|null }} [access]  a restricted
+ *   key only sees targets on browsers it may drive.
+ */
+async function listTargets(args = {}, access = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const results = [];
   const seen = new Set();
+  const allowed = access?.allowedMcpBrowsers instanceof Set ? access.allowedMcpBrowsers : null;
+  const only = typeof args?.browser === "string" && args.browser.trim() ? args.browser.trim().toLowerCase() : "";
+  const visible = (backend) => {
+    const name = String(backend || "").toLowerCase();
+    return (!allowed || allowed.has(name)) && (!only || name === only);
+  };
 
   // Target.getTargets is a snapshot for an LLM to choose a target. Never make it
-  // wait on a page or extension: titles and relay tabs are maintained elsewhere.
-  for (const state of targetsById.values()) {
+  // wait on a page; relay tabs get at most one short, bounded refresh below.
+  for (const state of registry.values()) {
     if (!state.page || state.page.isClosed()) continue;
+    if (!visible(state.backend)) continue;
     seen.add(state.targetId);
     results.push({ ...buildTargetSummary(state), origin: state.adopted ? "browser" : "agent" });
   }
 
-  // Relay tab lists are pushed on connection and refreshed by the browser
-  // manager's background/status paths. Use that cache here rather than making
-  // Target.getTargets depend on a round-trip to the user's browser.
+  // Relay extensions push their tab list on connect and on every tab
+  // create/close/navigate, so the cache is normally current. A stale cache
+  // (older extension, missed push) gets one bounded refresh, all browsers in
+  // parallel and capped well under the tool timeout, so newly opened user tabs
+  // are never invisible, yet a slow browser cannot stall the snapshot.
   const relayEntries = manager
     ._effectiveAddOns()
-    .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)));
-  for (const entry of relayEntries) {
-    const tabs = relayServer.getEntry(entry.name)?.tabs || [];
+    .filter((b) => b.type === "navigator-cdp" && (b.status === "connected" || relayServer.isPaired(b.name)))
+    .filter((b) => visible(b.name));
+  const relayTabs = await Promise.all(relayEntries.map((entry) =>
+    relayServer.freshTabList(entry.name).catch(() => relayServer.getEntry(entry.name)?.tabs || [])
+  ));
+  for (const [i, entry] of relayEntries.entries()) {
+    const tabs = relayTabs[i] || [];
     // The server keeps the last tab list for a paired-but-disconnected relay
     // so the dashboard can show it. Discovery must not sell those cached rows
     // as drivable: driving them will hang on the extension round-trip. Mark
@@ -975,16 +1214,21 @@ async function listTargets() {
 
 export { listTargets };
 
-async function closeTarget(args = {}) {
+async function closeTarget(args = {}, access = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = await getTargetState(args.targetId);
+  const tid = args.targetId.trim();
+  const tombstone = registry.tombstone(tid);
+  if (tombstone) {
+    // Closing an already-closed target is a no-op, not an error.
+    return { targetId: tid, closed: true, alreadyClosed: true, reason: tombstone.reason };
+  }
+  const state = await getTargetState(tid, access);
   if (state.adopted) {
     // Adopted states are handles to a user's existing tab. Releasing ours must
     // never send Target.closeTarget or close the real browser tab.
-    targetsById.delete(state.targetId);
-    clearTab(state.backend, state.targetId);
+    registry.forget(state.targetId);
     devtoolsCounters.targetsClosed += 1;
     return { targetId: state.targetId, closed: false, released: true };
   }
@@ -1032,9 +1276,7 @@ async function closeTarget(args = {}) {
       retrySafe: false
     };
   }
-  targetsById.delete(state.targetId);
-  closedTargets.set(state.targetId, { closedAt: new Date().toISOString() });
-  clearTab(state.backend, state.targetId);
+  registry.retire(state.targetId, "closed", { closePage: false });
   devtoolsCounters.targetsClosed += 1;
   return {
     targetId: state.targetId,
@@ -1043,7 +1285,7 @@ async function closeTarget(args = {}) {
   };
 }
 
-export async function captureTargetScreenshot(args = {}) {
+export async function captureTargetScreenshot(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -1060,7 +1302,7 @@ export async function captureTargetScreenshot(args = {}) {
       ? Math.max(1, Math.min(100, Math.floor(Number.isFinite(args.quality) ? args.quality : 75)))
       : undefined;
   const fullPage = crop ? false : args.fullPage === undefined ? true : Boolean(args.fullPage);
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
 
   // ---- viewport handling: same style as Target.createTarget ----
   let normalizedViewport = null;
@@ -1223,39 +1465,32 @@ export async function captureTargetScreenshot(args = {}) {
     screenshotBase64: screenshot,
     ...(crop ? { quality: normalizedQuality } : {})
   };
-  });
+  }, { mutating: args.viewport !== undefined && args.viewport !== null, operation: "Target screenshot", ctx });
 }
 
-async function navigatePage(args = {}) {
+async function navigatePage(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.url, "url");
   assertAllowedUrl(args.url, "url");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  let state;
-  try {
-    state = await getTargetState(args.targetId);
-  } catch (error) {
-    if (String(error?.message || "").includes("Unknown targetId")) {
-      state = await createTarget({ targetId: args.targetId.trim(), url: args.url.trim() });
-      return { ...state, created: true };
-    }
-    if (isStaleError(error)) {
-      const tid = String(args.targetId).trim();
-      const stale = targetsById.get(tid);
-      if (stale) { targetsById.delete(tid); clearTab(stale.backend, tid); }
-      await new Promise((r) => setTimeout(r, 450));
+  const tid = args.targetId.trim();
+  if (!registry.live(tid)) {
+    // Not a live handle. A closed (tombstoned) id is simply re-created. Any
+    // other id may still be one of the user's open tabs, so try to adopt it
+    // first and create a new target only when no browser has that tab.
+    let exists = !registry.tombstone(tid);
+    if (exists) {
       try {
-        state = await getTargetState(args.targetId);
-      } catch (e2) {
-        if (String(e2?.message || "").includes("Unknown targetId")) {
-          state = await createTarget({ targetId: args.targetId.trim(), url: args.url.trim() });
-          return { ...state, created: true };
-        }
-        throw error;
+        await getTargetState(tid, ctx);
+      } catch (error) {
+        if (!String(error?.message || "").includes("Unknown targetId")) throw error;
+        exists = false;
       }
-    } else {
-      throw error;
+    }
+    if (!exists) {
+      const created = await createTarget({ targetId: tid, url: args.url.trim() }, ctx);
+      return { ...created, created: true };
     }
   }
   return withStaleRetry(args.targetId, async (liveState) => {
@@ -1267,10 +1502,10 @@ async function navigatePage(args = {}) {
     await refreshTitle(liveState);
     recordNavigation(liveState, "ok");
     return { ...buildTargetSummary(liveState), created: false };
-  }, { retryable: false, operation: "Page.navigate" });
+  }, { mutating: true, operation: "Page.navigate", ctx });
 }
 
-async function reloadPage(args = {}) {
+async function reloadPage(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -1307,9 +1542,9 @@ async function reloadPage(args = {}) {
   recordNavigation(state, "ok");
   return { ...buildTargetSummary(state), reloaded: true, ignoreCache: cacheToggled };
 
-  }, { retryable: false, operation: "Page.reload" });}
+  }, { mutating: true, operation: "Page.reload", ctx });}
 
-async function goHistory(args = {}, direction) {
+async function goHistory(args = {}, direction, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -1319,51 +1554,101 @@ async function goHistory(args = {}, direction) {
     timeout: opTimeoutMsForOwnership(state.ownership, manager.config)
   };
   const before = state.page.url();
-  const response = direction === "forward"
-    ? await state.page.goForward(options)
-    : await state.page.goBack(options);
+  let response;
+  try {
+    response = direction === "forward"
+      ? await state.page.goForward(options)
+      : await state.page.goBack(options);
+  } catch (error) {
+    // Puppeteer throws before sending anything when the history has no entry
+    // in that direction — the documented answer is navigated: false.
+    if (!/History entry to navigate to not found/i.test(String(error?.message || error))) throw error;
+    return { ...buildTargetSummary(state), direction, navigated: false, note: `No ${direction} history entry; the page did not change.` };
+  }
   await refreshTitle(state);
   recordNavigation(state, "ok");
   const navigated = Boolean(response) || state.page.url() !== before;
   return { ...buildTargetSummary(state), direction, navigated };
 
-  }, { retryable: false, operation: "Page.goHistory" });}
+  }, { mutating: true, operation: "Page.goHistory", ctx });}
 
-async function dispatchKeyEvent(args = {}) {
+const MODIFIER_ALIASES = {
+  shift: "Shift",
+  control: "Control", ctrl: "Control",
+  alt: "Alt", option: "Alt", opt: "Alt",
+  meta: "Meta", cmd: "Meta", command: "Meta", super: "Meta", win: "Meta"
+};
+const VALID_MODIFIERS_TEXT = "Shift, Control (alias Ctrl), Alt (alias Option), Meta (alias Cmd, Command)";
+
+/** Canonical puppeteer modifier names for `list`, or a readable error. */
+function normalizeModifiers(list) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) throw new Error(`Invalid input: modifiers must be an array of names. Valid modifiers: ${VALID_MODIFIERS_TEXT}.`);
+  const out = [];
+  for (const raw of list) {
+    const name = MODIFIER_ALIASES[String(raw ?? "").trim().toLowerCase()];
+    if (!name) throw new Error(`Invalid input: unknown modifier "${raw}". Valid modifiers: ${VALID_MODIFIERS_TEXT}.`);
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+async function dispatchKeyEvent(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.key, "key");
   const manager = await getBrowserManager();
   assertEnabled(manager);
+  // Validate every modifier before any key goes down, so a bad name can never
+  // leave an earlier modifier held for the rest of the session.
+  const modifiers = normalizeModifiers(args.modifiers);
   return withStaleRetry(args.targetId, async (state) => {
-  const modifiers = Array.isArray(args.modifiers) ? args.modifiers.map(String) : [];
-
-  for (const modifier of modifiers) await state.page.keyboard.down(modifier);
+  const held = [];
   try {
+    for (const modifier of modifiers) {
+      await state.page.keyboard.down(modifier);
+      held.push(modifier);
+    }
     await state.page.keyboard.press(args.key, args.text ? { text: String(args.text) } : {});
   } finally {
-    for (const modifier of [...modifiers].reverse()) await state.page.keyboard.up(modifier);
+    // Release exactly what went down, in reverse order.
+    for (const modifier of held.reverse()) await state.page.keyboard.up(modifier).catch(() => {});
   }
 
   await new Promise((resolve) => setTimeout(resolve, manager.config.humanTypingDelay || 0));
   return { ...buildTargetSummary(state), pressed: args.key, modifiers };
 
-  }, { retryable: false, operation: "Input.dispatchKeyEvent" });}
+  }, { mutating: true, operation: "Input.dispatchKeyEvent", ctx });}
 
-async function getNetworkRequests(args = {}) {
+/**
+ * The live handle behind a buffer read (console, network), without adopting
+ * or touching the page. Reading a buffer is interaction, so it resets the
+ * inactivity clock. A closed id reports why it closed; an unobserved id
+ * returns null (nothing buffered yet).
+ */
+function observedTarget(targetId, ctx = {}) {
+  const state = registry.live(targetId);
+  if (state) {
+    assertBackendAllowed(state.backend, ctx?.allowedMcpBrowsers instanceof Set ? ctx.allowedMcpBrowsers : null);
+    registry.touch(state);
+    return state;
+  }
+  const tombstone = registry.tombstone(targetId);
+  if (tombstone) throw closedTargetError(targetId, tombstone);
+  return null;
+}
+
+async function getNetworkRequests(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const tid = String(args.targetId || "").trim();
-  if (closedTargets.has(tid)) {
-    throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
-  }
 
   // Pure in-memory buffer read — never block on the target or the relay. The
   // buffer is only populated while a devtools handle is attached, so an
   // un-observed target has nothing to show yet (the same "0 buffered" answer)
   // without paying for an adoption round-trip that can hang.
-  const state = targetsById.get(tid);
-  if (!state || !state.page || state.page.isClosed()) {
+  const state = observedTarget(tid, ctx);
+  if (!state) {
     return {
       targetId: tid,
       url: "",
@@ -1404,15 +1689,18 @@ export function truncateLongUrl(url, max = 300) {
   return `${url.slice(0, headLen)}…<${url.length} chars>`;
 }
 
-async function evaluateRuntime(args = {}) {
+async function evaluateRuntime(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.expression, "expression");
   const manager = await getBrowserManager();
   assertEnabled(manager);
+  // User JS is a write: it can click, store, submit or navigate. It runs once
+  // per call (never re-dispatched) and one at a time per target.
   return withStaleRetry(args.targetId, async (state) => {
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
-  const result = await Promise.race([
-    state.page.evaluate(async (expression) => {
+  const timeoutMs = stepTimeoutMs(state, manager);
+  let result;
+  try {
+    result = await withDeadline(state.page.evaluate(async (expression) => {
     function cleanWhitespaceInner(value) {
       return String(value || "").replace(/\s+/g, " ").trim();
     }
@@ -1488,10 +1776,18 @@ async function evaluateRuntime(args = {}) {
       };
     }
 
-    function serialize(value, depth = 0, seen = new WeakSet()) {
+    // JSON-safe snapshot of an arbitrary page value. Cycles are detected with
+    // an ANCESTOR stack (a value repeated on the current path is "[Circular]";
+    // the same object shared by two siblings is serialized both times), and
+    // every container — arrays, Maps, Sets, objects — honors the same depth
+    // and entry caps.
+    const MAX_ENTRIES = 25;
+    const MAX_DEPTH = 4;
+    function serialize(value, depth = 0, ancestors = new Set()) {
       if (value === null || value === undefined) return value;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
       if (typeof value === "bigint") return value.toString();
+      if (typeof value === "symbol") return value.toString();
       if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`;
       if (value instanceof Date) return value.toISOString();
       if (value instanceof Error) {
@@ -1502,27 +1798,44 @@ async function evaluateRuntime(args = {}) {
         };
       }
       if (value instanceof Element) return describeElement(value);
-      if (value instanceof NodeList || value instanceof HTMLCollection || Array.isArray(value)) {
-        const list = Array.from(value)
-          .slice(0, 25)
-          .map((item) => serialize(item, depth + 1, seen));
-        const total = value.length;
-        if (total > 25) list.push(`[+${total - 25} more]`);
-        return list;
+      if (typeof Node !== "undefined" && value instanceof Node) {
+        return `[${value.nodeName}${value.nodeType === Node.TEXT_NODE ? ` ${JSON.stringify(truncateText(value.nodeValue, 200))}` : ""}]`;
       }
-      if (typeof value === "object") {
-        if (seen.has(value)) return "[Circular]";
-        seen.add(value);
-        if (depth >= 4) return "[MaxDepth]";
+      if (typeof value !== "object") return String(value);
+      if (ancestors.has(value)) return "[Circular]";
+      if (depth >= MAX_DEPTH) return "[MaxDepth]";
+      ancestors.add(value);
+      try {
+        const list = (items, total) => {
+          const out = [];
+          let count = 0;
+          for (const item of items) {
+            if (count >= MAX_ENTRIES) break;
+            out.push(serialize(item, depth + 1, ancestors));
+            count += 1;
+          }
+          if (total > MAX_ENTRIES) out.push(`[+${total - MAX_ENTRIES} more]`);
+          return out;
+        };
+        if (value instanceof Map) {
+          return { "[Map]": list(value.entries(), value.size), size: value.size };
+        }
+        if (value instanceof Set) {
+          return { "[Set]": list(value.values(), value.size), size: value.size };
+        }
+        if (Array.isArray(value) || value instanceof NodeList || value instanceof HTMLCollection) {
+          return list(Array.from(value), value.length);
+        }
         const out = {};
         const keys = Object.keys(value);
-        for (const key of keys.slice(0, 25)) {
-          out[key] = serialize(value[key], depth + 1, seen);
+        for (const key of keys.slice(0, MAX_ENTRIES)) {
+          out[key] = serialize(value[key], depth + 1, ancestors);
         }
-        if (keys.length > 25) out["[+more keys]"] = keys.length - 25;
+        if (keys.length > MAX_ENTRIES) out["[+more keys]"] = keys.length - MAX_ENTRIES;
         return out;
+      } finally {
+        ancestors.delete(value);
       }
-      return String(value);
     }
 
     function withEvalContext(error, expression) {
@@ -1561,34 +1874,44 @@ async function evaluateRuntime(args = {}) {
     } catch (serializeError) {
       throw withEvalContext(serializeError, expression);
     }
-  }, args.expression),
-    new Promise((_, reject) =>
-      setTimeout(() => {
-        const preview = args.expression.length > 160 ? `${args.expression.slice(0, 157)}...` : args.expression;
-        reject(new Error(`Runtime evaluation timed out after ${timeoutMs}ms  [evaluated: ${preview}]`));
-      }, timeoutMs)
-    )
-  ]);
+  }, args.expression), timeoutMs, () => {
+      const preview = args.expression.length > 160 ? `${args.expression.slice(0, 157)}...` : args.expression;
+      return new Error(`Runtime evaluation timed out after ${timeoutMs}ms  [evaluated: ${preview}]`);
+    });
+  } catch (error) {
+    if (!isNavigationContextError(error)) throw error;
+    // The expression (or something it started) navigated the page, which
+    // destroyed the context it ran in. Its effects up to that point stand and
+    // its return value is gone. Report where the page went; never re-run it.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await refreshTitle(state).catch(() => {});
+    return {
+      targetId: state.targetId,
+      navigated: true,
+      url: state.page.url(),
+      title: state.lastTitle,
+      result: null,
+      note: "The page navigated while the expression ran (or just before it started), so its JavaScript context was destroyed and its return value is lost. " +
+        "It was NOT re-run. Split such work into separate calls: run the action, then navigate/reload or wait, then evaluate again to read the new page."
+    };
+  }
 
   return {
     targetId: state.targetId,
     result
   };
 
-  });}
+  }, { mutating: true, operation: "Runtime.evaluate", ctx });}
 
-async function getConsoleMessages(args = {}) {
+async function getConsoleMessages(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   const tid = String(args.targetId || "").trim();
-  if (closedTargets.has(tid)) {
-    throw new Error(`Target ${tid} was closed due to inactivity (no interaction for 5 minutes). Create a new target with Target.createTarget.`);
-  }
 
   // Pure in-memory buffer read — never block on the target or the relay.
-  const state = targetsById.get(tid);
-  if (!state || !state.page || state.page.isClosed()) {
+  const state = observedTarget(tid, ctx);
+  if (!state) {
     return {
       targetId: tid,
       count: 0,
@@ -1607,13 +1930,13 @@ async function getConsoleMessages(args = {}) {
   };
 }
 
-async function getDocument(args = {}) {
+async function getDocument(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.max(1, Math.min(MAX_QUERY_RESULTS, Number(args.limit) || 15));
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const result = await Promise.race([
     state.page.evaluate((limitValue) => {
     function cleanWhitespaceInner(value) {
@@ -1744,9 +2067,25 @@ async function getDocument(args = {}) {
     ...result
   };
 
-  });}
+  }, { operation: "DOM.getDocument", ctx });}
 
-async function querySelector(args = {}, multiple = false) {
+/**
+ * The one "selector matched nothing" error every element tool throws: names
+ * the tool, the locator, the page it looked at, and (when the in-page probe
+ * collected them) candidate elements that do exist.
+ */
+function elementNotFoundError(tool, args, result, state, candidateLabel = "interactive elements") {
+  const attempted = result?.attempted || (args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`);
+  const hint = result?.candidates?.length
+    ? ` Matches nothing; ${candidateLabel} present: ${JSON.stringify(result.candidates)}`
+    : "";
+  return new Error(
+    `Could not resolve element for ${tool} — ${attempted} matched nothing on ${result?.url || state.page.url()} (${result?.title || "no title"}).${hint} ` +
+    `Use DOM.getDocument first to find a selector that exists on the current page.`
+  );
+}
+
+async function querySelector(args = {}, multiple = false, ctx = {}) {
   assertString(args.targetId, "targetId");
   if (!args.selector && !args.xpath) {
     throw new Error("Invalid input: provide selector or xpath");
@@ -1756,7 +2095,7 @@ async function querySelector(args = {}, multiple = false) {
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
   const limit = Math.max(1, Math.min(MAX_QUERY_RESULTS, Number(args.limit) || 10));
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const rawSelector = typeof args.selector === "string" ? args.selector : "";
   const selector = rawSelector ? cleanCssSelector(rawSelector) : "";
   if (rawSelector && !selector) {
@@ -1863,7 +2202,16 @@ async function querySelector(args = {}, multiple = false) {
       ? Array.from(document.querySelectorAll(selector))
       : nodesFromXpath(xpath);
     const described = nodes.slice(0, limitValue).map((node) => describe(node));
-    return wantsMany ? described : described[0] || null;
+    if (wantsMany || described.length) return { found: true, elements: described };
+    return {
+      found: false,
+      url: location.href,
+      title: document.title,
+      attempted: selector ? `selector=${selector}` : `xpath=${xpath}`,
+      candidates: Array.from(document.querySelectorAll("input, textarea, select, button, a[href], [role='button'], [role='link']"))
+        .slice(0, 10)
+        .map((el) => ({ tag: el.tagName.toLowerCase(), attrs: elementAttributes(el) }))
+    };
   }, {
     selector,
     xpath: args.xpath || "",
@@ -1875,20 +2223,23 @@ async function querySelector(args = {}, multiple = false) {
     )
   ]);
 
+  // querySelectorAll answers "how many?" — zero is a valid answer. A single
+  // querySelector promises an element, so no match is an error with candidates.
+  if (!result?.found) throw elementNotFoundError("DOM.querySelector", args, result, state);
   return {
     targetId: state.targetId,
-    ...(multiple ? { count: result.length, elements: result } : { element: result })
+    ...(multiple ? { count: result.elements.length, elements: result.elements } : { element: result.elements[0] })
   };
 
-  });}
+  }, { operation: multiple ? "DOM.querySelectorAll" : "DOM.querySelector", ctx });}
 
-async function getOuterHtml(args = {}) {
+async function getOuterHtml(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
   const maxChars = parseMaxChars(args.maxChars, DEFAULT_HTML_LIMIT);
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const result = await Promise.race([
     state.page.evaluate(({ selector, xpath, maxChars: limit }) => {
     function cssPath(element) {
@@ -1972,28 +2323,22 @@ async function getOuterHtml(args = {}) {
     )
   ]);
 
-  if (!result || result.found === false) {
-    const where = result?.attempted || (args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`);
-    throw new Error(
-      `Could not resolve element for DOM.getOuterHTML — ${where} matched nothing on ${result?.url || state.page.url()} (${result?.title || "no title"}). ` +
-      `Use DOM.getDocument first to find a selector that exists on the current page.`
-    );
-  }
+  if (!result || result.found === false) throw elementNotFoundError("DOM.getOuterHTML", args, result, state);
 
   return {
     targetId: state.targetId,
     ...result
   };
 
-  });}
+  }, { operation: "DOM.getOuterHTML", ctx });}
 
-async function getCompactHtml(args = {}) {
+async function getCompactHtml(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
   const maxChars = parseMaxChars(args.maxChars, DEFAULT_HTML_LIMIT);
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const result = await Promise.race([
     state.page.evaluate(({ selector, xpath, maxChars: limit }) => {
       const KEEP_ATTRS = new Set([
@@ -2150,22 +2495,16 @@ async function getCompactHtml(args = {}) {
     )
   ]);
 
-  if (!result || result.found === false) {
-    const where = result?.attempted || (args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`);
-    throw new Error(
-      `Could not resolve element for DOM.getCompactHTML — ${where} matched nothing on ${result?.url || state.page.url()} (${result?.title || "no title"}). ` +
-      `Use DOM.getDocument first to find a selector that exists on the current page.`
-    );
-  }
+  if (!result || result.found === false) throw elementNotFoundError("DOM.getCompactHTML", args, result, state);
 
   return {
     targetId: state.targetId,
     ...result
   };
 
-  });}
+  }, { operation: "DOM.getCompactHTML", ctx });}
 
-async function scrollIntoViewIfNeeded(args = {}) {
+async function scrollIntoViewIfNeeded(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   if (!args.selector && !args.xpath) {
     throw new Error("Invalid input: provide selector or xpath");
@@ -2174,7 +2513,7 @@ async function scrollIntoViewIfNeeded(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const result = await Promise.race([
     state.page.evaluate(({ selector, xpath }) => {
     function firstXpath(expression) {
@@ -2223,29 +2562,20 @@ async function scrollIntoViewIfNeeded(args = {}) {
     )
   ]);
 
-  if (!result || result.found === false) {
-    const attempted = args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`;
-    const hint = result?.candidates?.length
-      ? ` Matches nothing; interactive elements present: ${JSON.stringify(result.candidates)}`
-      : "";
-    throw new Error(
-      `Could not resolve element for DOM.scrollIntoViewIfNeeded — ${attempted} matched nothing on ${result?.url || state.page.url()} (${result?.title || "no title"}).${hint} ` +
-      `Use DOM.getDocument first to find a selector that exists on the current page.`
-    );
-  }
+  if (!result || result.found === false) throw elementNotFoundError("DOM.scrollIntoViewIfNeeded", args, result, state);
 
   return {
     targetId: state.targetId,
     ...result
   };
-  });
+  }, { operation: "DOM.scrollIntoViewIfNeeded", ctx });
 }
 
 function isNavigationError(error) {
   return /execution context was destroyed|cannot find context with specified id|target closed/i.test(String((error && error.message) || error));
 }
 
-async function dispatchMouseEvent(args = {}) {
+async function dispatchMouseEvent(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   if (!args.selector && !args.xpath) {
     throw new Error("Invalid input: provide selector or xpath");
@@ -2258,7 +2588,7 @@ async function dispatchMouseEvent(args = {}) {
     ? String(args.button).toLowerCase()
     : "left";
   const clickCount = Math.max(1, Math.min(3, Number(args.clickCount) || 1));
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const attempted = args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`;
 
   const withTimeout = (task, label) =>
@@ -2332,15 +2662,7 @@ async function dispatchMouseEvent(args = {}) {
     }
   }
 
-  if (!point || point.found === false) {
-    const hint = point?.candidates?.length
-      ? ` Matches nothing; clickable elements present: ${JSON.stringify(point.candidates)}`
-      : "";
-    throw new Error(
-      `Could not resolve element for Input.dispatchMouseEvent — ${attempted} matched nothing on ${point?.url || state.page.url()} (${point?.title || "no title"}).${hint} ` +
-      `Use DOM.getDocument first to find a selector that exists on the current page.`
-    );
-  }
+  if (!point || point.found === false) throw elementNotFoundError("Input.dispatchMouseEvent", args, point, state, "clickable elements");
 
   // A click on a navigation link (or an element that triggers a SPA route) can
   // destroy the execution context before the mouse event finishes — Puppeteer
@@ -2392,9 +2714,9 @@ async function dispatchMouseEvent(args = {}) {
     title: state.lastTitle
   };
 
-  }, { retryable: false, operation: "Input.dispatchMouseEvent" });}
+  }, { mutating: true, operation: "Input.dispatchMouseEvent", ctx });}
 
-async function insertText(args = {}) {
+async function insertText(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.text, "text");
   if (!args.selector && !args.xpath) {
@@ -2404,7 +2726,7 @@ async function insertText(args = {}) {
   const manager = await getBrowserManager();
   assertEnabled(manager);
   return withStaleRetry(args.targetId, async (state) => {
-  const timeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
+  const timeoutMs = stepTimeoutMs(state, manager);
   const point = await Promise.race([
     state.page.evaluate(({ selector, xpath }) => {
     function firstXpath(expression) {
@@ -2432,6 +2754,12 @@ async function insertText(args = {}) {
           .map((el) => ({ tag: el.tagName.toLowerCase(), attrs: elementAttributes(el) }))
       };
     }
+    // Refuse read-only and disabled fields BEFORE touching them: clearing the
+    // value first would silently wipe a field the user cannot edit.
+    const disabled = typeof element.matches === "function" && element.matches(":disabled");
+    if (element.readOnly === true || disabled) {
+      return { found: true, tagName: element.tagName.toLowerCase(), notEditable: disabled ? "disabled" : "readonly" };
+    }
     element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
     const rect = element.getBoundingClientRect();
     element.focus();
@@ -2452,8 +2780,7 @@ async function insertText(args = {}) {
       y: rect.top + Math.max(1, rect.height / 2),
       tagName: element.tagName.toLowerCase(),
       focused,
-      clearedExistingValue: hadValue,
-      readonly: Boolean(element.getAttribute?.("readonly")) || Boolean(element.getAttribute?.("disabled"))
+      clearedExistingValue: hadValue
     };
   }, {
     selector: args.selector || "",
@@ -2464,14 +2791,12 @@ async function insertText(args = {}) {
     )
   ]);
 
-  if (!point || point.found === false) {
+  if (!point || point.found === false) throw elementNotFoundError("Input.insertText", args, point, state, "editable elements");
+  if (point.notEditable) {
     const attempted = args.selector ? `selector=${args.selector}` : `xpath=${args.xpath}`;
-    const hint = point?.candidates?.length
-      ? ` Matches nothing; editable elements present: ${JSON.stringify(point.candidates)}`
-      : "";
     throw new Error(
-      `Could not resolve element for Input.insertText — ${attempted} matched nothing on ${point?.url || state.page.url()} (${point?.title || "no title"}).${hint} ` +
-      `Use DOM.getDocument first to find a selector that exists on the current page.`
+      `Input.insertText refused: ${attempted} (<${point.tagName}>) is ${point.notEditable}, so it cannot be typed into. Nothing was changed (its value was not cleared). ` +
+      `Pick an editable field (DOM.getDocument lists form fields with their attributes).`
     );
   }
 
@@ -2524,7 +2849,7 @@ async function insertText(args = {}) {
     valueReadback: finalValue?.value !== undefined
   };
 
-  }, { retryable: false, operation: "Input.insertText" });}
+  }, { mutating: true, operation: "Input.insertText", ctx });}
 
 // --------------------------------------------------------- window & focus CDP
 
@@ -2532,7 +2857,7 @@ async function insertText(args = {}) {
  * Target.activateTarget — bring a tab forward in its window.
  * Relay/dispatch per backend via sendWindowCommand (see above).
  */
-async function activateTarget(args = {}) {
+async function activateTarget(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -2547,10 +2872,10 @@ async function activateTarget(args = {}) {
       activated: true,
       result
     };
-  }, { retryable: false, operation: "Target.activateTarget" });
+  }, { mutating: true, operation: "Target.activateTarget", ctx });
 }
 
-async function getWindowForTarget(args = {}) {
+async function getWindowForTarget(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -2565,10 +2890,10 @@ async function getWindowForTarget(args = {}) {
       windowId: result.windowId ?? null,
       bounds: result.bounds ?? null
     };
-  });
+  }, { operation: "Browser.getWindowForTarget", ctx });
 }
 
-async function setWindowBounds(args = {}) {
+async function setWindowBounds(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const bounds = parseBounds(args.bounds);
   const manager = await getBrowserManager();
@@ -2576,16 +2901,29 @@ async function setWindowBounds(args = {}) {
   return withStaleRetry(args.targetId, async (state) => {
     const rid = realTargetId(state);
     const windowId = await resolveWindowId(state, rid);
-    const result = await sendWindowCommand(state, "Browser.setWindowBounds", { windowId, bounds }, { realTargetId: rid || null });
+    await sendWindowCommand(state, "Browser.setWindowBounds", { windowId, bounds }, { realTargetId: rid || null });
+    // CDP's setWindowBounds returns nothing, and the window manager may clamp
+    // or ignore the request (e.g. a size beyond the screen, a headless shell).
+    // Report the bounds the window really has now, next to what was asked.
+    let actual = null;
+    let readbackError = null;
+    try {
+      const win = await sendWindowCommand(state, "Browser.getWindowForTarget", { targetId: rid || state.targetId }, { realTargetId: rid || null });
+      actual = win?.bounds ?? null;
+    } catch (error) {
+      readbackError = String(error?.message || error);
+    }
     return {
       targetId: args.targetId,
       realTargetId: rid,
       backend: state.backend,
       ownership: state.ownership || "agent",
-      ...(result.windowId !== undefined ? { windowId: result.windowId } : {}),
-      bounds: result.bounds ?? bounds
+      windowId,
+      requested: bounds,
+      bounds: actual,
+      ...(readbackError ? { readbackError } : {})
     };
-  }, { retryable: false, operation: "Browser.setWindowBounds" });
+  }, { mutating: true, operation: "Browser.setWindowBounds", ctx });
 }
 
 /**
@@ -2601,7 +2939,7 @@ async function resolveWindowId(state, rid) {
   return win.windowId;
 }
 
-async function focusWindow(args = {}) {
+async function focusWindow(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
@@ -2627,7 +2965,7 @@ async function focusWindow(args = {}) {
       windowFocused,
       ...(boundsError ? { boundsError } : {})
     };
-  }, { retryable: false, operation: "Browser.focusWindow" });
+  }, { mutating: true, operation: "Browser.focusWindow", ctx });
 }
 
 /**
@@ -2635,7 +2973,7 @@ async function focusWindow(args = {}) {
  * method the backend understands is forwarded; unknown methods/domains get a
  * readable error naming navigator's supported CDP surface.
  */
-async function sendRawCommand(args = {}) {
+async function sendRawCommand(args = {}, ctx = {}) {
   assertString(args.targetId, "targetId");
   assertString(args.method, "method");
   let params = {};
@@ -2659,8 +2997,14 @@ async function sendRawCommand(args = {}) {
       ownership: state.ownership || "agent",
       result
     };
-  }, { retryable: rawCommandIsReadOnly(args.method), operation: `Target.sendCommand ${args.method}` });
+  }, { mutating: !rawCommandIsReadOnly(args.method), operation: `Target.sendCommand ${args.method}`, ctx });
 }
+
+// Stated in every tool that runs work inside the page. The numbers follow
+// stepTimeoutMs(): the call budget is BROWSER_OP_TIMEOUT_MS on agent browsers
+// and RELAY_TIMEOUT_MULTIPLIER× that on user browsers, and each in-page step
+// stops slightly before the call budget so its own error surfaces.
+const STEP_LIMIT_TEXT = "Time limit: each in-page step stops a little before the call's time budget (BROWSER_OP_TIMEOUT_MS on agent browsers — 60 s unless configured — and 3× that on user browsers); a step that runs longer fails with a timeout error naming it.";
 
 export const devtoolsToolDefinitions = [
   {
@@ -2689,16 +3033,18 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Target.getTargets",
-    description: "List all drivable targets: agent tabs (ownership \"agent\" — navigator's own headless/invisible browsers) and the user's open tabs (ownership \"user\", origin \"browser\" — their real visible browser window). Pass any listed targetId directly to Runtime.evaluate / DOM.* / Input.* / Page.* to drive that exact tab with no createTarget step. \"user\" targets are visible to the user — drive with care.",
+    description: "List all drivable targets: agent tabs (ownership \"agent\" — navigator's own headless/invisible browsers) and the user's open tabs (ownership \"user\", origin \"browser\" — their real visible browser window). Pass any listed targetId directly to Runtime.evaluate / DOM.* / Input.* / Page.* to drive that exact tab with no createTarget step. \"user\" targets are visible to the user — drive with care. Rows marked offline belong to a browser that is not connected and cannot be driven until it reconnects; rows with a failed last navigation say so.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        browser: { type: "string", description: "Optional: only list targets on this browser (a name from list_browsers)." }
+      },
       additionalProperties: false
     }
   },
   {
     name: "Target.closeTarget",
-    description: "Close a persistent testing tab. Closing an adopted origin:\"browser\" tab (ownership \"user\") never closes the user's real tab — the handle is released only.",
+    description: "Close a persistent testing tab. Closing an adopted origin:\"browser\" tab (ownership \"user\") never closes the user's real tab — the handle is released only. A closed targetId can be reused right away with Target.createTarget or Page.navigate; closing an already-closed target is a no-op.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2710,7 +3056,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Page.navigate",
-    description: "Navigate an existing testing tab to a new URL. If the targetId does not exist, a new tab is created with that id (the response includes created: true).",
+    description: "Navigate an existing testing tab to a new URL. If the targetId does not exist or was closed, a new tab is created with that id (the response includes created: true).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2760,7 +3106,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Runtime.evaluate",
-    description: "Evaluate a JavaScript expression in the page context and return the result serialized as JSON. Objects/arrays are capped at 25 entries (with a [+more] marker) and depth 4; [Circular] and [MaxDepth] markers indicate truncation. Runtime errors or rejected promises are reported with the offending expression appended in brackets for context.",
+    description: "Evaluate a JavaScript expression in the page context and return the result serialized as JSON. Objects, arrays, Maps ({\"[Map]\": [[key, value], ...], size}) and Sets ({\"[Set]\": [...], size}) are capped at 25 entries (with a [+more] marker) and depth 4; [MaxDepth] marks the depth cut and [Circular] a reference back to an enclosing value (the same object reached twice by different paths is serialized both times). Runtime errors or rejected promises are reported with the offending expression appended in brackets for context. The expression runs exactly once and is never retried: if it navigates the page (location.reload(), a form submit, a link click), the result is { navigated: true, url, result: null } because the return value died with the old page — split such work into separate calls (act, then navigate/wait, then evaluate). Calls on the same target run one at a time. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2802,7 +3148,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "DOM.getDocument",
-    description: "Return an LLM-friendly page snapshot with important elements, selectors, and xpaths. The attributes map reflects the element's REAL DOM attributes (only attributes that actually exist on the element are listed) plus a value field for form fields. Use this before selector-based tools to discover valid selectors.",
+    description: "Return an LLM-friendly page snapshot with important elements, selectors, and xpaths. The attributes map reflects the element's REAL DOM attributes (only attributes that actually exist on the element are listed) plus a value field for form fields. Use this before selector-based tools to discover valid selectors. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2815,7 +3161,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "DOM.querySelector",
-    description: "Query a single element by CSS selector or xpath and return its selector, xpath, text, attributes (real DOM attributes only), value, and bounding rect. Returns an error with the page URL and candidate elements if nothing matches.",
+    description: "Query a single element by CSS selector or xpath and return its selector, xpath, text, attributes (real DOM attributes only), value, and bounding rect. Returns an error with the page URL and candidate elements if nothing matches. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2829,7 +3175,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "DOM.querySelectorAll",
-    description: "Query multiple elements and return LLM-friendly descriptors (selector, xpath, text, attributes, value).",
+    description: "Query multiple elements and return LLM-friendly descriptors (selector, xpath, text, attributes, value). No match is a valid answer: count 0 and an empty elements list. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2844,7 +3190,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "DOM.getOuterHTML",
-    description: "Get outerHTML for a selector/xpath, or smart main content HTML when no locator is provided. The truncated field reports whether maxChars cut the output.",
+    description: "Get outerHTML for a selector/xpath, or smart main content HTML when no locator is provided. The HTML is returned raw in an html block; the truncated field reports whether maxChars cut it (maxChars is capped at " + MAX_HTML_CHARS + "). " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2859,7 +3205,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "DOM.getCompactHTML",
-    description: "Get minimized HTML for a selector/xpath, or smart main content HTML when no locator is provided. Strips scripts, styles, comments, svg, iframes, head, and non-essential attributes; collapses whitespace; drops empty elements. Returns a single-line minified string — use for fast DOM debugging without raw-page noise. The truncated field reports whether maxChars cut the output.",
+    description: "Get minimized HTML for a selector/xpath, or smart main content HTML when no locator is provided. Strips scripts, styles, comments, svg, iframes, head, and non-essential attributes; collapses whitespace; drops empty elements. Returns a single-line minified string — use for fast DOM debugging without raw-page noise. The HTML is returned raw in an html block; the truncated field reports whether maxChars cut it (maxChars is capped at " + MAX_HTML_CHARS + "). " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2888,7 +3234,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Input.dispatchMouseEvent",
-    description: "Click an element by selector or xpath using the page mouse. Returns an error with the page URL and candidate clickable elements if the selector matches nothing.",
+    description: "Click an element by selector or xpath using the page mouse. Returns an error with the page URL and candidate clickable elements if the selector matches nothing. Writes (clicks, typing, key presses, navigation, Runtime.evaluate) on the same target run one at a time. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2908,7 +3254,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Input.insertText",
-    description: "Focus an input-like element, clear any existing value, and type text into it via the keyboard. Requires selector or xpath. The response reports focused, clearedExistingValue, and finalValue (the element's value read back after typing). Returns an error with the page URL and editable element candidates if the selector matches nothing.",
+    description: "Focus an input-like element, clear any existing value, and type text into it via the keyboard. Requires selector or xpath. The response reports focused, clearedExistingValue, and finalValue (the element's value read back after typing). Returns an error with the page URL and editable element candidates if the selector matches nothing, and refuses read-only or disabled fields without changing them. Calls on the same target run one at a time, so parallel calls never interleave keystrokes. " + STEP_LIMIT_TEXT,
     inputSchema: {
       type: "object",
       properties: {
@@ -2929,7 +3275,7 @@ export const devtoolsToolDefinitions = [
       properties: {
         targetId: { type: "string", description: "Target id from Target.createTarget." },
         key: { type: "string", description: "Key to press: a single character or a key name such as Enter, Tab, Escape, ArrowUp, F1-F12, Space, Meta, Control, Shift, or Alt." },
-        modifiers: { type: "array", items: { type: "string" }, description: "Modifier keys to hold during the press, e.g. [\"Shift\", \"Control\"]. Pressed in array order and released in reverse." },
+        modifiers: { type: "array", items: { type: "string" }, description: "Modifier keys to hold during the press, e.g. [\"Shift\", \"Control\"]: Shift, Control (or Ctrl), Alt (or Option), Meta (or Cmd/Command). Pressed in array order and released in reverse; an unknown name is rejected before any key goes down." },
         text: { type: "string", description: "Optional text to inject for the key (used for keys that insert text)." }
       },
       required: ["targetId", "key"],
@@ -2962,7 +3308,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Browser.setWindowBounds",
-    description: "Move/resize/focus the window containing the target's tab. bounds accepts any subset of { left, top, width, height, windowState, focused }. windowState is one of normal | minimized | maximized | fullscreen; focused: true brings the window to the front of the OS window stack (user-visible on navigator-cdp browsers).",
+    description: "Move/resize/focus the window containing the target's tab. bounds accepts any subset of { left, top, width, height, windowState, focused }. windowState is one of normal | minimized | maximized | fullscreen; focused: true brings the window to the front of the OS window stack (user-visible on navigator-cdp browsers). The response reports requested (what was asked) and bounds (the window's real bounds read back afterwards — the window manager may clamp or ignore a request).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2999,7 +3345,7 @@ export const devtoolsToolDefinitions = [
   },
   {
     name: "Target.sendCommand",
-    description: "Raw CDP command passthrough to the target's session — for methods navigator doesn't wrap as a dedicated tool (e.g. Page.getLayoutMetrics, Runtime.getProperties, Emulation.setDeviceMetricsOverride, DOM.resolveNode). Run it against ANY method the backend understands: relay (navigator-cdp browsers execute it via the extension's LOCAL/SPECIAL/CDP-handler routers) or chromium/cdp add-ons (puppeteer CDP sessions; Browser.*/Target.* run on the browser-level session, everything else on the page session). Unknown methods/domains return a readable error naming navigator's supported CDP surface.",
+    description: "Raw CDP command passthrough to the target's session — for methods navigator doesn't wrap as a dedicated tool (e.g. Page.getLayoutMetrics, Runtime.getProperties, Emulation.setDeviceMetricsOverride, DOM.resolveNode). Run it against ANY method the backend understands: relay (navigator-cdp browsers execute it via the extension's LOCAL/SPECIAL/CDP-handler routers) or chromium/cdp add-ons (puppeteer CDP sessions; Browser.*/Target.* run on the browser-level session, everything else on the page session). Unknown methods/domains return a readable error naming navigator's supported CDP surface. timeoutMs is enforced on every backend. Read methods (get*/query*/describe*/resolve*/search*) are retried once if the debugger session drops; every other method — including Runtime.evaluate and Runtime.callFunctionOn, which run page code — is sent exactly once and serialized with other writes on the target.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3016,76 +3362,78 @@ export const devtoolsToolDefinitions = [
 
 export { createTarget, closeTarget, navigatePage };
 
-export async function getPageContent(targetId) {
+export async function getPageContent(targetId, access = {}) {
   assertString(targetId, "targetId");
   const manager = await getBrowserManager();
   assertEnabled(manager);
-  const state = getTargetState(targetId);
-  const html = await state.page.content();
-  return html;
+  return withStaleRetry(targetId, (state) => state.page.content(), { operation: "getPageContent", ctx: access });
 }
+
+/**
+ * Tool name → handler. Every handler gets `(args, ctx)` where `ctx` is the
+ * call context built in handleDevtoolsToolCall:
+ *   allowedMcpBrowsers — the API key's browser allow-list (Set) or null; it is
+ *                        enforced wherever a target is created or resolved;
+ *   signal             — aborted when the call times out, so a write still
+ *                        queued behind another write on the same target is
+ *                        dropped instead of running after the caller gave up.
+ */
+const DEVTOOLS_HANDLERS = {
+  "Target.createTarget": (args, ctx) => createTarget(args, ctx),
+  "Target.getTargets": (args, ctx) => listTargets(args, ctx),
+  "Target.closeTarget": (args, ctx) => closeTarget(args, ctx),
+  "Page.navigate": (args, ctx) => navigatePage(args, ctx),
+  "Page.reload": (args, ctx) => reloadPage(args, ctx),
+  "Page.goBack": (args, ctx) => goHistory(args, "back", ctx),
+  "Page.goForward": (args, ctx) => goHistory(args, "forward", ctx),
+  "Runtime.evaluate": (args, ctx) => evaluateRuntime(args, ctx),
+  "Runtime.getConsoleMessages": (args, ctx) => getConsoleMessages(args, ctx),
+  "Network.getRequests": (args, ctx) => getNetworkRequests(args, ctx),
+  "DOM.getDocument": (args, ctx) => getDocument(args, ctx),
+  "DOM.querySelector": (args, ctx) => querySelector(args, false, ctx),
+  "DOM.querySelectorAll": (args, ctx) => querySelector(args, true, ctx),
+  "DOM.getOuterHTML": (args, ctx) => getOuterHtml(args, ctx),
+  "DOM.getCompactHTML": (args, ctx) => getCompactHtml(args, ctx),
+  "DOM.scrollIntoViewIfNeeded": (args, ctx) => scrollIntoViewIfNeeded(args, ctx),
+  "Input.dispatchMouseEvent": (args, ctx) => dispatchMouseEvent(args, ctx),
+  "Input.insertText": (args, ctx) => insertText(args, ctx),
+  "Input.dispatchKeyEvent": (args, ctx) => dispatchKeyEvent(args, ctx),
+  "Target.activateTarget": (args, ctx) => activateTarget(args, ctx),
+  "Browser.getWindowForTarget": (args, ctx) => getWindowForTarget(args, ctx),
+  "Browser.setWindowBounds": (args, ctx) => setWindowBounds(args, ctx),
+  "Browser.focusWindow": (args, ctx) => focusWindow(args, ctx),
+  "Target.sendCommand": (args, ctx) => sendRawCommand(args, ctx)
+};
 
 export async function handleDevtoolsToolCall(name, args = {}, allowedMcpBrowsers = null) {
   // Reject unknown tools synchronously before any manager/config await.
-  const KNOWN = new Set([
-    "Target.createTarget", "Target.getTargets", "Target.closeTarget",
-    "Page.navigate", "Page.reload", "Page.goBack", "Page.goForward",
-    "Runtime.evaluate", "Runtime.getConsoleMessages", "Network.getRequests",
-    "DOM.getDocument", "DOM.querySelector", "DOM.querySelectorAll",
-    "DOM.getOuterHTML", "DOM.getCompactHTML", "DOM.scrollIntoViewIfNeeded",
-    "Input.dispatchMouseEvent", "Input.insertText", "Input.dispatchKeyEvent",
-    "Target.activateTarget", "Browser.getWindowForTarget",
-    "Browser.setWindowBounds", "Browser.focusWindow", "Target.sendCommand"
-  ]);
-  if (!KNOWN.has(name)) throw new Error(`Unknown developer browser tool: ${name}`);
-
-  const run = () => {
-    // Only createTarget resolves a browser, so it is the only handler that
-    // needs the per-key allow-list. The rest address an existing targetId.
-    if (name === "Target.createTarget") return createTarget(args, allowedMcpBrowsers);
-    if (name === "Target.getTargets") return listTargets(args);
-    if (name === "Target.closeTarget") return closeTarget(args);
-    if (name === "Page.navigate") return navigatePage(args);
-    if (name === "Page.reload") return reloadPage(args);
-    if (name === "Page.goBack") return goHistory(args, "back");
-    if (name === "Page.goForward") return goHistory(args, "forward");
-    if (name === "Runtime.evaluate") return evaluateRuntime(args);
-    if (name === "Runtime.getConsoleMessages") return getConsoleMessages(args);
-    if (name === "Network.getRequests") return getNetworkRequests(args);
-    if (name === "DOM.getDocument") return getDocument(args);
-    if (name === "DOM.querySelector") return querySelector(args, false);
-    if (name === "DOM.querySelectorAll") return querySelector(args, true);
-    if (name === "DOM.getOuterHTML") return getOuterHtml(args);
-    if (name === "DOM.getCompactHTML") return getCompactHtml(args);
-    if (name === "DOM.scrollIntoViewIfNeeded") return scrollIntoViewIfNeeded(args);
-    if (name === "Input.dispatchMouseEvent") return dispatchMouseEvent(args);
-    if (name === "Input.insertText") return insertText(args);
-    if (name === "Input.dispatchKeyEvent") return dispatchKeyEvent(args);
-    if (name === "Target.activateTarget") return activateTarget(args);
-    if (name === "Browser.getWindowForTarget") return getWindowForTarget(args);
-    if (name === "Browser.setWindowBounds") return setWindowBounds(args);
-    if (name === "Browser.focusWindow") return focusWindow(args);
-    return sendRawCommand(args);
-  };
+  const handler = Object.prototype.hasOwnProperty.call(DEVTOOLS_HANDLERS, name) ? DEVTOOLS_HANDLERS[name] : null;
+  if (!handler) throw new Error(`Unknown developer browser tool: ${name}`);
 
   const timeoutMs = await devtoolsOperationTimeoutMs(args.targetId || "");
   const retrySafe = operationIsReadOnly(name, args);
+  const controller = new AbortController();
+  const ctx = {
+    allowedMcpBrowsers: allowedMcpBrowsers instanceof Set ? allowedMcpBrowsers : null,
+    signal: controller.signal
+  };
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(
-      () => reject(new DevtoolsOperationTimeoutError({
+    timeoutId = setTimeout(() => {
+      const error = new DevtoolsOperationTimeoutError({
         operation: name,
         targetId: args.targetId,
         backend: getLastUsedBackend(String(args.targetId || "")) || null,
         timeoutMs,
         retrySafe
-      })),
-      timeoutMs
-    );
+      });
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
   });
 
   try {
-    return await Promise.race([run(), timeoutPromise]);
+    return await Promise.race([handler(args, ctx), timeoutPromise]);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -3114,11 +3462,15 @@ export function formatDevtoolsToolResponse(name, payload) {
         lines.push(`${index + 1}. **${t.backend}** — ${t.title || t.url || "(untitled)"}`);
         lines.push(`   url: ${t.url || "about:blank"}`);
         lines.push(`   targetId: \`${t.targetId}\``);
+        // Per-row state the model must see before it tries to drive the tab.
+        if (t.connected === false) lines.push(`   ⚠ offline: ${t.stale || "browser is not connected — this tab cannot be driven until it reconnects"}`);
+        if (t.navigation?.status === "error") lines.push(`   ⚠ last navigation failed: ${t.navigation.error || "unknown error"}`);
       });
     }
+    if (!payload.targets.length) lines.push("", "No targets. Create one with Target.createTarget.");
     const omitted = payload.targets.length - rendered;
     if (omitted > 0) {
-      lines.push("", `*(output budget: showed ${rendered} of ${payload.targets.length} targets; ${omitted} omitted. Close unused targets with Target.closeTarget, or filter by browser with Target.createTarget browser:"<name>".)*`);
+      lines.push("", `*(output budget: showed ${rendered} of ${payload.targets.length} targets; ${omitted} omitted. Narrow the list with Target.getTargets browser:"<name>", or close unused agent targets with Target.closeTarget.)*`);
     }
     return {
       content: [
@@ -3130,7 +3482,16 @@ export function formatDevtoolsToolResponse(name, payload) {
     };
   }
   const lines = [name];
-  lines.push("", "```json", JSON.stringify(payload, null, 2), "```");
+  if (payload && typeof payload.html === "string") {
+    // HTML tools: the html was already cut to maxChars in the page. Render it
+    // raw in its own fence so JSON escaping cannot inflate it past the output
+    // budget and get it cut a second time, mid-string.
+    const { html, ...meta } = payload;
+    const fence = html.includes("```") ? "````" : "```";
+    lines.push("", "```json", JSON.stringify(meta, null, 2), "```", "", `${fence}html`, html, fence);
+  } else {
+    lines.push("", "```json", JSON.stringify(payload, null, 2), "```");
+  }
   let text = lines.join("\n");
   if (text.length > MAX_FORMAT_OUTPUT_CHARS) {
     const note = `\n\n*(Response truncated — full output was ${text.length} chars, over the ${MAX_FORMAT_OUTPUT_CHARS}-char budget. Narrow the request (lower limit, more specific selector, smaller maxChars) to see more.)*`;

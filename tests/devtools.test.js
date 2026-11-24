@@ -378,6 +378,10 @@ describe("handleDevtoolsToolCall", () => {
       description: "my personal laptop, logged into Gmail",
     };
     relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    // Target.getTargets reads relay tabs through freshTabList (cached list, one
+    // bounded refresh when stale); for a disconnected browser that is the cache.
+    const freshTabList = vi.spyOn(relayServer, "freshTabList")
+      .mockImplementation(async (name) => (name === "user-browser" ? entry.tabs.slice() : []));
     relayServer.isPaired = () => true;
 
     getBrowserManager.mockResolvedValue({
@@ -405,6 +409,7 @@ describe("handleDevtoolsToolCall", () => {
       expect(quiet.targets.some((t) => Object.hasOwn(t, "description"))).toBe(false);
     } finally {
       relayServer.getEntry = originalGetEntry;
+      freshTabList.mockRestore();
       relayServer.isPaired = originalIsPaired;
     }
   });
@@ -446,8 +451,13 @@ describe("handleDevtoolsToolCall", () => {
     expect(Array.isArray(result.messages)).toBe(true);
   });
 
-  it("Page.reload throws UnknownDispatchError on mid-dispatch stale (no retry)", async () => {
-    const reloadCallCount = vi.fn(() => 0);
+  it.each([
+    // A navigation destroyed the JS context: the tab and session are fine, the
+    // caller is told the page navigated and the command was not re-run.
+    ["Execution context was destroyed", /page navigated while the command was running.*NOT re-run/i, true],
+    // The debugger session itself was lost: the outcome is unknown.
+    ["Session closed. Most likely the page has been closed.", /MAY have been applied — outcome unknown/i, undefined],
+  ])("Page.reload throws UnknownDispatchError on mid-dispatch stale (no retry): %s", async (cause, message, navigated) => {
     const page = {
       goto: vi.fn().mockResolvedValue(undefined),
       url: vi.fn().mockReturnValue("about:blank"),
@@ -455,8 +465,7 @@ describe("handleDevtoolsToolCall", () => {
       isClosed: vi.fn().mockReturnValue(false),
       on: vi.fn(),
       reload: vi.fn().mockImplementation(() => {
-        reloadCallCount();
-        throw new Error("Execution context was destroyed");
+        throw new Error(cause);
       }),
     };
     getBrowserManager.mockResolvedValue({
@@ -466,13 +475,20 @@ describe("handleDevtoolsToolCall", () => {
     });
 
     const { handleDevtoolsToolCall } = await import("../src/devtools.js");
-    await handleDevtoolsToolCall("Target.createTarget", { targetId: "stale-mutation" });
-    await expect(
-      handleDevtoolsToolCall("Page.reload", { targetId: "stale-mutation" })
-    ).rejects.toThrow(/MAY have been applied|outcome unknown/i);
+    const targetId = `stale-mutation-${navigated ? "nav" : "session"}`;
+    await handleDevtoolsToolCall("Target.createTarget", { targetId });
+    const err = await handleDevtoolsToolCall("Page.reload", { targetId }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("UnknownDispatchError");
+    expect(err.message).toMatch(message);
+    expect(err.retrySafe).toBe(false);
+    expect(err.navigated).toBe(navigated);
+    // A write is never re-dispatched.
+    expect(page.reload).toHaveBeenCalledTimes(1);
+    await handleDevtoolsToolCall("Target.closeTarget", { targetId });
   });
 
-  it("Runtime.evaluate retries once on mid-dispatch stale for read-only operations", async () => {
+  it("DOM.getDocument (a read) retries once on mid-dispatch stale", async () => {
     let evalCount = 0;
     const successPage = {
       on: vi.fn(),
@@ -498,19 +514,21 @@ describe("handleDevtoolsToolCall", () => {
       attachToExistingTarget: vi.fn().mockResolvedValue({ page: reacquirePage, backend: "chrome" }),
     });
 
+    const manager = await getBrowserManager();
     const { handleDevtoolsToolCall } = await import("../src/devtools.js");
     await handleDevtoolsToolCall("Target.createTarget", { targetId: "read-stale-retry" });
-    const result = await handleDevtoolsToolCall("Runtime.evaluate", {
-      targetId: "read-stale-retry",
-      expression: "40 + 2",
-    });
-    expect(evalCount).toBe(1);
-    expect(reacquirePage.evaluate).toHaveBeenCalledTimes(1);
-    expect(successPage.evaluate).toHaveBeenCalledTimes(1);
+    await handleDevtoolsToolCall("DOM.getDocument", { targetId: "read-stale-retry" });
+    // An agent-created target's id exists only in navigator, so it cannot be
+    // re-acquired from the browser: while its page is alive the handle is
+    // kept and the read is re-run once on that same page.
+    expect(evalCount).toBe(2);
+    expect(successPage.evaluate).toHaveBeenCalledTimes(2);
+    expect(manager.attachToExistingTarget).not.toHaveBeenCalled();
+    expect(reacquirePage.evaluate).not.toHaveBeenCalled();
     await handleDevtoolsToolCall("Target.closeTarget", { targetId: "read-stale-retry" });
   });
 
-  it("keeps an agent target alive when Runtime.evaluate races an in-page navigation (no orphaned tab)", async () => {
+  it("Runtime.evaluate that races a navigation is reported, never re-run, and the target stays alive", async () => {
     // Repro of the live bug: Enter submits a form, the next Runtime.evaluate hits
     // "Execution context was destroyed". The handle used to be purged, and an
     // agent-created targetId can never be re-acquired, so every later call failed
@@ -539,8 +557,10 @@ describe("handleDevtoolsToolCall", () => {
     const { handleDevtoolsToolCall } = await import("../src/devtools.js");
     await handleDevtoolsToolCall("Target.createTarget", { targetId: "nav-race-keep" });
     const result = await handleDevtoolsToolCall("Runtime.evaluate", { targetId: "nav-race-keep", expression: "location.href" });
-    expect(result.result).toBe("https://html.duckduckgo.com/html/?q=x");
-    expect(evalCount).toBe(2); // retried on the same live page
+    // User JS may have side effects: it runs exactly once. The navigation is
+    // reported instead of a second run.
+    expect(result).toMatchObject({ navigated: true, result: null });
+    expect(evalCount).toBe(1);
     expect(attachToExistingTarget).not.toHaveBeenCalled();
 
     // Still drivable and closable afterwards.
@@ -824,7 +844,7 @@ describe("handleDevtoolsToolCall", () => {
     const { getTargetState, listTargets } = await import("../src/devtools.js");
     const state = await getTargetState("D3C6B5CA23347A254126A71269AFB156");
 
-    expect(attachToExistingTarget).toHaveBeenCalledWith("D3C6B5CA23347A254126A71269AFB156");
+    expect(attachToExistingTarget).toHaveBeenCalledWith("D3C6B5CA23347A254126A71269AFB156", { allowedBackends: null });
     expect(state.adopted).toBe(true);
     expect(state.ownership).toBe("user");
     expect(state.backend).toBe("mac laptop2");
@@ -1532,7 +1552,8 @@ describe("window & focus & raw passthrough tools", () => {
 
     expect(activated).toMatchObject({ activated: true, backend: "chromium", ownership: "agent" });
     expect(window).toMatchObject({ windowId: 7, bounds: { windowState: "normal" } });
-    expect(set).toMatchObject({ bounds: { width: 1280, height: 900, windowState: "normal" } });
+    // bounds is read back from the window after the set; requested echoes the input.
+    expect(set).toMatchObject({ requested: { width: 1280, height: 900 }, bounds: { windowState: "normal" } });
     const sent = browserSession.send.mock.calls.map((call) => call[0]);
     expect(sent).toContain("Target.activateTarget");
     expect(sent).toContain("Browser.getWindowForTarget");
@@ -1928,6 +1949,10 @@ describe("plan 59 §9a: discovery freshness, nav visibility, attach cause, outpu
       tabs: [{ targetId: "relay-offline-1", url: "https://mail.example/", title: "Inbox", type: "page" }],
     };
     relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    // Target.getTargets reads relay tabs through freshTabList (cached list, one
+    // bounded refresh when stale); for a disconnected browser that is the cache.
+    const freshTabList = vi.spyOn(relayServer, "freshTabList")
+      .mockImplementation(async (name) => (name === "user-browser" ? entry.tabs.slice() : []));
     relayServer.isPaired = () => true;    // still paired (registry kept)
     relayServer.isConnected = () => false; // but the browser is NOT reachable
 
@@ -1946,6 +1971,7 @@ describe("plan 59 §9a: discovery freshness, nav visibility, attach cause, outpu
       expect(row.stale).toMatch(/offline/i);
     } finally {
       relayServer.getEntry = originalGetEntry;
+      freshTabList.mockRestore();
       relayServer.isPaired = originalIsPaired;
       relayServer.isConnected = originalIsConnected;
     }
@@ -1963,6 +1989,10 @@ describe("plan 59 §9a: discovery freshness, nav visibility, attach cause, outpu
       tabs: [{ targetId: "relay-live-1", url: "https://mail.example/", title: "Inbox", type: "page" }],
     };
     relayServer.getEntry = (name) => (name === "user-browser" ? entry : undefined);
+    // Target.getTargets reads relay tabs through freshTabList (cached list, one
+    // bounded refresh when stale); for a disconnected browser that is the cache.
+    const freshTabList = vi.spyOn(relayServer, "freshTabList")
+      .mockImplementation(async (name) => (name === "user-browser" ? entry.tabs.slice() : []));
     relayServer.isPaired = () => true;
     relayServer.isConnected = () => true;
 
@@ -1979,6 +2009,7 @@ describe("plan 59 §9a: discovery freshness, nav visibility, attach cause, outpu
       expect(row.stale).toBeUndefined();
     } finally {
       relayServer.getEntry = originalGetEntry;
+      freshTabList.mockRestore();
       relayServer.isPaired = originalIsPaired;
       relayServer.isConnected = originalIsConnected;
     }
