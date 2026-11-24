@@ -5,7 +5,11 @@ export const DUCKDUCKGO_INSTANT_ANSWER_URL = "https://api.duckduckgo.com/";
 export function parseDuckDuckGoInstantAnswers(payload) {
   const text = cleanWhitespace(payload?.Answer || payload?.AbstractText || payload?.Definition);
   if (!text) return [];
-  const url = cleanWhitespace(payload?.AbstractURL || payload?.AbstractSource || "https://duckduckgo.com/");
+  // AbstractSource is a site NAME ("Wikipedia"), never a link — only real
+  // http(s) URLs may populate `url`.
+  const url = [payload?.AbstractURL, payload?.Redirect]
+    .map((candidate) => cleanWhitespace(candidate))
+    .find((candidate) => /^https?:\/\//i.test(candidate)) || "";
   return dedupeDirectAnswers([{ source: "instant_answer", text, url }]);
 }
 

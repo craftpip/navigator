@@ -34,20 +34,11 @@ export class YahooEngine extends BrowserSearchDriver {
   homeUrl = "https://search.yahoo.com/";
   inputSelectors = ["input[name='p']", "input#yschsp"];
   resultSelectors = RESULT_SELECTORS;
+  extractPage = EXTRACT_PAGE;
+  label = "Yahoo";
+  blockMarkers = { text: /request blocked/i };
 
   searchUrl(query) {
     return `https://search.yahoo.com/search?p=${encodeURIComponent(query)}`;
-  }
-
-  async assertNotBlocked(page) {
-    const text = await page.evaluate(() => document.body?.innerText || document.body?.textContent || "");
-
-    if (/captcha|unusual traffic|request blocked|are you human|verify you(?:'|’)?re a human/i.test(text)) {
-      throw new Error("Yahoo blocked this request with a CAPTCHA/verification page");
-    }
-  }
-
-  async extract(page) {
-    return this.extractViaEvaluate(page, EXTRACT_PAGE);
   }
 }

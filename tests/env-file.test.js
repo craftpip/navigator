@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,8 +15,10 @@ import {
 } from "../src/env-file.js";
 
 describe("env-file", () => {
+  // Restore NAVIGATOR_ENV_FILE to the suite default (vitest.config.js
+  // test.env) rather than deleting it: unset, it means <cwd>/.env.
   afterEach(() => {
-    delete process.env.NAVIGATOR_ENV_FILE;
+    vi.unstubAllEnvs();
   });
 
   describe("parseEnvFile", () => {
@@ -95,8 +97,9 @@ describe("env-file", () => {
 
   describe("getEnvFilePath", () => {
     it("defaults to cwd/.env and honors NAVIGATOR_ENV_FILE", () => {
+      vi.stubEnv("NAVIGATOR_ENV_FILE", undefined);
       expect(getEnvFilePath()).toBe(path.join(process.cwd(), ".env"));
-      process.env.NAVIGATOR_ENV_FILE = "/tmp/custom.env";
+      vi.stubEnv("NAVIGATOR_ENV_FILE", "/tmp/custom.env");
       expect(getEnvFilePath()).toBe("/tmp/custom.env");
     });
   });

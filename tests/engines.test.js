@@ -418,6 +418,29 @@ describe("browser driver block detection", () => {
     }
   });
 
+  it("brave throws on a bot-check page that still renders #results", async () => {
+    const dom = domFromHtml('<main id="search-page"><div id="results"></div><div class="captcha">Please verify you are human</div></main>');
+    try {
+      const driver = getEngineDriver("brave", {});
+      const page = makeFakePage(dom, "https://search.brave.com/search?q=test");
+      await expect(driver.assertNotBlocked(page)).rejects.toThrow(/blocked/);
+      await expect(driver.extract(page)).rejects.toThrow(/blocked/);
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it("brave passes on a normal results page", async () => {
+    const dom = domFromHtml('<div id="results"><div class="snippet" data-type="web"><a href="https://b.example"><div class="title">b</div></a></div></div>');
+    try {
+      const driver = getEngineDriver("brave", {});
+      const page = makeFakePage(dom, "https://search.brave.com/search?q=test");
+      await expect(driver.assertNotBlocked(page)).resolves.toBeUndefined();
+    } finally {
+      dom.window.close();
+    }
+  });
+
   it("startpage passes on a normal results page", async () => {
     const dom = domFromHtml('<main><div class="result"><a class="result-link" href="https://s.example"><h2 class="wgl-title">s</h2></a></div></main>');
     try {
@@ -540,20 +563,20 @@ describe("normalizeUrl", () => {
 });
 
 describe("normalizeQueryText", () => {
-  it("humanizes LLM-style queries: lowercase and strips punctuation", () => {
-    expect(normalizeQueryText("What Are The Latest AI News?")).toBe("what are the latest ai news");
+  it("passes search syntax through unchanged: case, operators, phrases, paths", () => {
+    expect(normalizeQueryText("What Are The Latest AI News?")).toBe("What Are The Latest AI News?");
+    expect(normalizeQueryText('site:github.com "exact phrase" filetype:pdf')).toBe('site:github.com "exact phrase" filetype:pdf');
+    expect(normalizeQueryText("frontend/backend C:\\temp std::vector")).toBe("frontend/backend C:\\temp std::vector");
+    expect(normalizeQueryText("don't \"best\" pizza")).toBe("don't \"best\" pizza");
   });
 
-  it("removes forward slashes and backslashes", () => {
-    expect(normalizeQueryText("frontend/backend C:\\temp")).toBe("frontend backend c temp");
-  });
-
-  it("removes quotes and apostrophes", () => {
-    expect(normalizeQueryText("don't \"best\" pizza")).toBe("dont best pizza");
+  it("only removes quotes that wrap the whole query", () => {
+    expect(normalizeQueryText('"best pizza"')).toBe("best pizza");
+    expect(normalizeQueryText('"a" OR "b"')).toBe('"a" OR "b"');
   });
 
   it("keeps meaning-bearing symbols intact", () => {
-    expect(normalizeQueryText("C++ vs C# node.js")).toBe("c++ vs c# node.js");
+    expect(normalizeQueryText("C++ vs C# node.js")).toBe("C++ vs C# node.js");
   });
 
   it("collapses whitespace", () => {

@@ -42,21 +42,15 @@ export class DuckDuckGoEngine extends BrowserSearchDriver {
   homeUrl = "https://duckduckgo.com/";
   inputSelectors = [INPUT_SELECTOR];
   resultSelectors = RESULT_SELECTORS;
+  extractPage = EXTRACT_PAGE;
+  label = "DuckDuckGo";
+  blockMarkers = { text: /anomaly-modal|puzzl|isn(?:'|’)t quite right/i };
 
   searchUrl(_query) {
     return "https://duckduckgo.com/";
   }
 
-  async assertNotBlocked(page) {
-    const text = await page.evaluate(() => document.body?.innerText || document.body?.textContent || "");
-    const pageUrl = page.url();
-
-    if (/anomaly-modal|puzzl|unusual traffic|isn't quite right/i.test(text) || /\/sorry\//.test(pageUrl)) {
-      throw new Error("DuckDuckGo blocked this request with a bot/anomaly page");
-    }
-  }
-
-  async submit(page, query) {
+  async load(page, query) {
     const { config } = this;
     const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
 
@@ -70,15 +64,15 @@ export class DuckDuckGoEngine extends BrowserSearchDriver {
       await page.waitForSelector(FORM_SUBMIT_SELECTOR, {
         timeout: Math.min(config.browserOpTimeoutMs, 8000)
       });
-      await page.evaluate((q) => {
-        const input = document.querySelector(FORM_SUBMIT_SELECTOR);
+      await page.evaluate((q, inputSelector) => {
+        const input = document.querySelector(inputSelector);
         if (input) {
           input.value = q;
           input.dispatchEvent(new Event("input", { bubbles: true }));
           const form = input.closest("form");
           if (form) form.submit();
         }
-      }, query);
+      }, query, FORM_SUBMIT_SELECTOR);
       await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: config.browserOpTimeoutMs }).catch(() => {});
     } catch {
       // Fallback: navigate directly to search URL
@@ -89,9 +83,5 @@ export class DuckDuckGoEngine extends BrowserSearchDriver {
     }
 
     await this.waitForAnySelector(page, this.resultSelectors, config.browserOpTimeoutMs);
-  }
-
-  async extract(page) {
-    return this.extractViaEvaluate(page, EXTRACT_PAGE);
   }
 }

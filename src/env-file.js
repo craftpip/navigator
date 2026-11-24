@@ -13,11 +13,11 @@ export function parseEnvFile(text) {
   String(text || "")
     .split("\n")
     .forEach((raw, index) => {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(raw);
+      const match = ENV_LINE.exec(raw);
       const entry = { raw, index, key: null, value: null, hasValue: false };
       if (match) {
-        const key = match[1];
-        const value = stripQuotes(stripInlineComment(match[2]));
+        const key = match[2];
+        const value = parseEnvValue(match[3]);
         entry.key = key;
         entry.value = value;
         entry.hasValue = true;
@@ -28,18 +28,40 @@ export function parseEnvFile(text) {
   return { lines, keyToLine };
 }
 
-function stripInlineComment(value) {
-  const idx = value.search(/\s+#/);
-  return idx === -1 ? value : value.slice(0, idx);
-}
+// `[export ]KEY = value` — group 1 is everything up to and including `=`
+// (kept verbatim on update), group 2 the key, group 3 the raw value.
+const ENV_LINE = /^(\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)(.*?)\s*$/;
+const DOUBLE_QUOTE_ESCAPES = { "\\": "\\", n: "\n", t: "\t", '"': '"' };
 
-function stripQuotes(value) {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return trimmed.slice(1, -1).replace(/\\(\\|n|t|")/g, (_, ch) => ch === "\\" ? "\\" : ch === "n" ? "\n" : ch === "t" ? "\t" : '"');
+/**
+ * Parse the right-hand side of a .env line. Quoting is resolved FIRST: a
+ * quoted value ends at its closing quote, so a `#` inside quotes is data, and
+ * anything after the closing quote (e.g. ` # comment`) is ignored. Only an
+ * unquoted value has an inline comment (` #…`) stripped.
+ */
+export function parseEnvValue(rawValue) {
+  const text = String(rawValue || "").trim();
+  const quote = text[0];
+  if (quote === '"') {
+    let out = "";
+    for (let i = 1; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === "\\" && i + 1 < text.length && Object.hasOwn(DOUBLE_QUOTE_ESCAPES, text[i + 1])) {
+        out += DOUBLE_QUOTE_ESCAPES[text[i + 1]];
+        i += 1;
+        continue;
+      }
+      if (ch === '"') return out;
+      out += ch;
+    }
+    return text; // unterminated quote: keep the value as written
   }
-  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
-  return trimmed;
+  if (quote === "'") {
+    const close = text.indexOf("'", 1);
+    return close === -1 ? text : text.slice(1, close);
+  }
+  const comment = text.search(/\s#/);
+  return (comment === -1 ? text : text.slice(0, comment)).trim();
 }
 
 function serializeValue(raw) {
@@ -58,7 +80,9 @@ export function upsertEnvText(text, updates) {
   for (const [key, value] of Object.entries(updates)) {
     const existing = keyToLine.get(key);
     if (existing && existing.hasValue) {
-      const newRaw = existing.raw.replace(/^(.*?=).*$/, `$1${serializeValue(value)}`);
+      // Concatenate, never String.replace with a template: replacement
+      // patterns ($&, $1, $$) inside the value would be expanded.
+      const newRaw = `${ENV_LINE.exec(existing.raw)[1]}${serializeValue(value)}`;
       if (newRaw !== existing.raw) {
         existing.raw = newRaw;
         existing.value = String(value);

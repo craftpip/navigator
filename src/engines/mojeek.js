@@ -30,22 +30,11 @@ export class MojeekEngine extends BrowserSearchDriver {
   homeUrl = "https://www.mojeek.com/";
   inputSelectors = ["input[name='q']", "input.js-search-input"];
   resultSelectors = RESULT_SELECTORS;
+  extractPage = EXTRACT_PAGE;
+  label = "Mojeek";
+  blockMarkers = { text: /403\s*-?\s*forbidden|automated queries|complete this challenge/i };
 
   searchUrl(query) {
     return `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`;
-  }
-
-  async assertNotBlocked(page) {
-    const { title, text } = await page.evaluate(() => ({
-      title: document.title || "",
-      text: document.body?.innerText || document.body?.textContent || ""
-    }));
-    if (/403\s*-?\s*forbidden|automated queries|captcha|complete this challenge/i.test(`${title}\n${text}`)) {
-      throw new Error("Mojeek blocked this request as automated traffic (CAPTCHA)");
-    }
-  }
-
-  async extract(page) {
-    return this.extractViaEvaluate(page, EXTRACT_PAGE);
   }
 }

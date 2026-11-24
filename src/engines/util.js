@@ -21,42 +21,39 @@ export function readableErrorMessage(error, maxLen = 300) {
   return String(error?.message || error || "").slice(0, maxLen);
 }
 
-export function normalizeQueryText(input) {
-  let text = String(input || "").trim();
-  if (!text) return "";
+const WRAPPING_QUOTE_PAIRS = [
+  ['"', '"'],
+  ["'", "'"],
+  ["`", "`"],
+  ["“", "”"],
+  ["‘", "’"]
+];
 
-  const quotePairs = [
-    ['"', '"'],
-    ["'", "'"],
-    ["`", "`"],
-    ["“", "”"],
-    ["‘", "’"]
-  ];
-  const quoteChars = new Set(["\"", "'", "`", "“", "”", "‘", "’"]);
+/**
+ * Canonical form of a search query: trimmed, whitespace collapsed, and quotes
+ * that wrap the WHOLE query removed (an LLM quoting its own query string).
+ * Everything else is the user's search syntax and is passed through as-is:
+ * case, operators (site:, filetype:, -term, OR), inner "phrase" quotes,
+ * apostrophes, URLs, paths, `::` and punctuation.
+ */
+export function normalizeQueryText(input) {
+  let text = String(input || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
 
   let changed = true;
   while (changed && text.length > 1) {
     changed = false;
-    for (const [open, close] of quotePairs) {
-      if (text.startsWith(open) && text.endsWith(close) && text.length > open.length + close.length) {
-        text = text.slice(open.length, text.length - close.length).trim();
-        changed = true;
-      }
+    for (const [open, close] of WRAPPING_QUOTE_PAIRS) {
+      if (text.length <= open.length + close.length || !text.startsWith(open) || !text.endsWith(close)) continue;
+      const inner = text.slice(open.length, text.length - close.length);
+      // `"a" OR "b"` starts and ends with a quote but is two phrases, not one
+      // wrapped query: only unwrap when the inner text has no further quote of
+      // the same kind.
+      if (inner.includes(open) || inner.includes(close)) continue;
+      text = inner.trim();
+      changed = true;
     }
   }
-
-  if (text.length > 1 && quoteChars.has(text[0]) && !quoteChars.has(text[text.length - 1])) {
-    text = text.slice(1).trimStart();
-  }
-
-  // Humanize: make the query look like a natural human search instead of an LLM prompt.
-  // Lowercase everything, drop "unused" symbols (backslashes, forward slashes, quotes),
-  // and strip trailing punctuation. Meaning-bearing symbols (+ # .) are left intact.
-  text = text.toLowerCase();
-  text = text.replace(/[\\/:;]/g, " ");
-  text = text.replace(/["'`“”‘’]/g, "");
-  text = text.replace(/[.,!?]+$/g, "");
-  text = text.replace(/\s+/g, " ").trim();
 
   return text;
 }
@@ -81,9 +78,14 @@ function decodeBingRedirectUrl(u) {
 export function normalizeUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
-    if (parsed.hostname.includes("google.") && parsed.pathname === "/url") {
-      const redirect = parsed.searchParams.get("q");
-      if (redirect) return redirect;
+    if (isGoogleHostname(parsed.hostname) && (parsed.pathname === "/url" || parsed.pathname === "/goto")) {
+      // `/url?q=<target>` (and `/url?url=<target>`) carry the target in
+      // clear; `/goto?url=<token>` carries an opaque token the Google driver
+      // resolves over HTTP — only unwrap when the parameter is a real URL.
+      for (const param of ["q", "url"]) {
+        const redirect = parsed.searchParams.get(param);
+        if (redirect && /^https?:\/\//i.test(redirect)) return redirect;
+      }
     }
     if (parsed.hostname.includes("duckduckgo.") && parsed.pathname === "/l/") {
       const redirect = parsed.searchParams.get("uddg");
@@ -106,6 +108,19 @@ export function normalizeUrl(rawUrl) {
     return parsed.toString();
   } catch {
     return "";
+  }
+}
+
+function isGoogleHostname(hostname) {
+  return /(^|\.)google\.[a-z.]+$/i.test(String(hostname || ""));
+}
+
+/** True for any google.* host (www.google.com, google.co.uk, …). */
+export function isGoogleHost(rawUrl) {
+  try {
+    return isGoogleHostname(new URL(rawUrl).hostname);
+  } catch {
+    return false;
   }
 }
 

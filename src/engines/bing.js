@@ -34,21 +34,10 @@ export class BingEngine extends BrowserSearchDriver {
   homeUrl = "https://www.bing.com/";
   inputSelectors = ["textarea[name='q']", "input[name='q']", "input#sb_form_q"];
   resultSelectors = RESULT_SELECTORS;
+  extractPage = EXTRACT_PAGE;
+  label = "Bing";
 
   searchUrl(query) {
     return `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
-  }
-
-  async assertNotBlocked(page) {
-    const text = await page.evaluate(() => document.body?.innerText || document.body?.textContent || "");
-    const pageUrl = page.url();
-
-    if (/captcha|unusual traffic|verify you(?:'|’)?re a human|are you( a)? human/i.test(text) || /\/sorry\//.test(pageUrl)) {
-      throw new Error("Bing blocked this request with a CAPTCHA/verification page");
-    }
-  }
-
-  async extract(page) {
-    return this.extractViaEvaluate(page, EXTRACT_PAGE);
   }
 }

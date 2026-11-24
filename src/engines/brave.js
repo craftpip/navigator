@@ -1,11 +1,12 @@
 import { BrowserSearchDriver } from "./browser-driver.js";
 
+// Only selectors that exist on a real results page. The bare containers
+// (#results, #search-page) also render on Brave's bot-check page, which made a
+// CAPTCHA wall look like a successful empty search.
 const RESULT_SELECTORS = [
-  "#results .snippet",
+  "#results .snippet[data-type='web']",
   ".snippet[data-type='web']",
-  "#results",
-  "#search-page",
-  "main#search-page"
+  "#results > div.snippet"
 ];
 
 const EXTRACT_PAGE = () => {
@@ -43,12 +44,11 @@ export class BraveEngine extends BrowserSearchDriver {
   homeUrl = "https://search.brave.com/";
   inputSelectors = ["input#searchbox", "input[name='q']", "input[type='search']"];
   resultSelectors = RESULT_SELECTORS;
+  extractPage = EXTRACT_PAGE;
+  label = "Brave";
+  blockMarkers = { text: /proof of work|confirm (?:that )?you(?:'|’)?re (?:a )?human|automated (?:queries|requests|traffic)/i };
 
   searchUrl(query) {
     return `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
-  }
-
-  async extract(page) {
-    return this.extractViaEvaluate(page, EXTRACT_PAGE);
   }
 }

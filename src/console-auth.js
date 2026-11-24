@@ -75,16 +75,31 @@ export function clearConsoleCookieHeader() {
   return `${CONSOLE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
 }
 
+/** Client address for rate limiting: the socket peer, never X-Forwarded-For (spoofable). */
+export function consoleClientIp(req) {
+  return String(req?.socket?.remoteAddress || "unknown").slice(0, 100);
+}
+
 /**
  * Is this request logged in to the console? Accepts the session cookie, or the
  * password itself in the X-Console-Password header (used by ./navigator.js).
- * Returns { ok, exp } — exp is the cookie expiry (0 for header auth).
+ * Returns { ok, exp, limited } — exp is the cookie expiry (0 for header auth).
+ *
+ * A header password is a password guess exactly like the login form, so it
+ * shares the form's per-IP failure tracker: wrong guesses count, and once the
+ * IP is rate limited the header is not even compared (`limited: true`).
  */
 export function checkConsoleAuth(req, password, now = Date.now()) {
   if (!password) return { ok: true, exp: 0 };
   const headerPassword = req.headers?.[CONSOLE_PASSWORD_HEADER];
-  if (typeof headerPassword === "string" && headerPassword && safeEqual(headerPassword, password)) {
-    return { ok: true, exp: 0 };
+  if (typeof headerPassword === "string" && headerPassword) {
+    const ip = consoleClientIp(req);
+    if (loginRateLimited(ip, now)) return { ok: false, exp: 0, limited: true };
+    if (safeEqual(headerPassword, password)) {
+      clearLoginFailures(ip);
+      return { ok: true, exp: 0 };
+    }
+    recordLoginFailure(ip, now);
   }
   const exp = verifyConsoleToken(parseCookies(req.headers?.cookie)[CONSOLE_COOKIE_NAME], password, now);
   return { ok: exp > 0, exp };
