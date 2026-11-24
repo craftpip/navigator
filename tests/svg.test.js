@@ -136,11 +136,15 @@ describe("svg.js independent transformer", () => {
     const linkG = svg.split('<g id="el-1"')[1].split("</g>")[0];
     expect(linkG).toContain("<tspan");
     expect(linkG).toContain(">History<");
-    // lone line in tall button -> vertically centered
+    // lone line in tall button -> vertically centered. y is the alphabetic
+    // BASELINE (true-baseline model, subpixel float), not the text top: a glyph
+    // box centered on the 100..144 box's middle (122) puts the baseline below
+    // the middle by (ascent - descent) / 2, i.e. within half a font size (14px).
+    // A top-aligned line would sit at ~114.
     const btnG = svg.split('<g id="el-2"')[1].split("</g>")[0];
-    const ty = Number(btnG.match(/<text[^>]* y="(\d+)"/)[1]);
-    expect(ty).toBeGreaterThan(100); // below top padding of y=100 box
-    expect(ty).toBeLessThan(122); // roughly centered in 100..144
+    const ty = Number(btnG.match(/<text[^>]* y="([\d.]+)"/)[1]);
+    expect(ty).toBeGreaterThan(122);
+    expect(ty).toBeLessThan(122 + 14 / 2);
   });
 
   it("buildSvg falls back to one line when box fits less than one wrapped line (flex min-width)", () => {

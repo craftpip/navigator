@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { getBrowserWarmupEngines, getEngineMetadata } from "./engines/index.js";
 import { getTabTimings } from "./tab-timers.js";
 import { relayServer } from "./relay-server.js";
+import { redactUrlKeys } from "./console-auth.js";
 
 /**
  * User-facing display filter for relay (user) browser listings
@@ -200,7 +201,9 @@ const BROWSER_LOG_FMT = {
   "chromium.ready": () => ""
 };
 
-function logBrowserEvent(label, payload) {
+function logBrowserEvent(label, rawPayload) {
+  // Endpoint URLs can carry credentials (`?key=`); never print them.
+  const payload = redactUrlKeys(rawPayload);
   const emoji = BROWSER_LOG_EMOJI[label] || "●";
   const readable = BROWSER_LOG_LABEL[label] || label;
   const fmt = BROWSER_LOG_FMT[label];
@@ -766,10 +769,22 @@ export class BrowserManager {
     return browserOwnership(this._findAddOnByName(name)?.type);
   }
 
+  /**
+   * Open one page on a connected add-on browser. A relay (navigator-cdp) page
+   * is a tab in the user's own window. Every other add-on page is an agent
+   * page and gets its OWN window, like the built-in's createWindowPage: tabs
+   * sharing a window hide each other (visibilityState "hidden", timers
+   * throttled to 1/s, requestAnimationFrame never fires), so only the newest
+   * tab would behave like a real foreground page.
+   */
+  _openAddOnPage(browser, addOnEntry) {
+    return addOnEntry.type === "navigator-cdp" ? browser.newPage() : browser.newPage({ type: "window" });
+  }
+
   async _connectAddOnPage(addOnEntry) {
     const browser = await this._ensureAddOnConnection(addOnEntry);
     try {
-      return await browser.newPage();
+      return await this._openAddOnPage(browser, addOnEntry);
     } catch (err) {
       const msg = String(err?.message || "");
       if (!msg.includes("TargetAlreadyLoaded")) throw err;
@@ -810,7 +825,7 @@ export class BrowserManager {
         console.error(`⚠️  ${addOnEntry.name} eviction failed: ${String(evictErr?.message || evictErr)}`);
         throw err;
       }
-      return await browser.newPage();
+      return await this._openAddOnPage(browser, addOnEntry);
     }
   }
 
@@ -1021,11 +1036,16 @@ export class BrowserManager {
    * @returns {Promise<{page: import("puppeteer-core").Page, backend: string} | null>}
    *   null when `targetId` doesn't match any existing tab on a connected add-on.
    */
-  async attachToExistingTarget(targetId) {
+  async attachToExistingTarget(targetId, { allowedBackends = null } = {}) {
     const tid = String(targetId || "").trim();
     if (!tid) return null;
 
+    // `allowedBackends` (a Set of lower-case names, or null) is the caller's
+    // per-key allow-list: browsers outside it are never searched, so adopting
+    // can never attach the debugger to a tab the key may not drive.
+    const allowed = allowedBackends instanceof Set ? allowedBackends : null;
     const candidates = this._effectiveAddOns().filter((b) => {
+      if (allowed && !allowed.has(String(b.name || "").toLowerCase())) return false;
       if (b.type === "navigator-cdp") return b.connected || b.status === "connected";
       // Plain CDP add-ons (cloakbrowser, lightpanda) have no relay "connected"
       // status — include them when reachable (live puppeteer connection, or a
@@ -1062,6 +1082,19 @@ export class BrowserManager {
         );
         if (!res || !res.found || !res.attached) {
           lastFailure = { backend: gotBackend, reason: res?.reason || "attach not available" };
+          continue;
+        }
+      }
+
+      // Plain CDP add-ons know all their targets on connect. An id that is not
+      // among them is not on this browser — answer now instead of polling
+      // pages() for the full window below.
+      if (entry.type !== "navigator-cdp") {
+        const known = browser.targets().some((t) => {
+          try { return String(t._targetId ?? t._getTargetInfo?.()?.targetId ?? "") === tid; } catch { return false; }
+        });
+        if (!known) {
+          lastFailure = lastFailure || { backend: gotBackend, reason: "target not found" };
           continue;
         }
       }
@@ -1110,6 +1143,18 @@ export class BrowserManager {
     return page;
   }
 
+  /**
+   * A search-engine page on the `search`-role browser. Role resolution (and
+   * the add-on page creation path, own window per page) is
+   * resolveBrowserParam's; a down role browser falls back to Chromium.
+   */
+  async _newSearchPage() {
+    const { page } = await resolveBrowserParam({}, this.config, this, { roles: ["search"] });
+    page.setDefaultNavigationTimeout(this.config.browserOpTimeoutMs);
+    page.setDefaultTimeout(this.config.browserOpTimeoutMs);
+    return page;
+  }
+
   async newPage(options = {}) {
     // Explicit browser name wins. "chromium" → the built-in; any other name
     // must be a configured add-on entry. Unknown names throw.
@@ -1124,10 +1169,11 @@ export class BrowserManager {
       return this._connectAddOnPage(addOn);
     }
 
-    // Search engines always run on Chromium (the only built-in). API engines
-    // never open a page — `_poolEngine(engine)` returns null for them.
+    // Search engines run on the browser holding the `search` role (BROWSERS
+    // order), falling back to Chromium. API engines never open a page —
+    // `_poolEngine(engine)` returns null for them.
     if (options?.engine) {
-      return this._newChromiumPage();
+      return this._newSearchPage();
     }
 
     // No browser and no engine → Chromium (always present).

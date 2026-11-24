@@ -1,7 +1,8 @@
 // src/svg/extractor.js — browser-side DOM extraction (runs inside page.evaluate)
 // Owner: Agent A — DOM/pixels → data. Must stay self-contained (no imports inside function) — serialized via page.evaluate.
 
-export function svgExtractor(limit) {
+// opts.viewportOnly (plan 65): collect only elements inside the viewport clip.
+export function svgExtractor(limit, opts) {
   function cssPathSvg(element) {
     if (!(element instanceof Element)) return null;
     const parts = [];
@@ -185,7 +186,25 @@ export function svgExtractor(limit) {
   const nodes = [];
   const seen = new Set();
   let index = 0;
+  // A viewport capture (fullPage:false) is clipped to the viewport afterwards
+  // by capturePageAsSvg (src/svg/capture.js). Collecting page-wide would spend
+  // the budget and the per-category caps below the fold, and the clip would
+  // then discard almost everything. With viewportOnly, candidates outside that
+  // clip are skipped before they count. Same test as the capture filter:
+  // document coordinates, viewport size, 50px margin. (Duplicated rather than
+  // imported: this function is serialized into the page.)
+  const viewportOnly = Boolean(opts && opts.viewportOnly);
+  const CLIP_MARGIN = 50;
+  function insideClip(el) {
+    if (!viewportOnly) return true;
+    const r = el.getBoundingClientRect();
+    const x = r.x + scrollX;
+    const y = r.y + scrollY;
+    return x + r.width > -CLIP_MARGIN && x < window.innerWidth + CLIP_MARGIN &&
+      y + r.height > -CLIP_MARGIN && y < window.innerHeight + CLIP_MARGIN;
+  }
   function addNodeSvg(el, kind) {
+    if (!insideClip(el)) return;
     const key = cssPathSvg(el);
     if (!key || seen.has(key)) return;
     seen.add(key);
@@ -385,6 +404,7 @@ export function svgExtractor(limit) {
   function capped(bucket, el, kind) {
     if (nodes.length >= limit) return;
     if (used[bucket] >= caps[bucket]) return;
+    if (!insideClip(el)) return; // an off-clip element must not use up a cap slot
     used[bucket]++;
     addNodeSvg(el, kind);
   }

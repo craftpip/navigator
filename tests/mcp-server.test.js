@@ -59,6 +59,31 @@ vi.mock("../src/env-file.js", async (importOriginal) => {
   return { ...actual, writeEnvFile: vi.fn((...args) => actual.writeEnvFile(...args)) };
 });
 
+/**
+ * A throwaway .env that the config manager reads and writes for one test.
+ * dispose() RESTORES the previous NAVIGATOR_ENV_FILE instead of deleting it:
+ * with the variable unset, getEnvFilePath() falls back to <cwd>/.env, which is
+ * the live repo .env when the suite runs from the bind-mounted /app. Every
+ * test that PUTs /console/config or POSTs /console/vnc must hold one, or its
+ * write lands in the shared default (vitest.config.js test.env) and leaks
+ * BROWSERS etc. into later loadConfig() calls (config.test.js).
+ */
+class TempEnvFile {
+  constructor(prefix, text) {
+    this.dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    this.path = path.join(this.dir, ".env");
+    if (text !== undefined) fs.writeFileSync(this.path, text);
+    this.previous = process.env.NAVIGATOR_ENV_FILE;
+    process.env.NAVIGATOR_ENV_FILE = this.path;
+  }
+
+  dispose() {
+    if (this.previous === undefined) delete process.env.NAVIGATOR_ENV_FILE;
+    else process.env.NAVIGATOR_ENV_FILE = this.previous;
+    try { fs.rmSync(this.dir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 const MCP_PORT = 18990;
 const MCP_BASE = `http://localhost:${MCP_PORT}`;
 
@@ -810,10 +835,17 @@ describe("mcp-server HTTP endpoints", () => {
       dbApi.initDb();
     });
 
+    let tempEnv;
+
     beforeEach(async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "k4-pipe-"));
       dbApi.closeDb();
       dbApi.initDb(tmpDir);
+      tempEnv = new TempEnvFile("k4-pipe-env-", "# test env\n");
+    });
+
+    afterEach(() => {
+      tempEnv.dispose();
     });
 
     function fakeWs(open = true) {
@@ -853,19 +885,18 @@ describe("mcp-server HTTP endpoints", () => {
   });
 
   describe("PUT /console/config — config manager", () => {
+    let tempEnv;
     let envDir;
     let envFile;
 
     beforeEach(() => {
-      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-env-"));
-      envFile = path.join(envDir, ".env");
-      fs.writeFileSync(envFile, "# test env\nMAX_CONCURRENT_PAGE_OPS=30\nHEADLESS=true\n");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      tempEnv = new TempEnvFile("navigator-console-env-", "# test env\nMAX_CONCURRENT_PAGE_OPS=30\nHEADLESS=true\n");
+      envDir = tempEnv.dir;
+      envFile = tempEnv.path;
     });
 
     afterEach(() => {
-      delete process.env.NAVIGATOR_ENV_FILE;
-      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+      tempEnv.dispose();
     });
 
     it("hot-applies a valid update and persists to .env with backup", async () => {
@@ -1745,6 +1776,7 @@ describe("mcp-server HTTP endpoints", () => {
   });
 
   describe("PUT /console/config — browser-process hot-apply (plan 60 H4)", () => {
+    let tempEnv;
     let envDir;
     let envFile;
     let manager;
@@ -1755,10 +1787,9 @@ describe("mcp-server HTTP endpoints", () => {
     let origDisplay;
 
     beforeEach(async () => {
-      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h4-"));
-      envFile = path.join(envDir, ".env");
-      fs.writeFileSync(envFile, "# test env\nHEADLESS=true\n");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      tempEnv = new TempEnvFile("navigator-console-h4-", "# test env\nHEADLESS=true\n");
+      envDir = tempEnv.dir;
+      envFile = tempEnv.path;
       const browserMod = await import("../src/browser.js");
       manager = await browserMod.getBrowserManager.mock.results[0].value;
       vncMod = await import("../src/vnc-manager.js");
@@ -1772,7 +1803,7 @@ describe("mcp-server HTTP endpoints", () => {
     });
 
     afterEach(() => {
-      delete process.env.NAVIGATOR_ENV_FILE;
+      tempEnv.dispose();
       manager.config.headless = origHeadless;
       delete vncMod.vncManager.vncPort;
       if (origVncPort !== undefined) vncMod.vncManager.vncPort = origVncPort;
@@ -1780,7 +1811,6 @@ describe("mcp-server HTTP endpoints", () => {
       if (origNovncPort !== undefined) vncMod.vncManager.novncPort = origNovncPort;
       if (origDisplay === undefined) delete process.env.DISPLAY;
       else process.env.DISPLAY = origDisplay;
-      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
     });
 
     it("relaunches the built-in Chromium when a browser-process key is hot-applied", async () => {
@@ -1859,6 +1889,7 @@ describe("mcp-server HTTP endpoints", () => {
   });
 
   describe("GET /console/config — external .env key removal (plan 60 H5)", () => {
+    let tempEnv;
     let envDir;
     let envFile;
     let manager;
@@ -1867,9 +1898,9 @@ describe("mcp-server HTTP endpoints", () => {
     let origEnv;
 
     beforeEach(async () => {
-      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h5-"));
-      envFile = path.join(envDir, ".env");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      tempEnv = new TempEnvFile("navigator-console-h5-");
+      envDir = tempEnv.dir;
+      envFile = tempEnv.path;
       const browserMod = await import("../src/browser.js");
       manager = await browserMod.getBrowserManager.mock.results[0].value;
       vncMod = await import("../src/vnc-manager.js");
@@ -1886,14 +1917,13 @@ describe("mcp-server HTTP endpoints", () => {
     });
 
     afterEach(() => {
-      delete process.env.NAVIGATOR_ENV_FILE;
+      tempEnv.dispose();
       for (const [k, v] of Object.entries(origEnv)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
       if (origDisplay === undefined) delete process.env.DISPLAY;
       else process.env.DISPLAY = origDisplay;
-      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
     });
 
     // External .env edits are picked up by GET /console/config when the file's
@@ -1974,15 +2004,16 @@ describe("mcp-server HTTP endpoints", () => {
   });
 
   describe("GET /console/config — external .env reconcile failure containment (plan 60 H6)", () => {
+    let tempEnv;
     let envDir;
     let envFile;
     let manager;
     let origEnv;
 
     beforeEach(async () => {
-      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-h6-"));
-      envFile = path.join(envDir, ".env");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      tempEnv = new TempEnvFile("navigator-console-h6-");
+      envDir = tempEnv.dir;
+      envFile = tempEnv.path;
       const browserMod = await import("../src/browser.js");
       manager = await browserMod.getBrowserManager.mock.results[0].value;
       origEnv = {
@@ -1995,12 +2026,11 @@ describe("mcp-server HTTP endpoints", () => {
     });
 
     afterEach(() => {
-      delete process.env.NAVIGATOR_ENV_FILE;
+      tempEnv.dispose();
       for (const [k, v] of Object.entries(origEnv)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
-      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
     });
 
     // Reconcile reaches its last awaited step (the plan 60 H4 relaunch hook)
@@ -2164,14 +2194,14 @@ describe("mcp-server HTTP endpoints", () => {
   });
 
   describe("POST /console/vnc", () => {
+    let tempEnv;
     let envDir;
     let envFile;
 
     beforeEach(async () => {
-      envDir = fs.mkdtempSync(path.join(os.tmpdir(), "navigator-console-vnc-"));
-      envFile = path.join(envDir, ".env");
-      fs.writeFileSync(envFile, "HEADLESS=true\nENABLE_VNC=0\n");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      tempEnv = new TempEnvFile("navigator-console-vnc-", "HEADLESS=true\nENABLE_VNC=0\n");
+      envDir = tempEnv.dir;
+      envFile = tempEnv.path;
       const vncMod = await import("../src/vnc-manager.js");
       vncMod.vncManager.steps = [];
       vncMod.vncManager.status = "stopped";
@@ -2180,8 +2210,7 @@ describe("mcp-server HTTP endpoints", () => {
     });
 
     afterEach(() => {
-      delete process.env.NAVIGATOR_ENV_FILE;
-      try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+      tempEnv.dispose();
     });
 
     it("enable spawns the stack, relaunches headed and persists ENABLE_VNC=1", async () => {
@@ -2556,7 +2585,7 @@ describe("mcp-server HTTP endpoints", () => {
       expect(lastCall.queries).toEqual(["query 1", "query 2", "query 3", "query 4", "query 5", "query 6"]);
     });
 
-    it("renders per-query sections when multiple queries are searched", async () => {
+    it("renders per-query sections, listing each URL once, when multiple queries are searched", async () => {
       const searchMod = await import("../src/search.js");
       const makeResults = (prefix, count) =>
         Array.from({ length: count }, (_, i) => ({
@@ -2600,11 +2629,12 @@ describe("mcp-server HTTP endpoints", () => {
 
       expect(status).toBe(200);
       const text = body.result.content[0].text;
-      expect(text).toContain("**Queries:** god of war");
-      expect(text).toContain("**Results (5):**");
+      expect(text).toContain("**Queries:** god of war · life of pi");
+      expect(text).toContain("**Query:** god of war");
+      expect(text).toContain("**Results (5 new):**");
       expect(text).toContain("god of war Result 1");
       expect(text).toContain("_(queries: god of war)_");
-      expect(text).toContain("**Queries:** life of pi");
+      expect(text).toContain("**Query:** life of pi");
       expect(text).toContain("life of pi Result 5");
       expect(text).toContain("_(queries: life of pi)_");
     });
@@ -2843,8 +2873,11 @@ describe("mcp-server HTTP endpoints", () => {
       });
 
       expect(status).toBe(200);
+      // Pages are extracted at the hard cap (cached independent of maxChars)
+      // and truncated per request afterwards.
       expect(searchMod.browserOpenAndExtract).toHaveBeenCalledWith({
         url: "https://limits.example.com",
+        maxChars: 200000,
         includeSeoAnalysis: true,
         hintOverride: null,
         cachedHtml: null,
@@ -3691,8 +3724,11 @@ describe("mcp-server HTTP endpoints", () => {
       const text = body.result.content[0].text;
       expect(text).toContain("Target Crop");
       expect(text).toContain('xpath "//h2" → matched 1 of 1');
+      // The second argument carries the caller's browser allow-list so the
+      // target lookup enforces it; an unrestricted caller passes null.
       expect(devtoolsMod.captureTargetScreenshot).toHaveBeenCalledWith(
-        expect.objectContaining({ targetId: "crop-tab-1", xpath: "//h2" })
+        expect.objectContaining({ targetId: "crop-tab-1", xpath: "//h2" }),
+        { allowedMcpBrowsers: null }
       );
     });
 
@@ -4271,10 +4307,7 @@ describe("mcp-server HTTP endpoints", () => {
     });
 
     it("re-extracts after a hot config change", async () => {
-      const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-s10-env-"));
-      const envFile = path.join(envDir, ".env");
-      fs.writeFileSync(envFile, "# test env\n");
-      process.env.NAVIGATOR_ENV_FILE = envFile;
+      const tempEnv = new TempEnvFile("mcp-s10-env-", "# test env\n");
       try {
         const searchMod = await import("../src/search.js");
         const url = `https://example.com/s10-cfg-${Date.now()}`;
@@ -4307,8 +4340,7 @@ describe("mcp-server HTTP endpoints", () => {
         expect(r2.body.result.content[0].text).not.toContain("before config");
         expect(searchMod.browserOpenAndExtract).toHaveBeenCalledTimes(2);
       } finally {
-        delete process.env.NAVIGATOR_ENV_FILE;
-        try { fs.rmSync(envDir, { recursive: true, force: true }); } catch {}
+        tempEnv.dispose();
       }
     });
 

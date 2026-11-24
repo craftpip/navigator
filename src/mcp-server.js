@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
-import { DEFAULT_MAX_CHARS, parseApiKeys } from "./config.js";
+import { DEFAULT_MAX_CHARS, MAX_CHARS_HARD_CAP, parseApiKeys } from "./config.js";
 import { getBrowserManager, resolveBrowserParam, browserOwnership, builtinBrowserPrompt } from "./browser.js";
 import { relayServer } from "./relay-server.js";
 import { initCdpSharing, getCdpDiscoveryPayload, authorizeCdpKey, parseAllowedBrowsers, listShareableBrowserNames, cdpBaseUrl, recheckCdpPipes } from "./cdp-share.js";
@@ -30,13 +30,17 @@ import { transform as asciiTransform } from "./ascii.js";
 import { SAMPLE_PIXELS_CODE, asciiGridDims } from "./pixel-sampler.js";
 import { svgExtractor, capturePageAsSvg } from "./svg.js";
 import { rememberLink, getUrlForRefId, getLinkRefByUrl, getRememberedLinkRecord, clearLinkRefMemory } from "./ref-memory.js";
+import { LinkRefRewriter } from "./link-refs.js";
+import { normalizeResultEntries, truncateResultsText, formatOpenPageResponse, formatScreenshotResponse, formatCropResponse } from "./page-responses.js";
 import { SUPPORTED_ENGINES, getEngineMetadata } from "./engines/index.js";
+import { WebSearchRequest, formatSearchMarkdown, isCacheableSearchPayload, isFailedSearch, parseSearchLimit } from "./web-search-tool.js";
+import { McpSessionRegistry } from "./mcp-sessions.js";
 import { getAuthorizedMcpKey, getMcpApiKey, isAuthorizedMcpRequest, getTrustedApiKeys, isTrustedApiKey } from "./mcp-api-auth.js";
 import { findDomainHint, findMatchingHints, findMatchingManagedHints, getDomainHints, getHintRevision, loadRawDomainHints, saveDomainHints, validateHintRule, validateManagedHint, loadManagedHints, mutateManagedHints, getManagedHintsPath, collectPostProcessorRefs, fileSignature, WILDCARD_DOMAIN, ensureWildcardHint } from "./domain-hints.js";
 import { getPostProcessorModels } from "./post-processor.js";
 import { parseCropArgs } from "./crop.js";
 import { assertAllowedUrls } from "./url-policy.js";
-import { getConsolePassword, checkConsoleAuth, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys, CONSOLE_LOGIN_LOGO_PATH } from "./console-auth.js";
+import { getConsolePassword, checkConsoleAuth, consoleClientIp, shouldRenewConsoleToken, issueConsoleToken, consoleCookieHeader, clearConsoleCookieHeader, isConsolePublicPath, loginRateLimited, recordLoginFailure, clearLoginFailures, safeNextPath, safeEqual, renderLoginPage, redactUrlKeys, CONSOLE_LOGIN_LOGO_PATH } from "./console-auth.js";
 
 const require = createRequire(import.meta.url);
 const PACKAGE_JSON = require("../package.json");
@@ -279,7 +283,9 @@ function setCachedToolResult(toolName, args, value) {
  * retry replays the same error without touching the network.
  *
  * Failures surface in two shapes: per-item `{ ok: false }` (web_fetch) and a
- * top-level `errors` array (web_search, where partial results still return).
+ * top-level `errors` array. web_search has its own, stricter policy
+ * (isCacheableSearchPayload in web-search-tool.js: per-query results, empty
+ * never cached, recovered fallback notes allowed).
  */
 function cacheableResult(value) {
   if (!value) return false;
@@ -335,13 +341,6 @@ function asMarkdownContent(text) {
   };
 }
 
-function truncateForDisplay(value, maxChars = 400) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars - 1)}…`;
-}
-
 function assertString(value, field) {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`Invalid input: ${field} must be a non-empty string`);
@@ -362,34 +361,10 @@ function normalizeSearchEngineSelection(engines, engine) {
   return fromList.length ? fromList : [fromSingle];
 }
 
-function parseQueryList(value) {
-  const MAX_QUERIES = 6;
-  const MAX_QUERY_LENGTH = 500;
-  let raw;
-  if (typeof value === "string") {
-    raw = [String(value).trim()];
-  } else if (Array.isArray(value)) {
-    raw = value.map((item) => String(item).trim());
-  } else {
-    return [];
-  }
-  const trimmed = raw.filter(Boolean).map((q) => q.slice(0, MAX_QUERY_LENGTH));
-  if (trimmed.length > MAX_QUERIES) {
-    trimmed.splice(MAX_QUERIES);
-  }
-  return trimmed;
-}
-
-function parseSearchLimit(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(20, Math.floor(parsed));
-}
-
 function parseMaxChars(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(200000, Math.floor(parsed));
+  return Math.min(MAX_CHARS_HARD_CAP, Math.floor(parsed));
 }
 
 function parseBooleanParam(value, fallback) {
@@ -507,10 +482,35 @@ async function serveDocsAsset(res, pathname) {
   }
 }
 
-function setCorsHeaders(res) {
-  res.setHeader("access-control-allow-origin", "*");
-  res.setHeader("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("access-control-allow-headers", "content-type, accept, authorization, x-api-key, mcp-session-id");
+/**
+ * CORS for /mcp. MCP clients are almost all non-browser (no CORS involved), so
+ * browsers only get access from loopback origins (local inspectors/dev tools)
+ * and origins listed in MCP_CORS_ORIGINS (comma-separated; "*" = any). Any
+ * other web page gets no CORS grant, so it cannot drive or end sessions.
+ */
+function isAllowedMcpCorsOrigin(origin) {
+  if (!origin) return false;
+  const configured = String(process.env.MCP_CORS_ORIGINS || "")
+    .split(",")
+    .map((item) => item.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (configured.includes("*") || configured.includes(origin)) return true;
+  try {
+    const { hostname, protocol } = new URL(origin);
+    return (protocol === "http:" || protocol === "https:") &&
+      (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]");
+  } catch {
+    return false;
+  }
+}
+
+function setCorsHeaders(req, res) {
+  const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+  res.setHeader("vary", "origin");
+  if (!isAllowedMcpCorsOrigin(origin)) return;
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("access-control-allow-headers", "content-type, accept, authorization, x-api-key, mcp-session-id, mcp-protocol-version, last-event-id");
   res.setHeader("access-control-expose-headers", "mcp-session-id");
 }
 
@@ -1852,13 +1852,6 @@ function truncateLink(value, maxChars = 50) {
   return `${text.slice(0, maxChars)}...`;
 }
 
-function cleanTitle(value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const withoutUrl = text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ").trim();
-  return withoutUrl || text;
-}
-
 function buildApiBaseUrl(config) {
   let host = String(config?.mcpApiHost || "http://localhost").trim();
   if (!/^https?:\/\//i.test(host)) {
@@ -2032,126 +2025,10 @@ function decorateSearchPayload(payload) {
   return output;
 }
 
-function formatSearchMarkdown(payload) {
-  const lines = [];
-
-  const multiQuery = Array.isArray(payload?.queryResults) && payload.queryResults.length > 1;
-  if (multiQuery) {
-    payload.queryResults.forEach((entry, sectionIndex) => {
-      if (sectionIndex > 0) lines.push("");
-      const queryLabel = entry?.query ? String(entry.query) : "";
-      lines.push(`**Queries:** ${queryLabel}`);
-
-      if (Array.isArray(entry?.directAnswers) && entry.directAnswers.length) {
-        lines.push("", "**Instant Answer:**");
-        entry.directAnswers.forEach((answer) => {
-          const snippet = truncateForDisplay(answer?.text || "", 400);
-          const link = answer?.url ? ` (${answer.url})` : "";
-          lines.push(`- ${snippet}${link}`.trim());
-        });
-      }
-
-      const results = Array.isArray(entry?.results) ? entry.results : [];
-      if (results.length) {
-        lines.push("", `**Results (${results.length}):**`);
-        results.forEach((result, index) => {
-          const refId = result?.ref_id;
-          const titleText = cleanTitle(result?.title || "");
-          const title = titleText ? `**${titleText}**` : "Untitled";
-          const linkText = result?.domain || titleText || "link";
-          const refLabel = refId ? `[${linkText}](${refId})` : `${index + 1}.`;
-          const snippet = truncateForDisplay(result?.snippet || "", 450);
-          const queryVariants = Array.isArray(result?.queryVariants) && result.queryVariants.length
-            ? ` _(queries: ${result.queryVariants.join(", ")})_`
-            : queryLabel
-              ? ` _(queries: ${queryLabel})_`
-              : "";
-
-          const bullet = `- ${title} ${refLabel}${queryVariants}`;
-          lines.push(bullet.trim());
-          if (snippet) {
-            lines.push(`  - ${snippet}`);
-          }
-        });
-      } else {
-        lines.push("", "No results returned.");
-      }
-
-      if (Array.isArray(entry?.errors) && entry.errors.length) {
-        lines.push("", "**Errors:**");
-        entry.errors.forEach((entryError) => {
-          if (!entryError?.error) return;
-          lines.push(`- ${entryError.error}`);
-        });
-      }
-    });
-
-    lines.push("", "*Link destinations in parentheses are ref_ids.*");
-    return lines.filter(Boolean).join("\n");
-  }
-
-  if (payload?.query) {
-    lines.push(`**Query:** ${payload.query}`);
-  } else if (Array.isArray(payload?.queries) && payload.queries.length) {
-    lines.push(`**Queries:** ${payload.queries.join(", ")}`);
-  }
-
-  if (Array.isArray(payload?.directAnswers) && payload.directAnswers.length) {
-    lines.push("", "**Instant Answer:**");
-    payload.directAnswers.forEach((answer) => {
-      const snippet = truncateForDisplay(answer?.text || "", 400);
-      const link = answer?.url ? ` (${answer.url})` : "";
-      lines.push(`- ${snippet}${link}`.trim());
-    });
-  }
-
-  const results = Array.isArray(payload?.results) ? payload.results : [];
-  if (results.length) {
-    lines.push("", `**Results (${results.length}):**`);
-    results.forEach((result, index) => {
-      const refId = result?.ref_id;
-      const titleText = cleanTitle(result?.title || "");
-      const title = titleText ? `**${titleText}**` : "Untitled";
-      const linkText = result?.domain || titleText || "link";
-      const refLabel = refId ? `[${linkText}](${refId})` : `${index + 1}.`;
-      const snippet = truncateForDisplay(result?.snippet || "", 450);
-      const queryVariants = Array.isArray(result?.queryVariants) && result.queryVariants.length
-        ? ` _(queries: ${result.queryVariants.join(", ")})_`
-        : "";
-
-      const bullet = `- ${title} ${refLabel}${queryVariants}`;
-      lines.push(bullet.trim());
-      if (snippet) {
-        lines.push(`  - ${snippet}`);
-      }
-    });
-    lines.push("", "*Link destinations in parentheses are ref_ids.*");
-  } else {
-    lines.push("", "No results returned.");
-  }
-
-  if (Array.isArray(payload?.errors) && payload.errors.length) {
-    lines.push("", "**Errors:**");
-    payload.errors.forEach((entry) => {
-      if (!entry?.error) return;
-      lines.push(`- ${entry.error}`);
-    });
-  }
-
-  return lines.filter(Boolean).join("\n");
-}
-
 function formatSearchResponse(payload) {
-  return asMarkdownContent(formatSearchMarkdown(payload));
-}
-
-function normalizeResultEntries(payload) {
-  if (!payload) return [];
-  if (Array.isArray(payload.results)) return payload.results;
-  if (typeof payload === "object" && ("ok" in payload || "text" in payload || "error" in payload)) {
-    return [payload];
-  }
-  return [];
+  const response = asMarkdownContent(formatSearchMarkdown(payload));
+  // Every engine failed for every query: an error, not an empty success.
+  return isFailedSearch(payload) ? { ...response, isError: true } : response;
 }
 
 async function applyScreenshotStorage(payload, config, { outputMode } = {}) {
@@ -2207,203 +2084,58 @@ async function applyScreenshotStorage(payload, config, { outputMode } = {}) {
   return payload;
 }
 
-function truncateResultsText(payload, maxChars) {
-  if (!payload || !maxChars || !Number.isFinite(maxChars) || maxChars <= 0) return payload;
+// `accepted` names the target keys the calling tool's schema advertises, so a
+// rejection can say which keys were sent and which would have worked.
+// Legacy target aliases resolveOpenTarget still honours.
+const TARGET_KEY_ALIASES = ["url", "ref_id", "ref", "refs"];
+// Keys a model commonly puts at the top level of a crop call instead of the
+// crop form they belong to.
+const CROP_KEY_SUGGESTIONS = {
+  x: "region: {x, y, width, height}",
+  y: "region: {x, y, width, height}",
+  width: "region: {x, y, width, height}",
+  height: "region: {x, y, width, height}",
+  rect: "region: {x, y, width, height}",
+  clip: "region: {x, y, width, height}",
+  box: "region: {x, y, width, height}",
+  css: "selector",
+  element: "selector",
+  query: "selector",
+  path: "xpath"
+};
 
-  const entries = normalizeResultEntries(payload);
-  if (!entries.length) return payload;
-
-  const needsTruncation = entries.some((e) => e?.text && e.text.length > maxChars);
-  if (!needsTruncation) return payload;
-
-  const truncate = (e) => {
-    if (!e || !e.text || e.text.length <= maxChars) return e;
-    const size = e.textOriginalLength || e.text.length;
-    return { ...e, text: e.text.slice(0, maxChars).trimEnd() + `\n\n*(Response truncated — full page is ${size} chars, increase maxChars to see more)*` };
-  };
-
-  if (payload.results) {
-    return { ...payload, results: payload.results.map(truncate) };
-  }
-  return truncate(payload);
+/**
+ * Reject crop arguments the schema does not define, naming them and the
+ * crop form they were probably meant for. Without this, `{x, y, width,
+ * height}` at the top level reads as "no crop form" and the error says
+ * nothing about why.
+ */
+function assertKnownCropKeys(args) {
+  const schema = getToolsListResponse().tools.find((tool) => tool.name === "web_page_screenshot_crop")?.inputSchema;
+  const known = new Set([...Object.keys(schema?.properties || {}), ...TARGET_KEY_ALIASES]);
+  const unknown = Object.keys(args || {}).filter((key) => !known.has(key));
+  if (!unknown.length) return args;
+  const suggestions = [...new Set(unknown.map((key) => CROP_KEY_SUGGESTIONS[key]).filter(Boolean))];
+  throw new Error(
+    `web_page_screenshot_crop: unknown key(s) ${unknown.join(", ")}` +
+    (suggestions.length ? ` — did you mean ${suggestions.join(" or ")}?` : "") +
+    `. Valid keys: ${[...known].filter((key) => !TARGET_KEY_ALIASES.includes(key)).join(", ")}.`
+  );
 }
 
-function formatOpenPageResponse(payload) {
-  const entries = normalizeResultEntries(payload);
-  if (!entries.length) {
-    return asMarkdownContent([]);
-  }
-
-  const successCount = entries.filter((entry) => entry?.ok !== false).length;
-  const total = payload?.count ?? entries.length;
-  const lines = [`Processed ${total} page(s); ${successCount} succeeded.`];
-
-  entries.forEach((entry, index) => {
-    const title = entry?.title || entry?.url || `Page ${index + 1}`;
-    const refLabel = entry?.ref_id ? `[${title}](${entry.ref_id})` : `#${index + 1} ${title}`;
-    lines.push("", `### ${refLabel}`);
-    lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
-    if (entry?.url) {
-      lines.push(`- URL: ${entry.url}`);
-    }
-    if (entry?.browser) {
-      lines.push(`- Browser: ${entry.browser}`);
-    }
-    if (entry?.browserNote) {
-      lines.push(`- Browser: ${entry.browserNote}`);
-    }
-    if (entry?.pageType) {
-      const conf = entry.confidence != null ? ` | confidence: ${entry.confidence.toFixed(2)}` : "";
-      lines.push(`- Page type: ${entry.pageType}${conf}`);
-    }
-    if (entry?.warnings?.length) {
-      for (const warning of entry.warnings) {
-        lines.push(`- ⚠ ${warning}`);
-      }
-    }
-    if (entry?.partial) {
-      lines.push(`- ⚠ PARTIAL: the page did not reach the state this hint expected — treat the text below as incomplete`);
-    }
-    if (entry?.error) {
-      lines.push(`- Error: ${entry.error}`);
-      return;
-    }
-    if (entry?.tables?.length) {
-      lines.push(`- Tables extracted: ${entry.tables.length}`);
-    } else if (entry?.text) {
-      const tableCount = (entry.text.match(/^### Table \d/gm) || []).length
-        || (entry.text.match(/^# Table \d/gm) || []).length;
-      if (tableCount) lines.push(`- Tables extracted: ${tableCount}`);
-    }
-    if (entry?.text) {
-      lines.push("", entry.text.trim());
-    }
-  });
-
-  return asMarkdownContent(lines.join("\n"));
+function resolveOpenTarget(args, { accepted = ["urls", "ref_ids"] } = {}) {
+  return assertAllowedUrls(resolveOpenTargetUnchecked(args, accepted));
 }
 
-function formatScreenshotResponse(payload) {
-  const entries = normalizeResultEntries(payload);
-  if (!entries.length) {
-    return asMarkdownContent("No screenshot data available.");
-  }
-
-  const successCount = entries.filter((entry) => entry?.ok !== false).length;
-  const total = payload?.count ?? entries.length;
-  const lines = [`Captured ${total} screenshot(s); ${successCount} succeeded.`];
-
-  entries.forEach((entry, index) => {
-    const title = entry?.title || entry?.url || `Screenshot ${index + 1}`;
-    const refLabel = entry?.ref_id ? `[${title}](${entry.ref_id})` : `#${index + 1} ${title}`;
-    lines.push("", `### ${refLabel}`);
-    lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
-    if (entry?.url) {
-      lines.push(`- URL: ${entry.url}`);
-    }
-    if (entry?.browser) {
-      lines.push(`- Browser: ${entry.browser}`);
-    }
-    if (entry?.browserNote) {
-      lines.push(`- Browser: ${entry.browserNote}`);
-    }
-    if (entry?.error) {
-      lines.push(`- Error: ${entry.error}`);
-      return;
-    }
-    if (entry?.contentType) {
-      lines.push(`- Content-Type: ${entry.contentType}`);
-    }
-    if (entry?.bytes) {
-      lines.push(`- Size: ${entry.bytes} bytes`);
-    }
-    if (entry?.filePath) {
-      lines.push(`- File: ${entry.filePath}`);
-    }
-    if (entry?.downloadUrl) {
-      lines.push(`- Download: ${entry.downloadUrl}`);
-    }
-    if (!entry?.downloadUrl && entry?.screenshotBase64) {
-      const mime = entry.contentType || (entry.format === "jpeg" ? "image/jpeg" : "image/png");
-      const dataUrl = `data:${mime};base64,${entry.screenshotBase64}`;
-      lines.push("", `![${title}](${dataUrl})`);
-    }
-  });
-
-  return asMarkdownContent(lines.join("\n"));
+function describeTargetKeys(args, accepted) {
+  const received = args && typeof args === "object" ? Object.keys(args) : [];
+  const shown = received.length
+    ? received.map((key) => `${key}=${JSON.stringify(args[key])?.slice(0, 60)}`).join(", ")
+    : "no arguments";
+  return `provide ${accepted.map((key) => (key.endsWith("s") ? `${key} (non-empty array)` : key)).join(" or ")}; received: ${shown}`;
 }
 
-function formatCropResponse(payload) {
-  const entries = normalizeResultEntries(payload);
-  if (!entries.length) {
-    return asMarkdownContent("No screenshot data available.");
-  }
-
-  const successCount = entries.filter((entry) => entry?.ok !== false).length;
-  const total = payload?.count ?? entries.length;
-  const lines = [`Captured ${total} crop screenshot(s); ${successCount} succeeded.`];
-
-  entries.forEach((entry, index) => {
-    const title = entry?.title || entry?.url || `Crop ${index + 1}`;
-    const refLabel = entry?.ref_id ? `[${title}](${entry.ref_id})` : `#${index + 1} ${title}`;
-    lines.push("", `### ${refLabel} — cropped screenshot`);
-    lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
-    if (entry?.url) {
-      lines.push(`- URL: ${entry.url}`);
-    }
-    if (entry?.browser) {
-      lines.push(`- Browser: ${entry.browser}`);
-    }
-    if (entry?.browserNote) {
-      lines.push(`- Browser: ${entry.browserNote}`);
-    }
-    if (entry?.error) {
-      lines.push(`- Error: ${entry.error}`);
-      return;
-    }
-    if (entry?.crop) {
-      const crop = entry.crop;
-      if (crop.form === "selector" || crop.form === "xpath") {
-        const kind = crop.form === "selector" ? `selector "${crop.target}"` : `xpath "${crop.target}"`;
-        lines.push(`- Crop: ${kind} → matched ${crop.matched} of ${crop.total}${crop.matched !== crop.total ? " (first match)" : ""}`);
-      } else {
-        lines.push(`- Crop: ${crop.target}`);
-      }
-      lines.push(`- Rect: ${crop.rect.x},${crop.rect.y} ${crop.rect.width}x${crop.rect.height} (document CSS px)`);
-      if (crop.padding) {
-        lines.push(`- Padding: ${crop.padding}px applied on all sides → final ${crop.rect.x},${crop.rect.y} ${crop.rect.width}x${crop.rect.height}`);
-      }
-      for (const clampNote of crop.clamped || []) {
-        lines.push(`- Clamped: ${clampNote}`);
-      }
-    }
-    const kb = entry?.sizeBytes ? Math.max(1, Math.round(entry.sizeBytes / 1024)) : null;
-    if (kb) {
-      const preset = { 30: "low", 55: "medium", 75: "high" }[entry?.quality] || entry?.quality || "";
-      const kv = typeof entry?.quality === "number" ? ` (quality ${preset}/${entry.quality})` : "";
-      lines.push(`- Output: ${kb} KB jpeg${kv}`);
-    }
-    if (entry?.filePath) {
-      lines.push(`- File: ${entry.filePath}`);
-    }
-    if (entry?.downloadUrl) {
-      lines.push(`- Download: ${entry.downloadUrl}`);
-    }
-    if (!entry?.downloadUrl && entry?.screenshotBase64) {
-      const mime = entry.contentType || (entry.format === "jpeg" ? "image/jpeg" : "image/png");
-      const dataUrl = `data:${mime};base64,${entry.screenshotBase64}`;
-      lines.push("", `![${title}](${dataUrl})`);
-    }
-  });
-
-  return asMarkdownContent(lines.join("\n"));
-}
-
-function resolveOpenTarget(args) {
-  return assertAllowedUrls(resolveOpenTargetUnchecked(args));
-}
-
-function resolveOpenTargetUnchecked(args) {
+function resolveOpenTargetUnchecked(args, accepted = ["urls", "ref_ids"]) {
   const MAX_BATCH_URLS = 10;
   const normalizedRef = args?.ref_id ?? args?.ref;
   const normalizedRefs = args?.ref_ids ?? args?.refs;
@@ -2461,7 +2193,7 @@ function resolveOpenTargetUnchecked(args) {
     }
   }
 
-  throw new Error("Invalid input: provide one of url, urls, ref_id/ref, or ref_ids/refs");
+  throw new Error(`Invalid input: ${describeTargetKeys(args, accepted)}`);
 }
 
 function buildBatchResultPayload(targetUrls, opened) {
@@ -2503,8 +2235,11 @@ async function openTargetsParallel(targetUrls, maxParallel, includeSeoAnalysis =
     async (targetUrl, index) => {
       const tUrl = debug ? performance.now() : 0;
       try {
+        // Extract at the hard cap: the payload is cached independent of the
+        // request's maxChars, and each caller truncates to its own after.
         const page = await browserOpenAndExtract({
           url: targetUrl,
+          maxChars: MAX_CHARS_HARD_CAP,
           includeSeoAnalysis,
           hintOverride: opts?.hintOverride || null,
           cachedHtml: opts?.cachedHtmlByUrl?.get(targetUrl) || null,
@@ -2516,27 +2251,15 @@ async function openTargetsParallel(targetUrls, maxParallel, includeSeoAnalysis =
         if (debug) console.log(`[web_fetch] [${targetUrl}] openTargetsParallel process (post-extract): ${Math.round(performance.now() - tUrl)}ms`);
         const result = {
           index,
-          ok: true,
           ref_id: rememberLink(targetUrl),
-          ...page
+          ...page,
+          ok: page.ok !== false && !page.error
         };
 
         // Replace markdown links [text](url) with [text](ref_id) inline
         if (opts.enableLinkRefs !== false && page.links?.length && result.text) {
-          for (const link of page.links) {
-            rememberLink(link.href);
-          }
-          const enrichedTextByUrl = new Map();
-          for (const link of page.links) {
-            enrichedTextByUrl.set(link.href, link.text);
-          }
-          result.text = result.text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
-            const ref = getLinkRefByUrl(url);
-            if (!ref) return match;
-            const enriched = enrichedTextByUrl.get(url);
-            const isNumeric = /^\d+$/.test(text);
-            return `[${isNumeric && enriched ? enriched : text}](${ref})`;
-          });
+          const rewriter = new LinkRefRewriter(page.links, { remember: rememberLink, lookup: getLinkRefByUrl });
+          result.text = rewriter.rewrite(result.text);
         }
 
         return result;
@@ -2733,7 +2456,7 @@ async function handleConsoleAuthGate(req, res, method, url) {
     }
     if (method === "POST") {
       // Socket address, not X-Forwarded-For: the rate limit must not be spoofable.
-      const ip = (req.socket?.remoteAddress || "unknown").slice(0, 100);
+      const ip = consoleClientIp(req);
       const form = await readFormBody(req);
       const formNext = safeNextPath(form.next);
       if (loginRateLimited(ip)) {
@@ -2767,6 +2490,10 @@ async function handleConsoleAuthGate(req, res, method, url) {
   if (isConsolePublicPath(url.pathname)) return false;
 
   const auth = checkConsoleAuth(req, password);
+  if (auth.limited) {
+    sendJson(res, 429, { ok: false, error: "Too many failed console password attempts. Try again in 15 minutes." });
+    return true;
+  }
   if (auth.ok) {
     if (shouldRenewConsoleToken(auth.exp)) {
       res.setHeader("set-cookie", consoleCookieHeader(issueConsoleToken(password)));
@@ -2803,33 +2530,7 @@ function getToolsListResponse(allowedTools = null) {
         name: "web_search",
         description:
           "Search the web for any user request and return ranked results with numeric result ids. By default, send `engine: \"select_best\"` or omit engine entirely unless the user explicitly asks about engines or requests a specific one. `select_best` means the server will choose the best engine automatically using its fallback and circuit-breaker logic. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            queries: {
-              type: "array",
-              items: { type: "string" },
-              description: "One or more search queries to run (query variations; max 6, each capped at 500 chars)"
-            },
-            query: {
-              anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-              description: "Alias for queries: a single query string or an array of query strings. A non-empty queries array takes precedence."
-            },
-            limit: { type: "number", default: 5 },
-            bypassCache: {
-              type: "boolean",
-              default: false,
-              description: "Skip cached data and refresh the cached response"
-            },
-            engine: {
-              type: "string",
-              default: "select_best",
-              description: "Preferred default: `select_best`, which uses only SEARCH_ENABLED_ENGINES. A registered route may be named explicitly even when it is not enabled for `select_best`."
-            }
-          },
-          description: "Provide queries (string[]) or query (string or string[]). Use queries for one or more search variations.",
-          additionalProperties: false
-        }
+        inputSchema: WebSearchRequest.inputSchema()
       },
       {
         name: "web_fetch",
@@ -2841,14 +2542,20 @@ function getToolsListResponse(allowedTools = null) {
             urls: {
               type: "array",
               items: { type: "string" },
-              description: "One or more URLs to open"
+              minItems: 1,
+              description: "One or more URLs to open (max 10). Required unless ref_ids is given."
             },
             ref_ids: {
               type: "array",
               items: { type: "number" },
-              description: "Result ids returned by a previous web_search call"
+              minItems: 1,
+              description: "Result ids from a previous web_search call, or link ref_ids from web_fetch output (max 10). Required unless urls is given."
             },
-            maxChars: { type: "number", default: DEFAULT_MAX_CHARS },
+            maxChars: {
+              type: "number",
+              default: DEFAULT_MAX_CHARS,
+              description: `Maximum characters of text per page (1–${MAX_CHARS_HARD_CAP}). Longer pages end with a truncation note giving the full size.`
+            },
             bypassCache: {
               type: "boolean",
               default: false,
@@ -2856,7 +2563,7 @@ function getToolsListResponse(allowedTools = null) {
             },
             script: {
               type: "string",
-              description: "Per-call extraction script (plan 62): arbitrary JavaScript run against the live page, same sandbox and result schema as script hints. Single-target only, never persisted, never cached. Mutually exclusive with stored hint methods — the request script wins."
+              description: "Per-call extraction script: the BODY of an async function, run server-side in a Node vm sandbox (not in the page) with a Puppeteer `page` already navigated to the URL. Read the DOM with `await page.evaluate(() => ...)`; `document` is only available inside evaluate. Must `return { text }` (string; optional title, links: [{ href, text }], tables, warnings: string[]) or a plain string. Example: `const text = await page.evaluate(() => document.querySelector('main').innerText); return { text };`. Single URL only, never persisted, never cached; wins over stored hints."
             },
             scriptOptions: {
               type: "object",
@@ -2877,26 +2584,28 @@ function getToolsListResponse(allowedTools = null) {
       },
       {
         name: "web_page_screenshot_crop",
-        description: "Screenshot a specific element or rectangle of a page with optional padding. Provide targetId, urls, or ref_ids plus crop (selector|xpath|region).",
+        description: "Screenshot one element or rectangle of a page (a small JPEG, not the whole page). Give ONE target (targetId, urls, or ref_ids) and EXACTLY ONE crop form: selector (CSS, first match), xpath (first match), or region: {x, y, width, height} in document CSS pixels. Example: {\"urls\": [\"https://example.com\"], \"selector\": \"h1\", \"padding\": 8}.",
         inputSchema: {
           type: "object",
           properties: {
-            targetId: { type: "string" },
-            urls: { type: "array", items: { type: "string" } },
-            ref_ids: { type: "array", items: { type: "number" } },
-            selector: { type: "string" },
-            xpath: { type: "string" },
+            targetId: { type: "string", description: "Target id from Target.createTarget — crop an existing persistent tab" },
+            urls: { type: "array", items: { type: "string" }, description: "URLs to open and crop (one crop per URL)" },
+            ref_ids: { type: "array", items: { type: "number" }, description: "Result/link ref_ids to open and crop" },
+            selector: { type: "string", description: "CSS selector of the element to crop; the first match wins" },
+            xpath: { type: "string", description: "XPath of the element to crop; the first match wins" },
             region: {
               type: "object",
               properties: {
-                x: { type: "number" },
-                y: { type: "number" },
-                width: { type: "number" },
-                height: { type: "number" }
+                x: { type: "number", description: "Left edge, document CSS px" },
+                y: { type: "number", description: "Top edge, document CSS px (page coordinates, not viewport)" },
+                width: { type: "number", description: "Width in CSS px (> 0)" },
+                height: { type: "number", description: "Height in CSS px (> 0)" }
               },
-              additionalProperties: false
+              required: ["x", "y", "width", "height"],
+              additionalProperties: false,
+              description: "Explicit rectangle {x, y, width, height} in document CSS pixels — pass the four numbers inside region, not at the top level"
             },
-            padding: { type: "number", default: 0 },
+            padding: { type: "number", default: 0, description: "Pixels added on every side, then clamped to the page" },
             quality: { type: "string", enum: ["low", "medium", "high"], default: "medium" },
             output: { type: "string", enum: ["base64"], default: "base64" },
             browser: { type: "string" },
@@ -3133,8 +2842,15 @@ function getToolsListResponse(allowedTools = null) {
   };
 }
 
+function isKnownToolName(name) {
+  return WEB_TOOL_NAMES.has(name) || name === "web_fetch_setup" || devtoolsToolDefinitions.some((tool) => tool.name === name);
+}
+
 async function handleToolCall(name, args = {}, allowedTools = null, allowedMcpBrowsers = null) {
   try {
+    if (!isKnownToolName(name)) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
     if (allowedTools && !allowedTools.has(name)) {
       throw new Error(`Tool "${name}" is not permitted for this API key`);
     }
@@ -3162,50 +2878,52 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
   }
 
   if (name === "web_search") {
-    const bypassCache = args.bypassCache === true;
+    // Validate before the cache lookup: a malformed request must fail the same
+    // way whether or not an equal key happens to be cached.
+    const request = WebSearchRequest.fromArgs(args);
+    mark = timer.step("validate_inputs", mark);
     const cacheKeyArgs = getCacheArgs(args);
-    const cached = bypassCache ? null : await getCachedToolResult(name, cacheKeyArgs);
+    const cached = request.bypassCache ? null : await getCachedToolResult(name, cacheKeyArgs);
     if (cached) {
       timer.step("cache_hit", mark);
       timer.end({ cacheHit: true, status: "ok" });
       return withCacheStamp(cached.value, cached.ageMs);
     }
     mark = timer.step("cache_miss", mark);
-    const queries = parseQueryList(args.queries);
-    if (!queries.length) queries.push(...parseQueryList(args.query));
-    if (!queries.length) {
-      throw new Error("Missing queries: provide at least one search query in queries or query");
-    }
-    const limit = parseSearchLimit(args.limit, 5);
-    const engine = typeof args.engine === "string" ? String(args.engine).trim().toLowerCase() : "";
-    const engines = engine && engine !== "select_best" ? [engine] : [];
-    mark = timer.step("validate_inputs", mark);
 
     const results = await runWithHangGuard(`mcp:${name}`, () =>
       browserSearch({
-        queries,
-        limit,
-        ...(engines.length ? { engines } : {})
+        queries: request.queries,
+        limit: request.limit,
+        ...(request.engines.length ? { engines: request.engines } : {})
       })
     );
     mark = timer.step("browser_search", mark);
-    const response = formatSearchResponse(decorateSearchPayload(results));
+    const response = formatSearchResponse(decorateSearchPayload({ ...results, notices: request.notices }));
     mark = timer.step("format_response", mark);
-    // Judge the RAW search payload, not the formatted response: `results` here
-    // is what browserSearch returned, so its `errors` array and per-item state
-    // are still visible. The formatted string has already lost them.
-    if (cacheableResult(results)) {
-      await setCachedToolResult(name, getCacheArgs(args), response);
+    // Judge the RAW search payload, not the formatted response: per-query
+    // results, errors and fallback notes are still visible there.
+    if (isCacheableSearchPayload(results)) {
+      await setCachedToolResult(name, cacheKeyArgs, response);
       timer.step("cache_store", mark);
     }
-    timer.end({ cacheHit: false, status: "ok" });
+    timer.end({ cacheHit: false, status: response.isError ? "error" : "ok" });
     return response;
   }
 
   if (name === "web_fetch") {
     const manager = await getBrowserManager();
     const bypassCache = args.bypassCache === true;
-    const cacheKeyArgs = excludeMaxChars(getCacheArgs(args));
+    // The cache key carries the caller's browser scope (plan 57): an entry
+    // produced under one allowed-browser set must never answer a key with a
+    // different set, or a denied browser's page would be served before
+    // resolveBrowserParam ever checks permission. Keys with the same set (and
+    // unrestricted keys, scope null) share entries. maxChars is excluded —
+    // payloads are cached at the hard cap and truncated per request.
+    const cacheKeyArgs = {
+      ...excludeMaxChars(getCacheArgs(args)),
+      browserScope: allowedMcpBrowsers ? [...allowedMcpBrowsers].sort() : null
+    };
     let targetUrls;
     try {
       targetUrls = resolveOpenTarget(args);
@@ -3240,33 +2958,22 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
       requestScriptOptions = args.scriptOptions;
     }
 
-    // A key with a restricted MCP browser set must not share the tool-result
-    // cache (plan 57). The key is derived from request args only — it carries no
-    // API-key identity — so a cached entry fetched on an allowed browser would
-    // otherwise satisfy a denied key before resolveBrowserParam ever runs, and
-    // the permission check below would be unreachable. Restricted keys skip both
-    // the read and the write; unrestricted keys (null) keep the fast path.
-    const cacheable = !allowedMcpBrowsers;
-    const cached = bypassCache || hasRequestScript || !cacheable ? null : await getCachedToolResult(name, cacheKeyArgs);
+    const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
+    const cached = bypassCache || hasRequestScript ? null : await getCachedToolResult(name, cacheKeyArgs);
     if (cached) {
-      const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
       const truncated = truncateResultsText(cached.value, maxChars);
       timer.step("cache_hit", mark);
       timer.end({ cacheHit: true, status: "ok" });
-      const formatted = formatOpenPageResponse(truncated);
-      return typeof formatted === "string"
-        ? withCacheStamp(formatted, cached.ageMs)
-        : { ...formatted, cached: true, cacheAgeMs: cached.ageMs };
+      return withCacheStamp(formatOpenPageResponse(truncated), cached.ageMs);
     }
     mark = timer.step("cache_miss", mark);
-    const maxChars = parseMaxChars(args.maxChars, manager.config.maxChars || DEFAULT_MAX_CHARS);
     const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     mark = timer.step("prepare_execution", mark);
     const fullResult = await runWithHangGuard(`mcp:${name}`, () =>
       openTargetsParallel(targetUrls, manager.config.openPageMaxParallel, includeSeoAnalysis, manager.config.debug, { enableLinkRefs: manager.config.enableLinkRefs, browser: args.browser || "", ...(hasRequestScript ? { requestScript, requestScriptOptions } : {}), allowedMcpBrowsers })
     );
     mark = timer.step("open_targets", mark);
-    if (!hasRequestScript && cacheable && cacheableResult(fullResult)) {
+    if (!hasRequestScript && cacheableResult(fullResult)) {
       await setCachedToolResult(name, cacheKeyArgs, fullResult);
       timer.step("cache_store", mark);
     }
@@ -3344,7 +3051,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
         }
       }
       const now = new Date().toISOString();
-      const { entries, revision } = await mutateManagedHints(storePath, (working) => {
+      const { entries, revision, storeWarnings } = await mutateManagedHints(storePath, (working) => {
         const at = working.findIndex((e) => e?.id === hint.id);
         const previous = at >= 0 ? working[at] : null;
         const saved = {
@@ -3360,14 +3067,14 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
       });
       toolResultCache.web_fetch.clear();
       const saved = entries.find((e) => e?.id === hint.id);
-      return asJson({ id: hint.id, source: "managed", revision, hint: summarize(saved) });
+      return asJson({ id: hint.id, source: "managed", revision, hint: summarize(saved), ...(storeWarnings ? { warnings: storeWarnings } : {}) });
     }
 
     if (operation === "disable") {
       if (typeof args.id !== "string" || !args.id) {
         throw new Error('web_fetch_setup disable requires "id"');
       }
-      const { revision } = await mutateManagedHints(storePath, (working) => {
+      const { revision, storeWarnings } = await mutateManagedHints(storePath, (working) => {
         const entry = working.find((e) => e?.id === args.id);
         if (!entry) throw new Error(`No managed hint with id "${args.id}"`);
         entry.enabled = false;
@@ -3375,14 +3082,14 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
         return { id: args.id };
       });
       toolResultCache.web_fetch.clear();
-      return asJson({ id: args.id, source: "managed", revision, enabled: false });
+      return asJson({ id: args.id, source: "managed", revision, enabled: false, ...(storeWarnings ? { warnings: storeWarnings } : {}) });
     }
 
     if (operation === "enable") {
       if (typeof args.id !== "string" || !args.id) {
         throw new Error('web_fetch_setup enable requires "id"');
       }
-      const { revision } = await mutateManagedHints(storePath, (working) => {
+      const { revision, storeWarnings } = await mutateManagedHints(storePath, (working) => {
         const entry = working.find((e) => e?.id === args.id);
         if (!entry) throw new Error(`No managed hint with id "${args.id}"`);
         entry.enabled = true;
@@ -3390,21 +3097,21 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
         return { id: args.id };
       });
       toolResultCache.web_fetch.clear();
-      return asJson({ id: args.id, source: "managed", revision, enabled: true });
+      return asJson({ id: args.id, source: "managed", revision, enabled: true, ...(storeWarnings ? { warnings: storeWarnings } : {}) });
     }
 
     // remove
     if (typeof args.id !== "string" || !args.id) {
       throw new Error('web_fetch_setup remove requires "id"');
     }
-    const { revision: removeRevision } = await mutateManagedHints(storePath, (working) => {
+    const { revision: removeRevision, storeWarnings: removeWarnings } = await mutateManagedHints(storePath, (working) => {
       const at = working.findIndex((e) => e?.id === args.id);
       if (at < 0) throw new Error(`No managed hint with id "${args.id}"`);
       working.splice(at, 1);
       return { id: args.id };
     });
     toolResultCache.web_fetch.clear();
-    return asJson({ id: args.id, source: "managed", revision: removeRevision, removed: true });
+    return asJson({ id: args.id, source: "managed", revision: removeRevision, removed: true, ...(removeWarnings ? { warnings: removeWarnings } : {}) });
   }
 
   if (name === "web_page_screenshot" || name === "web_page_screenshot_crop") {
@@ -3422,7 +3129,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
     if (quality === undefined) quality = 55;
     const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
     const viewport = parseScreenshotViewport(args.viewport, fullPage);
-    const crop = isCrop ? parseCropArgs(args) : null;
+    const crop = isCrop ? parseCropArgs(assertKnownCropKeys(args)) : null;
 
     const allowedOutputModes = ["base64"];
     if (manager?.config?.screenshotPathPrefix) allowedOutputModes.push("file");
@@ -3452,7 +3159,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
             ...(quality ? { quality } : {}),
             ...(viewport ? { viewport } : {}),
             ...(crop ? { selector: crop.selector, xpath: crop.xpath, region: crop.region, padding: crop.padding } : {})
-          })
+          }, { allowedMcpBrowsers })
         );
         recordPageOp({
           id: pageOpId,
@@ -3563,9 +3270,14 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
   }
 
   if (name === "web_page_ascii") {
+    const ASCII_ELEMENT_SCAN_LIMIT = 500;
     const targetUrls = (() => {
       try {
-        return resolveOpenTarget(args);
+        const resolved = resolveOpenTarget(args, { accepted: ["url", "ref_id"] });
+        if (resolved.length !== 1) {
+          throw new Error(`web_page_ascii renders one page per call — got ${resolved.length} targets; pass a single url (or ref_id) and call again for the others`);
+        }
+        return resolved;
       } catch (error) {
         timer.step("resolve_targets_failed", mark);
         timer.end({ status: "error", error: String(error?.message || error) });
@@ -3750,9 +3462,12 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
           ).catch(() => {});
           await new Promise((r) => setTimeout(r, 1000));
 
+          // Collect candidates generously, then keep elementLimit of the ones
+          // inside the captured area — limiting first would spend the budget on
+          // off-screen elements and annotate nothing that is visible.
           const elementFn = eval(ELEMENT_EXTRACT_CODE);
           const elementData = await Promise.race([
-            page.evaluate(elementFn, elementLimit),
+            page.evaluate(elementFn, ASCII_ELEMENT_SCAN_LIMIT),
             new Promise((_, reject) => setTimeout(() => reject(new Error("Element extraction timed out")), 15000))
           ]);
 
@@ -3760,12 +3475,14 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
           const vh = elementData.viewportHeight;
           const clipW = fullPage ? elementData.pageWidth : vw;
           const clipH = fullPage ? elementData.pageHeight : vh;
-          const margin = 50;
-          const visible = elementData.elements.filter((el) => {
-            const r = el.rect;
-            return r.x + r.width > -margin && r.x < clipW + margin
-              && r.y + r.height > -margin && r.y < clipH + margin;
-          });
+          // Only elements that overlap the captured area can carry a marker.
+          const visible = elementData.elements
+            .filter((el) => {
+              const r = el.rect;
+              return r.x + r.width > 0 && r.x < clipW && r.y + r.height > 0 && r.y < clipH;
+            })
+            .slice(0, elementLimit)
+            .map((el, i) => ({ ...el, index: i + 1 }));
 
           const { cols, rows } = asciiGridDims(clipW, clipH, width);
 
@@ -3806,7 +3523,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
               viewportHeight: vh,
               pageWidth: elementData.pageWidth,
               pageHeight: elementData.pageHeight,
-              elementCount: elementData.elements.length,
+              elementCount: visible.length,
               placedCount: result.stats.placedCount,
             },
           };
@@ -3885,7 +3602,7 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
 
     if (hasTargetId) {
       const targetId = String(args.targetId).trim();
-      const state = await getTargetState(targetId);
+      const state = await getTargetState(targetId, { allowedMcpBrowsers });
       let prevViewport = null;
       let didOverride = false;
       if (viewportOverride) {
@@ -4042,8 +3759,35 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
 
   if (name === "list_browsers") {
     const manager = await getBrowserManager();
+    // Probe first: plain CDP add-ons connect lazily, so their reachability is
+    // only known after getInstanceStats() has hit /json/list. Reading status
+    // before the probe reported reachable-but-unused add-ons as offline.
+    const statsByBrowser = new Map(
+      (await manager.getInstanceStats()).map((stat) => [stat.backend, stat])
+    );
     const effective = manager._effectiveAddOns();
     const effectiveByName = new Map(effective.map((b) => [b.name, b]));
+    // A plain CDP add-on with a live puppeteer connection reports through it;
+    // one not used yet is probed over HTTP (`viaHttp`).
+    const cdpState = (eff) => {
+      const stat = statsByBrowser.get(eff.name);
+      if (!stat) return { connected: false, state: "unknown — not probed" };
+      if (!stat.connected) return { connected: false, state: "unreachable — its CDP endpoint did not answer" };
+      if (stat.viaHttp) return { connected: true, state: "reachable — not used yet (connects on first use)" };
+      return { connected: true, state: "connected" };
+    };
+    const describeAddOn = (eff, prompt) => {
+      const base = {
+        name: eff.name,
+        ownership: browserOwnership(eff.type),
+        plugin: eff.plugin,
+        prompt,
+        status: eff.status,
+        paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined)
+      };
+      if (eff.type === "navigator-cdp") return { ...base, connected: eff.status === "connected" };
+      return { ...base, ...cdpState(eff) };
+    };
     // Priority order = BROWSERS array order (same as the console's browser
     // drivers panel), with dynamic relay registrations appended after configured
     // entries — never add-on registration order.
@@ -4057,70 +3801,58 @@ async function handleToolCallInner(name, args = {}, allowedMcpBrowsers = null) {
           prompt: undefined,
           status: manager.browser?.connected ? "connected" : "disconnected",
           paired: undefined,
-          connected: Boolean(manager.browser?.connected)
+          connected: Boolean(manager.browser?.connected),
+          state: manager.browser?.connected ? "connected" : "idle — launches on first use"
         });
       } else {
         const eff = effectiveByName.get(cfg.name);
-        if (!eff) continue;
-        ordered.push({
-          name: eff.name,
-          ownership: browserOwnership(eff.type),
-          plugin: eff.plugin,
-          prompt: cfg.prompt,
-          status: eff.status,
-          paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
-          connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
-        });
+        if (eff) ordered.push(describeAddOn(eff, cfg.prompt));
       }
     }
     for (const eff of effective) {
-      if (!manager.config.browsers.some((c) => c.name === eff.name)) {
-        ordered.push({
-          name: eff.name,
-          ownership: browserOwnership(eff.type),
-          plugin: eff.plugin,
-          prompt: undefined,
-          status: eff.status,
-          paired: eff.paired ?? (eff.type === "navigator-cdp" ? relayServer.isPaired(eff.name) : undefined),
-          connected: eff.type === "cdp" ? manager._isAddOnConnected(eff.name) : eff.status === "connected"
-        });
-      }
+      if (!manager.config.browsers.some((c) => c.name === eff.name)) ordered.push(describeAddOn(eff, undefined));
     }
+    // A key restricted to some browsers only sees those (plan 57 allow-list).
+    const visible = allowedMcpBrowsers instanceof Set
+      ? ordered.filter((b) => allowedMcpBrowsers.has(String(b.name).toLowerCase()))
+      : ordered;
     // The built-in never takes a configured prompt — emit its position-derived
     // message so the agent sees the actual execution order (no prompt battle
     // against the configured add-ons).
-    ordered.forEach((b, index) => {
+    visible.forEach((b, index) => {
       if (b.name === "chromium" && !b.prompt) {
-        b.prompt = builtinBrowserPrompt(index + 1, ordered.length);
+        b.prompt = builtinBrowserPrompt(index + 1, visible.length);
       }
     });
     // A relay browser's OWN description wins over the console-configured
     // prompt: the browser owner wrote it, and it is the one who knows which of
     // their browsers is the personal laptop. The configured prompt stays the
     // fallback for add-ons that have no popup of their own.
-    for (const b of ordered) {
+    for (const b of visible) {
       const own = (effectiveByName.get(b.name)?.description || "").trim();
       if (own) b.prompt = own;
     }
-    const tabsByBrowser = new Map(
-      (await manager.getInstanceStats()).map((s) => [s.backend, s.tabs])
-    );
-    const rows = ordered.map((b, index) => {
+    const rows = visible.map((b, index) => {
       const state = b.status === "auth_pending"
         ? "PENDING PIN authorization — unpaired incoming request"
-        : b.connected
-          ? "connected"
-          : b.paired
-            ? "offline — paired, awaiting connection"
-            : "offline — not connected";
+        : b.state
+          ? b.state
+          : b.connected
+            ? "connected"
+            : b.paired
+              ? "offline — paired, awaiting connection"
+              : "offline — not connected";
       const detected = b.plugin && b.plugin !== "auto" ? ` (${b.plugin})` : "";
-      const rawTabs = tabsByBrowser.get(b.name);
+      const rawTabs = statsByBrowser.get(b.name)?.tabs;
       const tabs = b.connected && typeof rawTabs === "number" ? rawTabs : "—";
       const prompt = b.prompt?.trim() || "(no custom prompt)";
       const promptCell = prompt.replace(/\|/g, "\\|").replace(/\n/g, " ");
       return `| ${index + 1} | **${b.name}** | ${tabs} | ${b.ownership} | ${state}${detected} | ${promptCell} |`;
     });
     timer.end({ status: "ok" });
+    if (!rows.length) {
+      return asMarkdownContent("No browsers are permitted for this API key.");
+    }
     return asMarkdownContent(
       `| Execution order | Browser | Tabs | Ownership | Status | Prompt |\n|------------------|---------|------|-----------|--------|--------|\n${rows.join("\n")}` +
       `\n\nBrowsers are preferred in execution-order (lowest first) — each browser is only used when every browser before it is unavailable or rejects the task.`
@@ -4332,7 +4064,8 @@ function createMcpServer(resolvePermissions = () => ({ allowedTools: null, allow
         const ip = ctx?.ip || null;
         const keyInfo = ctx?.keyInfo || { id: null, name: null, preview: null };
         const preview = String(okText || JSON.stringify(response || "")).slice(0, 8000);
-        recordMcpCall({ tool: name, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: ms, ok: true, error: "", source: "mcp" });
+        const ok = !response?.isError;
+        recordMcpCall({ tool: name, args, responsePreview: preview, ip, apiKeyId: keyInfo.id, apiKeyName: keyInfo.name, apiKeyPreview: keyInfo.preview, durationMs: ms, ok, error: ok ? "" : String(okText || "error").slice(0, 500), source: "mcp" });
       } catch {}
       return response;
     } catch (error) {
@@ -4377,16 +4110,10 @@ async function maybeStartHttpServer(managerOverride) {
   );
   if (!manager.config.enableHttpHealth && !manager.config.enableHttpMcp && !wantsRelay) return;
 
-  const mcpTransports = new Map();
-  const mcpServers = new Map();
-  let defaultMcpSessionId = null;
-  // sessionId -> last request time (ms). Sessions with no traffic and no open
-  // SSE stream for MCP_SESSION_IDLE_TTL_MS are closed by the sweeper below.
-  // Safe for clients: a POST carrying an unknown session id falls through to
-  // the stateless handler, and the MCP spec has clients re-initialize on 404.
-  const mcpSessionLastSeen = new Map();
-  const MCP_SESSION_IDLE_TTL_MS = Math.max(60_000, Number(process.env.MCP_SESSION_IDLE_TTL_MS) || 24 * 60 * 60 * 1000);
-  const MCP_SESSION_SWEEP_MS = Math.min(10 * 60 * 1000, MCP_SESSION_IDLE_TTL_MS);
+  // Live Streamable-HTTP sessions: exact-id lookup bound to the creating key,
+  // short idle TTL without an open SSE stream, LRU cap (mcp-sessions.js).
+  const mcpSessions = McpSessionRegistry.fromEnv();
+  const MCP_SESSION_SWEEP_MS = 60 * 1000;
 
   const SSE_KEEPALIVE_MS = 30_000;
   const SSE_RETRY_INTERVAL_MS = 30_000;
@@ -4399,7 +4126,7 @@ async function maybeStartHttpServer(managerOverride) {
       if (await handleConsoleAuthGate(req, res, method, url)) return;
 
         if (manager.config.enableHttpMcp && url.pathname === "/mcp") {
-          setCorsHeaders(res);
+          setCorsHeaders(req, res);
 
           if (method === "OPTIONS") {
           res.writeHead(204);
@@ -4407,26 +4134,18 @@ async function maybeStartHttpServer(managerOverride) {
           return;
         }
 
+        // Every method needs a valid key — POST (calls), GET (SSE stream) and
+        // DELETE (end session) alike. A session id is never a credential.
+        if (!isAuthorizedMcpRequest(req.headers, manager.config, CONSOLE_API_KEY)) {
+          sendMcpUnauthorized(res);
+          return;
+        }
+
         const sessionId = typeof req.headers["mcp-session-id"] === "string"
           ? req.headers["mcp-session-id"]
           : undefined;
-        if (sessionId && mcpTransports.has(sessionId)) mcpSessionLastSeen.set(sessionId, Date.now());
-        const resolveTransport = () => {
-          if (sessionId) {
-            const bySessionId = mcpTransports.get(sessionId);
-            if (bySessionId) return bySessionId;
-          }
-
-          if (defaultMcpSessionId && mcpTransports.has(defaultMcpSessionId)) {
-            return mcpTransports.get(defaultMcpSessionId) || null;
-          }
-
-          if (mcpTransports.size >= 1) {
-            return mcpTransports.values().next().value || null;
-          }
-
-          return null;
-        };
+        // Sessions belong to the key that created them.
+        const sessionOwner = getMcpApiKey(req.headers);
 
         if (method === "POST") {
           const body = await readJsonBody(req);
@@ -4434,50 +4153,27 @@ async function maybeStartHttpServer(managerOverride) {
 
           const isToolCall = body?.method === "tools/call";
           const t0 = Date.now();
-          if (reqSum && isToolCall) {
-            console.error(`📡  ${reqSum}`);
-          }
-
-          if (!isAuthorizedMcpRequest(req.headers, manager.config, CONSOLE_API_KEY)) {
-            sendMcpUnauthorized(res);
-            return;
-          }
           const allowedTools = getAllowedToolsForRequest(req.headers, manager.config, CONSOLE_API_KEY);
           const allowedMcpBrowsers = getAllowedMcpBrowsersForRequest(req.headers, manager.config, CONSOLE_API_KEY);
 
           if (isInitializeRequest(body)) {
             // If client sends initialize with an existing session ID, the old
             // transport is already initialized and will reject. Clean it up
-            // and create a fresh one.
-            if (sessionId && mcpTransports.has(sessionId)) {
-              const oldTransport = mcpTransports.get(sessionId);
-              mcpTransports.delete(sessionId);
-              mcpServers.delete(sessionId);
-              if (defaultMcpSessionId === sessionId) {
-                defaultMcpSessionId = mcpTransports.keys().next().value || null;
-              }
-              try { await oldTransport.close(); } catch (_) {}
+            // and create a fresh one (only the owning key may replace it).
+            if (sessionId && mcpSessions.owns(sessionId, sessionOwner)) {
+              mcpSessions.close(sessionId);
             }
 
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: () => randomUUID(),
               onsessioninitialized: (sid) => {
-                mcpSessionLastSeen.set(sid, Date.now());
-                defaultMcpSessionId = sid;
-                mcpTransports.set(sid, transport);
+                mcpSessions.add(sid, transport, { owner: sessionOwner });
               },
               retryInterval: SSE_RETRY_INTERVAL_MS
             });
 
             transport.onclose = () => {
-              const sid = transport.sessionId;
-              if (sid) {
-                mcpTransports.delete(sid);
-                mcpServers.delete(sid);
-                if (defaultMcpSessionId === sid) {
-                  defaultMcpSessionId = mcpTransports.keys().next().value || null;
-                }
-              }
+              mcpSessions.forget(transport.sessionId);
             };
 
             // K2: bind the session to its key id; permissions re-resolve from
@@ -4488,18 +4184,17 @@ async function maybeStartHttpServer(managerOverride) {
             await mcpServer.connect(transport);
             await transport.handleRequest(req, res, body);
             if (transport.sessionId) {
-              defaultMcpSessionId = transport.sessionId;
-              mcpTransports.set(transport.sessionId, transport);
-              mcpServers.set(transport.sessionId, mcpServer);
+              mcpSessions.add(transport.sessionId, transport, { server: mcpServer, owner: sessionOwner });
             }
             console.error(`🤝  MCP initialized`);
             return;
           }
 
           // Route non-initialize requests to the existing session transport.
-          // Use exact-match lookup only — never fall back to a different session.
+          // Exact-match lookup only — never fall back to a different session.
+          // (The session's CallTool handler does its own 📡/📨 logging.)
           {
-            const existingTransport = sessionId ? (mcpTransports.get(sessionId) || null) : null;
+            const existingTransport = mcpSessions.get(sessionId, sessionOwner);
             if (existingTransport) {
               const ip = getClientIp(req);
               const keyInfo = getMcpCallKeyInfo(req.headers);
@@ -4510,6 +4205,13 @@ async function maybeStartHttpServer(managerOverride) {
             }
           }
 
+          // No (live) session: answer statelessly. An expired or unknown
+          // session id still lands here — the request is authenticated and
+          // touches no other session, and clients that never re-initialize
+          // keep working.
+          if (reqSum && isToolCall) {
+            console.error(`📡  ${reqSum}`);
+          }
           const ip = getClientIp(req);
           const keyInfo = getMcpCallKeyInfo(req.headers);
           const response = await mcpCallContext.run({ ip, keyInfo }, () => handleStatelessMcpPost(body, allowedTools, allowedMcpBrowsers));
@@ -4529,8 +4231,6 @@ async function maybeStartHttpServer(managerOverride) {
             try {
               const tool = body?.params?.name || "unknown";
               const args = body?.params?.arguments || {};
-              const ip = getClientIp(req);
-              const keyInfo = getMcpCallKeyInfo(req.headers);
               const rawText = response?.result?.content?.[0]?.text ?? "";
               const preview = String(rawText || JSON.stringify(response?.result || "")).slice(0, 8000);
               const ok = !response?.result?.isError;
@@ -4543,24 +4243,24 @@ async function maybeStartHttpServer(managerOverride) {
         }
 
         if (method === "GET" || method === "DELETE") {
-          const transport = resolveTransport();
-          if (!transport) {
-            const message = sessionId
-              ? "Bad Request: No valid session ID provided"
-              : "Bad Request: Missing initialize request";
+          // MCP spec: a missing session id is a bad request; an unknown (or
+          // expired, or another key's) id is 404 so the client re-initializes.
+          if (!sessionId) {
             sendJson(res, 400, {
               jsonrpc: "2.0",
-              error: {
-                code: -32000,
-                message
-              },
+              error: { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" },
               id: null
             });
             return;
           }
-
-          if (!sessionId && transport.sessionId) {
-            req.headers["mcp-session-id"] = transport.sessionId;
+          const transport = mcpSessions.get(sessionId, sessionOwner);
+          if (!transport) {
+            sendJson(res, 404, {
+              jsonrpc: "2.0",
+              error: { code: -32001, message: "Session not found" },
+              id: null
+            });
+            return;
           }
           await transport.handleRequest(req, res);
           return;
@@ -4642,7 +4342,7 @@ async function maybeStartHttpServer(managerOverride) {
             heapUsed: memory.heapUsed,
             heapTotal: memory.heapTotal
           },
-          sessions: mcpTransports.size,
+          sessions: mcpSessions.size,
           cache: {
             total: toolResultCache.web_search.size + toolResultCache.web_fetch.size,
             byTool: {
@@ -5454,7 +5154,7 @@ async function maybeStartHttpServer(managerOverride) {
         mark = timer.step("capture_screenshots", mark);
         await applyScreenshotStorage(payload, manager.config);
         mark = timer.step("store_screenshots", mark);
-        const markdown = formatScreenshotResponse(payload).content[0].text;
+        const markdown = formatScreenshotResponse(payload, { images: "markdown" }).content[0].text;
         timer.step("format_response", mark);
         timer.end({ status: "ok" });
         logEvent("http.response", { method, path: url.pathname, result: payload });
@@ -5544,8 +5244,7 @@ async function maybeStartHttpServer(managerOverride) {
   const keepaliveFrame = keepaliveEncoder.encode(": keepalive\n\n");
 
   const keepaliveInterval = setInterval(() => {
-    const entries = [...mcpTransports.entries()];
-    for (const [, transport] of entries) {
+    for (const transport of mcpSessions.transports()) {
       try {
         const ws = transport._webStandardTransport;
         if (!ws?._streamMapping) continue;
@@ -5558,7 +5257,7 @@ async function maybeStartHttpServer(managerOverride) {
           }
         }
       } catch {
-        // Do NOT delete from mcpTransports here — _webStandardTransport
+        // Do NOT forget the session here — _webStandardTransport
         // may be temporarily unavailable during a close sequence but the
         // transport is still valid. The SDK's own onclose handler will
         // clean up when the session is truly dead.
@@ -5568,27 +5267,7 @@ async function maybeStartHttpServer(managerOverride) {
   keepaliveInterval.unref();
 
   const sessionSweepInterval = setInterval(() => {
-    const now = Date.now();
-    let closed = 0;
-    for (const [sid, transport] of [...mcpTransports.entries()]) {
-      const lastSeen = mcpSessionLastSeen.get(sid) ?? now;
-      if (!mcpSessionLastSeen.has(sid)) mcpSessionLastSeen.set(sid, now);
-      if (now - lastSeen < MCP_SESSION_IDLE_TTL_MS) continue;
-      // A client holding an SSE stream open is still connected — keep it.
-      try {
-        if (transport._webStandardTransport?._streamMapping?.size > 0) continue;
-      } catch {}
-      mcpTransports.delete(sid);
-      mcpServers.delete(sid);
-      mcpSessionLastSeen.delete(sid);
-      if (defaultMcpSessionId === sid) defaultMcpSessionId = mcpTransports.keys().next().value || null;
-      transport.close?.()?.catch?.(() => {});
-      closed += 1;
-    }
-    for (const sid of mcpSessionLastSeen.keys()) {
-      if (!mcpTransports.has(sid)) mcpSessionLastSeen.delete(sid);
-    }
-    if (closed) console.log(`[mcp] closed ${closed} idle session(s) (no traffic for ${Math.round(MCP_SESSION_IDLE_TTL_MS / 60000)}m, no open stream); ${mcpTransports.size} remain`);
+    mcpSessions.sweep();
   }, MCP_SESSION_SWEEP_MS);
   sessionSweepInterval.unref();
 

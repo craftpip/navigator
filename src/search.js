@@ -5,6 +5,7 @@ import { Readability } from "@mozilla/readability";
 import { performance } from "node:perf_hooks";
 import vm from "node:vm";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   recordDbEngineAttempt,
@@ -27,6 +28,7 @@ import { extractTextFromHtml } from "./extractors/index.js";
 import { parseHtmlToDom } from "./extractors/helpers.js";
 import { extract as trafilaturaExtract } from "./extractors/trafilatura.js";
 import { WebFetchOperation } from "./web-fetch-operation.js";
+import { NavigationOutcome, finalizeFetchResult, detectBotChallenge } from "./page-outcome.js";
 import {
   safeTruncateText,
   extractTablesFromDocument,
@@ -258,14 +260,51 @@ try {
   // No persisted engine telemetry on the first start.
 }
 
-function persistEngineAttemptLog() {
+// The attempt log holds up to ENGINE_ATTEMPT_LOG_MAX entries and changes on
+// every engine attempt. Serializing it synchronously on each change blocked
+// the event loop on the search hot path, so writes are coalesced: at most one
+// async write per ENGINE_ATTEMPT_PERSIST_DEBOUNCE_MS, plus a synchronous flush
+// for admin purges (callers expect the file to reflect them) and on exit.
+const ENGINE_ATTEMPT_PERSIST_DEBOUNCE_MS = 2000;
+let engineAttemptPersistTimer = null;
+let engineAttemptWriteInFlight = null;
+
+function engineAttemptPersistError(error) {
+  console.error(`⚠️  Could not persist engine telemetry: ${String(error?.message || error)}`);
+}
+
+function flushEngineAttemptLogSync() {
+  if (engineAttemptPersistTimer) {
+    clearTimeout(engineAttemptPersistTimer);
+    engineAttemptPersistTimer = null;
+  }
   try {
     mkdirSync(path.dirname(ENGINE_ATTEMPT_STATE_PATH), { recursive: true });
     writeFileSync(ENGINE_ATTEMPT_STATE_PATH, JSON.stringify(engineAttemptLog), "utf8");
   } catch (error) {
-    console.error(`⚠️  Could not persist engine telemetry: ${String(error?.message || error)}`);
+    engineAttemptPersistError(error);
   }
 }
+
+function persistEngineAttemptLog() {
+  if (engineAttemptPersistTimer) return;
+  engineAttemptPersistTimer = setTimeout(async () => {
+    engineAttemptPersistTimer = null;
+    // Serialize writes so an older snapshot can never land after a newer one.
+    const previous = engineAttemptWriteInFlight;
+    engineAttemptWriteInFlight = (async () => {
+      await previous?.catch(() => {});
+      mkdirSync(path.dirname(ENGINE_ATTEMPT_STATE_PATH), { recursive: true });
+      await writeFile(ENGINE_ATTEMPT_STATE_PATH, JSON.stringify(engineAttemptLog), "utf8");
+    })().catch(engineAttemptPersistError);
+    await engineAttemptWriteInFlight;
+  }, ENGINE_ATTEMPT_PERSIST_DEBOUNCE_MS);
+  engineAttemptPersistTimer.unref?.();
+}
+
+process.once("exit", () => {
+  if (engineAttemptPersistTimer) flushEngineAttemptLogSync();
+});
 
 export function recordEngineAttempt(engine, status, errorMsg, resultCount = 0, durationMs = 0) {
   engineAttemptLog.push({ t: Date.now(), engine, status, results: status === "ok" ? Math.max(0, Number(resultCount) || 0) : 0, err: status === "ok" ? "" : readableErrorMessage(errorMsg || status).slice(0, 300) });
@@ -407,7 +446,7 @@ export function purgeEngineRuntimeState(engines) {
     if (targets.has(engineAttemptLog[index]?.engine)) engineAttemptLog.splice(index, 1);
   }
   const telemetryRemoved = engineAttemptLog.length !== before;
-  if (telemetryRemoved) persistEngineAttemptLog();
+  if (telemetryRemoved) flushEngineAttemptLogSync();
   return changed || circuitsRemoved || telemetryRemoved;
 }
 
@@ -1255,7 +1294,7 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
       engineScheduler.markSelected(engine);
       const value = await runSearchRoute({ manager, query, engine, config, explicit: false, limit });
       if (!value.results?.length) {
-        errors.push({ engine, route: routeKey(engine), error: "Search engine returned no results" });
+        errors.push({ engine, route: routeKey(engine), kind: "no_results", error: "Search engine returned no results" });
         continue;
       }
       engineScheduler.recordSuccess(engine, value.results.length, Date.now(), value.durationMs);
@@ -1273,9 +1312,13 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
         console.error(`🔁  ${query}: ${parts.join("; ")}`);
       }
 
+      // The query succeeded: engines that failed before `engine` answered are
+      // recovered fallback notes, not errors. `errors` is reserved for
+      // failures the caller actually has to deal with.
       return {
         ...result,
-        errors,
+        errors: [],
+        fallbackNotes: errors,
         fallback: {
           used: true,
           selectedEngine: engine,
@@ -1289,7 +1332,7 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
         continue;
       }
       if (!reason.schedulerIgnore) engineScheduler.recordFailure(engine, readableErrorMessage(reason));
-      errors.push({ engine, route: routeKey(engine), error: readableErrorMessage(reason) });
+      errors.push({ engine, route: routeKey(engine), kind: "error", error: readableErrorMessage(reason) });
     }
   }
 
@@ -1304,13 +1347,18 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
     console.error(`🔁  ${query}: ${skipParts.join("; ")}`);
   }
 
+  // Nothing answered. Report every engine's outcome — including the ones the
+  // scheduler or an open breaker skipped — so the caller can see why.
   return {
     query,
     resultCount: 0,
     results: [],
     directAnswerCount: 0,
     directAnswers: [],
-    errors,
+    errors: [
+      ...errors,
+      ...skipped.map((entry) => ({ engine: entry.engine, route: entry.route, kind: "skipped", error: `skipped: ${entry.error}` }))
+    ],
     fallback: {
       used: true,
       selectedEngine: null,
@@ -1332,6 +1380,7 @@ function buildQueryResult({ query, settled, limit, fallbackAttempted }) {
       errors.push({
         engine: entry.engine,
         route: entry.engine ? routeKey(entry.engine) : undefined,
+        kind: entry.reason?.schedulerSkip ? "skipped" : "error",
         error: readableErrorMessage(entry.reason)
       });
     }
@@ -1359,6 +1408,29 @@ function buildQueryResult({ query, settled, limit, fallbackAttempted }) {
     errors,
     ...(fallbackAttempted ? { fallbackAttempted: true } : {})
   };
+}
+
+/**
+ * Merge per-query result lists into one URL-deduplicated list. Results are
+ * interleaved by rank (every query's #1, then every #2, …) so each query
+ * variant's best hits lead, and each result lists the variants that found it.
+ */
+function mergeQueryVariantResults(queryEntries) {
+  const combinedByUrl = new Map();
+  const depth = Math.max(0, ...queryEntries.map((entry) => entry.results?.length || 0));
+  for (let rank = 0; rank < depth; rank += 1) {
+    for (const entry of queryEntries) {
+      const itemResult = entry.results?.[rank];
+      if (!itemResult) continue;
+      const existing = combinedByUrl.get(itemResult.url);
+      if (!existing) {
+        combinedByUrl.set(itemResult.url, { ...itemResult, queryVariants: [entry.query] });
+      } else if (!existing.queryVariants.includes(entry.query)) {
+        existing.queryVariants.push(entry.query);
+      }
+    }
+  }
+  return combinedByUrl;
 }
 
 export async function browserSearch({ query, queries, limit = 5, engines }) {
@@ -1444,7 +1516,8 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
       incrementUsageTotal("resultsServed", result[0].resultCount);
       const preview = (result[0].results || []).map((r) => r.llmText || `${r.title || ""} ${r.url || ""}`.trim()).join("\n\n").slice(0, 8000);
       recordSearchEnd(searchId, {
-        ok: true,
+        // A search that produced nothing because engines failed is not "ok".
+        ok: result[0].resultCount > 0 || !(result[0].errors || []).some((error) => error?.kind !== "no_results"),
         resultCount: result[0].resultCount,
         durationMs: performance.now() - tSearchStart,
         responsePreview: preview
@@ -1456,12 +1529,12 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
         directAnswerCount: result[0].directAnswerCount,
         directAnswers: result[0].directAnswers,
         errors: result[0].errors,
+        fallbackNotes: result[0].fallbackNotes || [],
         ...(result[0].fallback ? { fallback: result[0].fallback } : {}),
         ...(result[0].fallbackAttempted ? { fallbackAttempted: true } : {})
       };
     }
 
-    const combinedByUrl = new Map();
     const combinedDirectAnswers = [];
     for (const item of result) {
       combinedDirectAnswers.push(
@@ -1470,29 +1543,15 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
           queryVariant: item.query
         }))
       );
-
-      for (const itemResult of item.results) {
-        if (!combinedByUrl.has(itemResult.url)) {
-          combinedByUrl.set(itemResult.url, {
-            ...itemResult,
-            queryVariants: [item.query]
-          });
-          continue;
-        }
-
-        const existing = combinedByUrl.get(itemResult.url);
-        if (!existing.queryVariants.includes(item.query)) {
-          existing.queryVariants.push(item.query);
-        }
-      }
     }
+    const combinedByUrl = mergeQueryVariantResults(result);
 
     const totalResultCount = [...combinedByUrl.values()].length;
     activityCounters.searchResults += totalResultCount;
     incrementUsageTotal("resultsServed", totalResultCount);
     const previewMulti = [...combinedByUrl.values()].slice(0, 5).map((r) => r.llmText || `${r.title || ""} ${r.url || ""}`.trim()).join("\n\n").slice(0, 8000);
     recordSearchEnd(searchId, {
-      ok: true,
+      ok: totalResultCount > 0 || !result.some((item) => (item.errors || []).some((error) => error?.kind !== "no_results")),
       resultCount: totalResultCount,
       durationMs: performance.now() - tSearchStart,
       responsePreview: previewMulti
@@ -1502,7 +1561,9 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
       queries: uniqueQueries,
       queryCount: uniqueQueries.length,
       totalResultCount,
-      results: [...combinedByUrl.values()].slice(0, Math.max(1, limit || 1)),
+      // `limit` is per query (as for a single query), so the merged list keeps
+      // up to limit × queries unique results.
+      results: [...combinedByUrl.values()].slice(0, Math.max(1, limit || 1) * uniqueQueries.length),
       totalDirectAnswerCount: dedupeDirectAnswers(combinedDirectAnswers).length,
       directAnswers: dedupeDirectAnswers(combinedDirectAnswers),
       queryResults: result
@@ -1517,7 +1578,19 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
   }
 }
 
+// Numeric ("3") and empty (icon / image-only) anchor text says nothing about
+// the target. Borrow a label from the anchor's attributes or its image.
 function enrichNumericLinkText(a, text, href) {
+  if (!text) {
+    const label = [
+      a.getAttribute("aria-label"),
+      a.getAttribute("title"),
+      a.querySelector("img[alt]")?.getAttribute("alt"),
+      a.querySelector("[title]")?.getAttribute("title"),
+      a.querySelector("svg[aria-label]")?.getAttribute("aria-label")
+    ].map((value) => String(value || "").replace(/\s+/g, " ").trim()).find(Boolean);
+    return label ? (label.length > 60 ? `${label.slice(0, 60).trim()}...` : label) : "";
+  }
   if (!/^\d+$/.test(text)) return text;
 
   const ariaLabel = (a.getAttribute("aria-label") || "").trim();
@@ -1595,12 +1668,14 @@ function extractLinksFromHtml({ html, url, dom: providedDom }) {
 
     container.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href");
+      // Links inside table cells are registered like any other: table-built
+      // pages (Hacker News, listings, indexes) carry all their content there.
       if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
-      if (a.closest("td, th")) return;
 
       let absoluteHref;
       try {
-        absoluteHref = new URL(href, url).href;
+        // Same base the browser uses: <base href> when present, else the page URL.
+        absoluteHref = new URL(href, doc.baseURI || url).href;
       } catch {
         return;
       }
@@ -1680,22 +1755,6 @@ async function stabilizePage(page, hint, config, strategyOverride, contentTarget
     }).catch(() => {});
   } else if (stabilizeStrategy === "mutation") {
     await waitForMutations(page, { maxWait: 5000 }).catch(() => {});
-  }
-}
-
-async function detectBotChallenge(page) {
-  try {
-    return await page.evaluate(() => {
-      const title = document.title || "";
-      const bodyText = (document.body?.innerText || "").trim();
-      const html = (document.documentElement?.outerHTML || "").toLowerCase();
-      if (html.includes("cf-browser-verification") || html.includes("__cf_challenge") || /just a moment|performing security verification|security service to protect/i.test(`${title}\n${bodyText}`)) return "Cloudflare challenge";
-      if (html.includes("data-dome") || bodyText.includes("Please enable JS") || bodyText.includes("disable any ad blocker")) return "DataDome challenge";
-      if ((!title && !bodyText) || /^[a-z0-9-]+\.[a-z]{2,}$/i.test(title)) return `Bot block detected (title: "${title}")`;
-      return null;
-    });
-  } catch {
-    return null;
   }
 }
 
@@ -1796,16 +1855,12 @@ function mergeExtractedStages(stages, maxChars, preCollectedLinks = []) {
     }
     if (stage.warnings?.length) warnings.push(...stage.warnings);
   }
-  let text = textParts.join("\n\n").trim();
-  let textWasTruncated = false;
-  if (text.length > maxChars) {
-    text = safeTruncateText(text, maxChars);
-    textWasTruncated = text.endsWith("...");
-  }
+  const fullText = textParts.join("\n\n").trim();
+  const truncated = fullText.length > maxChars;
   return {
-    text,
-    textWasTruncated,
-    textOriginalLength,
+    text: truncated ? fullText.slice(0, maxChars).trimEnd() : fullText,
+    truncated,
+    textOriginalLength: Math.max(textOriginalLength, fullText.length),
     tables,
     links: [...linksByHref.values()],
     warnings: [...new Set(warnings)]
@@ -1864,15 +1919,7 @@ async function replayFlowFromSnapshot({ url, html, hint, maxChars, debug, hintNo
   const merged = mergeExtractedStages(stages, maxChars, [...linksByHref.values()]);
   merged.warnings = [...merged.warnings, ...warnings];
 
-  let finalText = merged.text || "";
-  const textWasTruncated = merged.textWasTruncated;
-  if (textWasTruncated || finalText.length > maxChars) {
-    const fullSize = merged.textOriginalLength || finalText.length;
-    if (textWasTruncated) {
-      finalText = finalText.slice(0, -3).trimEnd();
-    }
-    finalText += `\n\n*(Response truncated — full page is ${fullSize} chars, increase maxChars to see more)*`;
-  }
+  let finalText = withTruncationNote(merged.text || "", merged);
   if (hintNote) {
     finalText = `${hintNote}\n\n${finalText}`;
   }
@@ -2115,15 +2162,7 @@ async function runFlowExtraction({ page, hint, config, maxChars, debug, debugLog
       ? null
       : buildSeoAnalysis({ snapshot: seoSnapshot, extracted: { text: merged.text, title: finalState.title }, maxChars });
 
-  let finalText = merged.text || "";
-  const textWasTruncated = merged.textWasTruncated;
-  if (textWasTruncated || finalText.length > maxChars) {
-    const fullSize = merged.textOriginalLength || finalText.length;
-    if (textWasTruncated) {
-      finalText = finalText.slice(0, -3).trimEnd();
-    }
-    finalText += `\n\n*(Response truncated — full page is ${fullSize} chars, increase maxChars to see more)*`;
-  }
+  let finalText = withTruncationNote(merged.text || "", merged);
 
   if (hintNote) {
     finalText = `${hintNote}\n\n${finalText}`;
@@ -2299,6 +2338,13 @@ export async function runScriptExtraction({ page, hint, config, maxChars, debug,
   return result;
 }
 
+// The extraction pipeline (extractors/index.js) truncates once and sets
+// `truncated`; this is the single rendering of that fact for the model.
+function withTruncationNote(text, extracted) {
+  if (!extracted?.truncated) return text;
+  return `${text}\n\n*(Response truncated — full page is ${extracted.textOriginalLength} chars, increase maxChars to see more)*`;
+}
+
 export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, includeSeoAnalysis = true, hintOverride = null, cachedHtml = null, captureHtml = false, browser = "", requestScript = null, requestScriptOptions, allowedMcpBrowsers = null }) {
   const tOverall = performance.now();
   activityCounters.fetches += 1;
@@ -2331,8 +2377,11 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
   let t = performance.now();
   const pageOpId = recordPageOpStart({ tool: "web_fetch", url, backend: manager.config.defaultBackend });
 
+  // What the navigation produced (HTTP status, content type, error page).
+  // Set right after goto; finalizeFetchResult() applies it to every result.
+  let navigation = null;
   try {
-    const result = await operation.run(async () => {
+    const rawResult = await operation.run(async () => {
       let hint = null;
       let hintCandidates = [];
       let hintNote = "";
@@ -2405,15 +2454,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
           signal: operation.signal
         }));
         const links = extractLinksFromHtml({ html: cached, url });
-        let finalText = extracted.text || "";
-        const textWasTruncated = extracted.text?.endsWith("...");
-        if (textWasTruncated || finalText.length > maxChars) {
-          const fullSize = extracted.textOriginalLength || finalText.length;
-          if (textWasTruncated) {
-            finalText = finalText.slice(0, -3).trimEnd();
-          }
-          finalText += `\n\n*(Response truncated — full page is ${fullSize} chars, increase maxChars to see more)*`;
-        }
+        let finalText = withTruncationNote(extracted.text || "", extracted);
         if (hintNote) {
           finalText = `${hintNote}\n\n${finalText}`;
         }
@@ -2448,13 +2489,28 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
 
         try {
           t = performance.now();
-          await withPageTimeout("goto", () =>
+          const response = await withPageTimeout("goto", () =>
             page.goto(url, {
               waitUntil: "domcontentloaded",
               timeout: manager.config.browserOpTimeoutMs
             })
           );
+          navigation = await withPageTimeout("inspect_navigation", () => NavigationOutcome.inspect(page, response, url));
           debugLog("goto_page", t);
+
+          // Error pages, PDFs and downloads have nothing to extract — return
+          // straight away instead of waiting for them to "stabilize".
+          const terminalFailure = navigation.terminalFailure();
+          if (terminalFailure) {
+            return {
+              title: navigation.isChromeError ? url : (await page.title().catch(() => "")) || url,
+              url: navigation.isChromeError ? url : navigation.finalUrl,
+              text: "",
+              error: terminalFailure,
+              browser: usedBrowser,
+              ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})
+            };
+          }
 
           t = performance.now();
           hint = hintOverride
@@ -2723,14 +2779,7 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
           const links = extractLinksFromHtml({ html, url: resolvedUrl });
           debugLog("extract_links", t);
 
-          const textWasTruncated = extracted.text?.endsWith("...");
-          if (textWasTruncated || finalText.length > maxChars) {
-            const fullSize = extracted.textOriginalLength || finalText.length;
-            if (textWasTruncated) {
-              finalText = finalText.slice(0, -3).trimEnd();
-            }
-            finalText += `\n\n*(Response truncated — full page is ${fullSize} chars, increase maxChars to see more)*`;
-          }
+          finalText = withTruncationNote(finalText, extracted);
 
           if (hintNote) {
             finalText = `${hintNote}\n\n${finalText}`;
@@ -2773,8 +2822,9 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
       }, { signal: operation.signal });
     });
 
+    const result = finalizeFetchResult(rawResult, navigation);
     await operation.finish("op_complete");
-    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: true, responsePreview: result.text || "" });
+    recordPageOp({ id: pageOpId, tool: "web_fetch", url, backend: result?.browser || manager.config.defaultBackend, durationMs: performance.now() - tOverall, responseChars: result.text?.length, ok: result.ok !== false, ...(result.error ? { error: result.error } : {}), responsePreview: result.text || "" });
     return result;
   } catch (error) {
     await operation.finish(operation.timedOut ? "op_timeout" : "op_failed");
@@ -2784,6 +2834,10 @@ export async function browserOpenAndExtract({ url, maxChars: requestedMaxChars, 
     operation.dispose();
   }
 }
+
+// Chromium's capture limit is 16384 px per side.
+const FULL_PAGE_MAX_HEIGHT = 16384;
+const FULL_PAGE_MAX_WIDTH = 16384;
 
 export async function browserCaptureScreenshot({
   url,
@@ -2847,13 +2901,21 @@ export async function browserCaptureScreenshot({
       const vpLog = viewport ? `${viewport.width}x${viewport.height}` : "default";
       console.error(`📸  url screenshot: url=${url} format=${normalizedFormat} quality=${normalizedQuality ?? "default"} fullPage=${fullPage !== false} viewport=${vpLog} dims=${dimensions.fullWidth}x${dimensions.fullHeight} timeout=${timeoutMs}ms`);
 
+      // Chromium cannot encode a capture taller than ~16K px ("Page is too
+      // large"). Clip very tall pages to the top FULL_PAGE_MAX_HEIGHT px and
+      // say so, instead of failing the whole screenshot.
+      const clipped = fullPage !== false && dimensions.fullHeight > FULL_PAGE_MAX_HEIGHT;
+      const captureArea = clipped
+        ? { clip: { x: 0, y: 0, width: Math.min(dimensions.fullWidth, FULL_PAGE_MAX_WIDTH), height: FULL_PAGE_MAX_HEIGHT }, captureBeyondViewport: true }
+        : { fullPage: fullPage !== false };
+
       let screenshot;
       try {
         screenshot = await Promise.race([
           page.screenshot({
             type: normalizedFormat,
             encoding: "base64",
-            fullPage: fullPage !== false,
+            ...captureArea,
             ...(normalizedFormat === "jpeg" && normalizedQuality ? { quality: normalizedQuality } : {})
           }),
           new Promise((_, reject) =>
@@ -2876,6 +2938,7 @@ export async function browserCaptureScreenshot({
         sizeBytes: Buffer.byteLength(screenshot, "base64"),
         captureTimestamp: new Date().toISOString(),
         dimensions,
+        ...(clipped ? { note: `clipped at ${FULL_PAGE_MAX_HEIGHT} px of ${dimensions.fullHeight} px page height (full-page captures are capped; use web_page_screenshot_crop with a region for lower parts)` } : {}),
         screenshotBase64: screenshot,
         browser: usedBrowser,
         ...(rollbackNotes.length ? { browserNote: `Browser rollback: ${rollbackNotes.join(", ")}` } : {})

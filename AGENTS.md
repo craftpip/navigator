@@ -69,6 +69,10 @@ Opens pages and returns cleaned, readable text content.
 
 **Output:** Per-item success/error with readable text, tables, warnings, and a page reference. The page's extractor (set by the domain hint, see the Domain Hints workflow) decides how content is rendered — tables are that extractor's job, not a separate flag. Links are shown inline as `[text](ref_id)`; resolve them with `web_page_links(ref_ids: [link_ref_id])`, then fetch with `web_fetch(ref_ids: [link_ref_id])`.
 
+**Extraction pipeline** (`src/extractors/index.js`, `ExtractorChain`): the hint's extractor runs first; a selective extractor (`trafilatura_to_markdown`, `readability_to_markdown`) whose output covers under 20% of the page's visible text (and misses 2000+ chars) falls through its chain — trafilatura → Readability → html_to_markdown — and the result names the extractor used (`- Extractor: … (fallback — …)`). trafilatura's own glued "fallback extraction" is rejected outright. Extractors return full text; the pipeline truncates once and sets `truncated`. `web_fetch` extracts at the 200000-char hard cap and truncates per request after the cache, so `maxChars` up to 200000 works and does not split cache entries.
+
+**Failures** (`src/page-outcome.js`): every result leaves through `finalizeFetchResult()` — any `error` means `ok: false` (never cached). `NavigationOutcome` reads the `page.goto()` response: chrome-error:// pages, PDFs and binary downloads return immediately with a specific error; 4xx/5xx pages are `ok: false` with `HTTP <status>` but keep the server's error-page text. Bot detection only counts positive challenge signatures (Cloudflare, DataDome, a page with no title, text or media) — a bare-domain title is not a block.
+
 **Script precedence (first match wins):** request `script` → `web_fetch_setup` persisted script → static `script` hint → flow / default / generic.
 
 **Extractor formats** (`default.format`, or per-block `format` in flows) — the drop-downs are labeled **Extractor**: `text` (flat dump) · `html` (raw HTML in a ```html fence) · `html_to_markdown` (whole page → markdown) · `readability_to_markdown` (Readability strips nav/ads → markdown, default) · `table` / `table_json` / `table_csv` (tables-only output) · `list` (blocks only). AI model ids are **not** extractor formats — validation rejects them with a pointer to `postProcessor`, and load-time coercion migrates any legacy hint that carried one (plan 60 S4, completing plan 25's post-processor-only design). Models run as post-processors on the extractor's output. Serving a model is a separate concern — navigator POSTs to either `<baseUrl>/chat/completions` (OpenAI-compatible, `kind: "chat"` — e.g. reader-lm) or `<baseUrl>/extract` (`kind: "mineru"` — the MinerU-HTML v1.1 GPU sidecar, see `docker/navigator-mineru/`). Note `jinaai/reader-lm-0.5b` is **CC-BY-NC-4.0** (non-commercial); the MinerU-HTML model carries the Tencent Hunyuan Community License.
@@ -103,7 +107,7 @@ Captures rendered page appearance as images.
 - `fullPage: boolean` (default `true`) — Capture entire page
 - `output: "base64" | "file" | "url"` (default `base64`) — `file` and `url` depend on screenshot storage configuration
 
-**Output:** Inline base64 JPEG, a file path, or a download URL depending on `output`. The format is always JPEG.
+**Output:** A short metadata text item plus an MCP `image` content item (`{type: "image", data, mimeType}`) for `output: "base64"`, or a file path / download URL. Never a base64 data URL inside the text (models get a token dump instead of a picture) — only the HTTP `/screenshot` endpoint keeps the inline-markdown form (`formatScreenshotResponse(payload, { images: "markdown" })`, `src/page-responses.js`). Full-page captures taller than 16384 px (Chromium's limit) are clipped to the top 16384 px with a `Note: clipped at … px of … px` line. The format is always JPEG.
 
 ---
 
@@ -122,7 +126,7 @@ Captures a **small, tightly cropped** JPEG of one element or an explicit rectang
 - `quality: "low" | "medium" | "high"` (default `medium`) — JPEG quality presets (30, 55, 75)
 - `viewport: { width, height }` — Viewport for the urls path (unlike `web_page_screenshot`, there is **no `fullPage`** — a crop is never full-page)
 
-**Output:** Inline base64 JPEG plus crop metadata for each entry: the crop target (`selector "…"` / `xpath "…"` / `region x,y WxH`), `matched N of M` (first match wins), the final rect after padding + clamping (`Rect: x,y WxH (document CSS px)`), per-edge `Clamped:` notes, and output size (`Output: N KB jpeg (quality …)`). A selector/xpath that matches nothing returns interactive-element candidates; a rect that clamps to zero area (fully off-page) or a zero-area element is rejected with a readable error. The image is captured with `captureBeyondViewport: true` — the crop is taken in place, never scrolled into view.
+**Output:** An MCP `image` content item plus crop metadata text for each entry: the crop target (`selector "…"` / `xpath "…"` / `region x,y WxH`), `matched N of M` (first match wins), the final rect after padding + clamping (`Rect: x,y WxH (document CSS px)`), per-edge `Clamped:` notes, and output size (`Output: N KB jpeg (quality …)`). A selector/xpath that matches nothing returns interactive-element candidates; a rect that clamps to zero area (fully off-page) or a zero-area element is rejected with a readable error. The image is captured with `captureBeyondViewport: true` — the crop is taken in place, never scrolled into view.
 
 ```json
 {"urls": ["https://example.com"], "selector": "h1", "padding": 4}
@@ -247,11 +251,13 @@ mcp-server --> engines
 
 `src/engines/index.js` imports no `search.js` / `browser.js` / `config.js`. `config.js` imports `SUPPORTED_ENGINES` from it.
 
-**Driver contract** (`src/engines/driver.js`): instance properties `id`, `backend` (`api` | `cloakbrowser` | `chromium` | `lightpanda`), `pool` (`engine` | `shared`, browser drivers only), `homeUrl` (null for API drivers), `inputSelectors`, `resultSelectors`; methods `searchUrl(query)`, `search({ query })` (API only), `submit(page, query)`, `extract(page)`, `assertNotBlocked(page)` (browser drivers). Every driver returns `{ results, directAnswers }` with each item tagged `engine: this.id`.
+**Driver contract** (`src/engines/driver.js`): instance properties `id`, `pool` (`engine` | `shared`, browser drivers only), `homeUrl` (null for API drivers), `inputSelectors`, `resultSelectors`; methods `searchUrl(query)`, `search({ query })` (API only), `submit(page, query)`, `extract(page)`, `assertNotBlocked(page)` (browser drivers). Every driver returns `{ results, directAnswers }` with each item tagged `engine: this.id`.
 
-- `BrowserSearchDriver.submit()` = goto → body wait → 500ms settle → `waitForAnySelector` with before/after `assertNotBlocked`.
-- DuckDuckGo overrides `submit()` (set the form value, wait for form-submission navigation). Google and Mojeek override `assertNotBlocked()` for their block checks.
-- Startpage overrides `submit()` and `extract()` to wrap them in `withNavigationRetry()` (retries on `Execution context was destroyed` / `Target closed` / `Cannot find context with specified id` up to 3×, 400ms apart). Startpage fires a transient client-side navigation ~1.4s after load that destroys the execution context exactly when the unguarded `assertNotBlocked` evaluate runs — without the retry the first search on a cold window trips the circuit breaker.
+- Browser drivers extend `BrowserSearchDriver` (`src/engines/browser-driver.js`) and are mostly declarative: `resultSelectors`, `extractPage` (in-page function), `label`, `blockMarkers` (`{ url?, text? }` regexes on top of the shared CAPTCHA wording / `/sorry/` / captcha-widget checks).
+- `submit()` = `withNavigationRetry(load)`; `load()` = goto → body wait → 500ms settle → poll `resultSelectors` (block markers checked every ~1s while nothing matches). DuckDuckGo overrides `load()` (form submission).
+- `extract()` = `withNavigationRetry(extractViaEvaluate(extractPage))`. `withNavigationRetry()` is shared by every browser driver (retries `Execution context was destroyed` / `Target closed` / `Cannot find context with specified id` up to 2×, 400ms apart): Startpage (~1.4s after load) and Bing fire client-side navigations that destroy the context mid-evaluate; without it the route breaker opened for 5 minutes.
+- Block markers are only judged when no result selector matched or extraction found **zero** results, so a results page about "captcha" is never a block, and a bot wall is never a successful empty search (it throws, counts as a bot block and opens the breaker). Result selectors must be specific: Brave's bot page also renders `#results` / `#search-page`.
+- Google result anchors are opaque `/goto?url=<token>` redirects. The driver resolves them with one plain redirect lookup each (no cookies/header spoofing), stops at the first one Google gates behind its "Verifying your request" page, and drops anything still on a google.* host; an entirely gated page fails the route.
 - `ApiSearchDriver` is a convenience base for API routes — no fake `homeUrl`, never browser-warmed or pooled.
 - Driver `extract()` functions are plain functions referencing global `document`; tests run them via jsdom `eval` with `runScripts: "outside-only"`.
 
@@ -265,10 +271,11 @@ mcp-server --> engines
 
 | backend | pool | routes |
 |---|---|---|
-| `api` | — | `duckduckgo_api` (the only API route — `brave_api` was removed 2026-08-01) |
-| `cloakbrowser` | engine | `duckduckgo_cb`, `google_cb`, `bing_cb`, `brave_cb`, `startpage_cb`, `yahoo_cb` |
-| `chromium` | engine | `duckduckgo_ch`, `google_ch` (valid internal routes, not advertised via MCP) |
-| `lightpanda` | shared | `google_lp`, `bing_lp`, `mojeek_lp` |
+| `api` | — | `duckduckgo_api`, `exa_api`, `firecrawl_api`, `linkup_api`, `tavily_api` (key-gated routes are skipped when their key is unset) |
+| browser | engine | `duckduckgo`, `google`, `brave`, `startpage`, `yahoo` |
+| browser | shared | `bing`, `mojeek` (one window shared by the route; concurrency 1) |
+
+Browser routes run on the browser holding the `search` role in `BROWSERS` (resolved by `resolveBrowserParam(..., { roles: ["search"] })`, e.g. cloakbrowser), falling back to built-in Chromium when it is unreachable. The old per-backend route names (`*_cb`, `*_ch`, `*_lp`) no longer exist; `engineStateIds()` in `src/search.js` only uses them to purge legacy persisted state.
 
 **Adding a route** = implement a driver in `src/engines/` and register it in `index.js`. Do not re-add engine maps to `src/search.js` — use the registry functions so one representation cannot drift. Timing logs stay in `src/search.js` (the orchestrator owns them); API drivers do not log timings.
 
