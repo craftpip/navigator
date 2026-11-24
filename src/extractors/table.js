@@ -8,14 +8,13 @@ import {
   extractTablesFromDocument,
   renderTableAsMarkdown,
   renderTablesAsJson,
-  renderTablesAsCsv,
-  safeTruncateText
+  renderTablesAsCsv
 } from "./helpers.js";
 
 export const FORMATS = ["table", "table_json", "table_csv"];
 
 export async function extract(doc, context) {
-  const { url, maxChars, format } = context;
+  const { url, format } = context;
 
   const tables = extractTablesFromDocument(doc).map(({ node, ...rest }) => rest);
   if (!tables.length) return null;
@@ -35,7 +34,7 @@ export async function extract(doc, context) {
   return {
     title: "", // orchestrator fills title
     url,
-    text: safeTruncateText(text, maxChars),
+    text,
     textOriginalLength: text.length
   };
 }

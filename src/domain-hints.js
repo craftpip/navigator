@@ -869,6 +869,13 @@ function validateDefault(defaultBlock, errors, warnings, aiModelIds) {
 // warnings are skipped. Callers that know the configured set pass the id list
 // (including [] when no models are configured) so dangling postProcessor
 // references are flagged (plan 60 S3).
+// Fields only the managed store carries (identity, ordering, bookkeeping). A
+// managed hint is a static script hint plus these, so the managed schema
+// extends the static one instead of reporting them as unknown.
+const MANAGED_ONLY_KEYS = ["id", "enabled", "priority", "createdAt", "updatedAt"];
+
+// scope: "static" (domain-hints.json), "test" (request/test-pane drafts — no
+// domain/pathPattern required), "managed" (static + MANAGED_ONLY_KEYS).
 export function validateHintRule(hint, { scope = "static", aiModelIds = null, browserNames = null } = {}) {
   const errors = [];
   const warnings = [];
@@ -972,8 +979,9 @@ export function validateHintRule(hint, { scope = "static", aiModelIds = null, br
   }
   validateFlowOptions(hint, errors, warnings);
 
+  const allowedKeys = scope === "managed" ? [...TOP_LEVEL_KEYS, ...MANAGED_ONLY_KEYS] : TOP_LEVEL_KEYS;
   for (const key of Object.keys(hint)) {
-    if (TOP_LEVEL_KEYS.includes(key) || Object.prototype.hasOwnProperty.call(LEGACY_TOP_LEVEL_KEYS, key)) continue;
+    if (allowedKeys.includes(key) || Object.prototype.hasOwnProperty.call(LEGACY_TOP_LEVEL_KEYS, key)) continue;
     warnings.push({ field: key, message: "unknown field (ignored)" });
   }
 
@@ -1149,7 +1157,7 @@ export function validateManagedHint(hint) {
   } else if (hint.default !== undefined || hint.flow !== undefined) {
     errors.push({ field: "script", message: 'choose exactly one extraction method: managed entries support "script" only' });
   }
-  const { errors: ruleErrors, warnings: ruleWarnings } = validateHintRule(hint, { scope: "static" });
+  const { errors: ruleErrors, warnings: ruleWarnings } = validateHintRule(hint, { scope: "managed" });
   errors.push(...ruleErrors);
   warnings.push(...ruleWarnings);
   return { errors, warnings };
@@ -1180,6 +1188,28 @@ export function findMatchingManagedHints(urlStr, entries) {
   return sortManagedHints(findMatchingHints(urlStr, enabled));
 }
 
+/**
+ * Validate the store after a mutation. Only entries the mutation created or
+ * changed can fail it — an untouched stored entry that has gone invalid
+ * (schema change, hand edit) must not block every write, including the
+ * disable/remove that would fix it; its problems come back as warnings. A
+ * disabled entry never matches, so its errors are warnings too.
+ */
+function validateManagedMutation(working, beforeEntries) {
+  const untouched = new Set(beforeEntries.map((entry) => JSON.stringify(entry)));
+  const warnings = [];
+  for (const entry of working) {
+    const { errors } = validateManagedHint(entry);
+    if (!errors.length) continue;
+    const detail = errors.map((e) => `${e.field}: ${e.message}`).join("; ");
+    if (!untouched.has(JSON.stringify(entry)) && entry?.enabled !== false) {
+      throw new Error(`Invalid managed hint "${entry?.id || "?"}": ${detail}`);
+    }
+    warnings.push(`managed hint "${entry?.id || "?"}"${entry?.enabled === false ? " (disabled)" : ""} is invalid: ${detail}`);
+  }
+  return warnings;
+}
+
 export async function mutateManagedHints(hintsPath, mutator) {
   const resolvedPath = path.resolve(hintsPath);
   const run = async () => {
@@ -1188,12 +1218,7 @@ export async function mutateManagedHints(hintsPath, mutator) {
     // RegExp functions (_pathMatcher) onto cached entries, which clone rejects.
     const working = JSON.parse(JSON.stringify(before.entries));
     const result = mutator(working) || {};
-    for (const entry of working) {
-      const { errors } = validateManagedHint(entry);
-      if (errors.length) {
-        throw new Error(`Invalid managed hint "${entry?.id || "?"}": ${errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`);
-      }
-    }
+    const storeWarnings = validateManagedMutation(working, JSON.parse(JSON.stringify(before.entries)));
     const dir = path.dirname(resolvedPath);
     await fs.mkdir(dir, { recursive: true });
     const tmpPath = path.join(dir, `.${path.basename(resolvedPath)}.tmp-${process.pid}-${Date.now()}`);
@@ -1208,7 +1233,7 @@ export async function mutateManagedHints(hintsPath, mutator) {
     }
     managedHintsCache = { path: resolvedPath, entries: working, revision: (managedHintsCache?.revision || 0) + 1 };
     clearDomainHintCache();
-    return { entries: working, revision: managedHintsCache.revision, ...result };
+    return { entries: working, revision: managedHintsCache.revision, ...result, ...(storeWarnings.length ? { storeWarnings } : {}) };
   };
   const queued = managedWriteQueue.then(run, run);
   managedWriteQueue = queued.catch(() => {});

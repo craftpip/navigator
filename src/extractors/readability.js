@@ -5,16 +5,19 @@
  * Falls back to full-page htmlToMarkdown when Readability under-extracts
  * compared to browser text.
  */
-import { Readability, htmlToMarkdown, toLines, buildCleanText, safeTruncateText, cleanWhitespace } from "./helpers.js";
+import { Readability, htmlToMarkdown, toLines, buildCleanText, cleanWhitespace } from "./helpers.js";
 
 export const FORMAT = "readability_to_markdown";
 
 export async function extract(doc, context) {
-  const { url, maxChars, fallbackTitle, browserText } = context;
+  const { url, fallbackTitle, browserText } = context;
 
   let article = null;
   try {
-    const reader = new Readability(doc);
+    // Readability strips nodes from the document it parses. Give it a clone
+    // so the full-body fallback below (and any later extractor in the
+    // pipeline's fallback chain) still sees the whole page.
+    const reader = new Readability(doc.cloneNode(true));
     article = reader.parse();
   } catch {
     article = null;
@@ -34,7 +37,7 @@ export async function extract(doc, context) {
       return {
         title: cleanWhitespace(article.title || fallbackTitle || ""),
         url,
-        text: safeTruncateText(fullMarkdown, maxChars),
+        text: fullMarkdown,
         textOriginalLength: fullMarkdown.length
       };
     }
@@ -46,13 +49,13 @@ export async function extract(doc, context) {
     return {
       title: cleanWhitespace(article.title || fallbackTitle || ""),
       url,
-      text: safeTruncateText(raw, maxChars),
+      text: raw,
       textOriginalLength: raw.length
     };
   }
 
   // Last resort: article.textContent → clean text lines.
-  const text = buildCleanText(articleLines, maxChars);
+  const text = buildCleanText(articleLines, Infinity);
   return {
     title: cleanWhitespace(article.title || fallbackTitle || ""),
     url,

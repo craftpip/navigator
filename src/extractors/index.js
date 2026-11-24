@@ -5,12 +5,17 @@
  *   1. Parse HTML → JSDOM
  *   2. Apply skip selectors
  *   3. If hint.content.blocks → blocks extraction (early return)
- *   4. Dispatch to format extractor
- *   5. Post-processor runs as final step (single point of application)
- *   6. Return
+ *   4. Run the format's extractor chain (ExtractorChain): the hint's format
+ *      first, then its fallbacks when it returns nothing or — for selective
+ *      extractors — keeps too little of the page's rendered text
+ *   5. Truncate once to maxChars (single point of truncation)
+ *   6. Post-processor runs as final step (single point of application)
+ *   7. Return
  *
  * Every extractor follows the same contract:
  *   (doc, context) → { title, url, text, textOriginalLength } | null
+ * Extractors return their FULL output and must not mutate `doc` (later links
+ * in the chain reuse it); truncation and the `truncated` flag belong here.
  */
 import * as readability from "./readability.js";
 import * as htmlToMarkdown from "./html-to-markdown.js";
@@ -25,7 +30,9 @@ import {
   applySkipSelectors,
   safeTruncateText,
   cleanWhitespace,
-  elementTextWithBreaks
+  elementTextWithBreaks,
+  markdownVisibleTextLength,
+  domVisibleTextLength
 } from "./helpers.js";
 import { runPostProcessor } from "../post-processor.js";
 
@@ -47,6 +54,89 @@ for (const fmt of table.FORMATS) {
 
 /** All known extractor format IDs. */
 export const EXTRACTOR_FORMATS = [...FORMAT_EXTRACTORS.keys()];
+
+// ── Extractor Chain ──────────────────────────────────────────────────────────
+
+// Selective extractors decide what "the main content" is and drop the rest.
+// When one keeps almost nothing of a long page it has picked the wrong
+// container (RFC 9110: 6.8K of 449K chars), so its output is checked against
+// the page's rendered text and the next extractor in its chain is tried.
+const SELECTIVE_FORMATS = new Set([trafilatura.FORMAT, readability.FORMAT]);
+const FALLBACK_CHAINS = new Map([
+  [trafilatura.FORMAT, [readability.FORMAT, htmlToMarkdown.FORMAT]],
+  [readability.FORMAT, [htmlToMarkdown.FORMAT]]
+]);
+// Formats without their own chain fall back to Readability when they produce
+// nothing (e.g. a tables-only extractor on a page without tables).
+const DEFAULT_FALLBACKS = [readability.FORMAT, htmlToMarkdown.FORMAT];
+const COVERAGE_MIN_RATIO = 0.2;
+// Below this many missing characters a low ratio is just a short page with
+// heavy chrome, not lost content.
+const COVERAGE_MIN_MISSING_CHARS = 2000;
+
+class ExtractorChain {
+  constructor(requestedFormat, pageTextLength) {
+    this.requestedFormat = requestedFormat;
+    this.primaryFormat = FORMAT_EXTRACTORS.has(requestedFormat) ? requestedFormat : readability.FORMAT;
+    this.pageTextLength = pageTextLength;
+    this.formats = [...new Set([this.primaryFormat, ...(FALLBACK_CHAINS.get(this.primaryFormat) || DEFAULT_FALLBACKS)])];
+    this.attempts = [];
+  }
+
+  coverageOf(text) {
+    const kept = markdownVisibleTextLength(text);
+    const page = this.pageTextLength;
+    const ratio = page > 0 ? kept / page : 1;
+    const adequate = page <= 0 || ratio >= COVERAGE_MIN_RATIO || page - kept < COVERAGE_MIN_MISSING_CHARS;
+    return { kept, page, ratio, adequate };
+  }
+
+  async run(doc, context) {
+    for (const format of this.formats) {
+      const result = await FORMAT_EXTRACTORS.get(format)(doc, { ...context, format });
+      if (!result?.text?.trim()) {
+        this.attempts.push({ format, result: null });
+        continue;
+      }
+      const coverage = SELECTIVE_FORMATS.has(format) ? this.coverageOf(result.text) : null;
+      const attempt = { format, result, coverage };
+      this.attempts.push(attempt);
+      if (!coverage || coverage.adequate) return this.decorate(attempt);
+    }
+    // Every selective extractor under-covered and nothing else produced
+    // output: keep the attempt that kept the most of the page.
+    const best = this.attempts
+      .filter((a) => a.result)
+      .sort((a, b) => (b.coverage?.ratio ?? 0) - (a.coverage?.ratio ?? 0))[0];
+    return best ? this.decorate(best) : null;
+  }
+
+  // Name the extractor that produced the text, and why it is not the one the
+  // hint asked for, so a short or unusual result can be traced.
+  decorate(chosen) {
+    const result = { ...chosen.result, extractor: chosen.format };
+    if (chosen.format === this.requestedFormat) return result;
+    const reasons = this.attempts
+      .filter((a) => a !== chosen && this.formats.indexOf(a.format) < this.formats.indexOf(chosen.format))
+      .map((a) => (a.result
+        ? `${a.format} kept only ${Math.round((a.coverage?.ratio ?? 0) * 100)}% of the page text (${a.coverage?.kept} of ${a.coverage?.page} chars)`
+        : `${a.format} returned no usable output`));
+    if (reasons.length) result.extractorNote = `fallback — ${reasons.join("; ")}`;
+    return result;
+  }
+}
+
+/** Truncate an extractor result to maxChars and record that it happened. */
+function truncateResult(result, maxChars) {
+  const full = String(result.text || "");
+  const truncated = Number.isFinite(maxChars) && maxChars > 0 && full.length > maxChars;
+  return {
+    ...result,
+    text: truncated ? full.slice(0, maxChars).trimEnd() : full,
+    textOriginalLength: full.length,
+    truncated
+  };
+}
 
 // ── Post-processor Pipeline Step ─────────────────────────────────────────────
 
@@ -173,58 +263,37 @@ export async function extractTextFromHtml({
     const postProcessorModel = defaultBlock.postProcessor;
     if (debug) console.log(`[web_fetch] [${url}] extractTextFromHtml: default extraction (format=${pageFormat})`);
 
-    // ── Step 4: Dispatch to format extractor ──────────────────────────
-    const extractorFn = FORMAT_EXTRACTORS.get(pageFormat);
-
-    // Unknown format or AI model id → treat as readability fallback.
+    // ── Step 4: Run the extractor chain ─────────────────────────────
+    // Page-text reference for the coverage check. The document's text (after
+    // skip selectors) still counts hidden menus; the live innerText (when the
+    // page was rendered) still counts what skip selectors removed. The smaller
+    // of the two is the visible, wanted text.
+    const domTextLength = domVisibleTextLength(doc.body);
+    const pageTextLength = browserText
+      ? Math.min(domTextLength, browserText.replace(/\s+/g, " ").trim().length)
+      : domTextLength;
+    const chain = new ExtractorChain(pageFormat, pageTextLength);
     const context = {
       url,
-      maxChars,
+      maxChars: Infinity,
       fallbackTitle: fallbackTitle || doc.title || "",
       browserText,
       screenshot,
       hint,
       config,
       signal,
-      debug,
-      format: pageFormat
+      debug
     };
 
-    let result;
-    if (extractorFn) {
-      result = await extractorFn(doc, context);
-    } else {
-      // Unknown format — fall back to readability.
-      const fallback = FORMAT_EXTRACTORS.get(readability.FORMAT);
-      result = await fallback(doc, context);
+    let result = await chain.run(doc, context);
+    if (!result) {
+      result = { title: "", url, text: "", textOriginalLength: 0, extractor: pageFormat };
     }
-
-    // Fill in title if extractor returned empty.
-    if (result && !result.title) {
+    if (!result.title) {
       result.title = cleanWhitespace(doc.title || fallbackTitle || "");
     }
-
-    if (!result) {
-      // Extractor returned null (no output) — fall through to readability fallback.
-      // Re-parse HTML to get a fresh DOM (Readability mutates the doc in-place).
-      const freshDom = parseHtmlToDom(html, url);
-      try {
-        const freshDoc = freshDom.window.document;
-        resolveRelativeUrls(freshDoc, url);
-        applySkipSelectors(freshDoc, defaultExtractSkipSelectors, hint?.default?.skipSelectors);
-        const fallback = FORMAT_EXTRACTORS.get(readability.FORMAT);
-        result = await fallback(freshDoc, context);
-        if (result && !result.title) {
-          result.title = cleanWhitespace(freshDoc.title || fallbackTitle || "");
-        }
-      } finally {
-        freshDom?.window?.close();
-      }
-      if (!result) {
-        // Last resort: empty result.
-        result = { title: cleanWhitespace(doc.title || fallbackTitle || ""), url, text: "", textOriginalLength: 0 };
-      }
-    }
+    if (debug && result.extractorNote) console.log(`[web_fetch] [${url}] extractor=${result.extractor} (${result.extractorNote})`);
+    result = truncateResult(result, maxChars);
 
     // ── Step 5: Post-processor (single pipeline step) ─────────────────
     // Screenshot format: pass screenshot as input to post-processor.

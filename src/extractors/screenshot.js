@@ -9,7 +9,7 @@
 export const FORMAT = "screenshot";
 
 export async function extract(doc, context) {
-  const { screenshot, maxChars } = context;
+  const { screenshot } = context;
 
   if (!screenshot) {
     throw new Error("screenshot format requires a live browser page (use in flow steps only)");

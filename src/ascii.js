@@ -78,8 +78,12 @@ function placeMarkers(grid, elements, cols, rows, viewportWidth, viewportHeight)
     const rect = el.rect;
     if (!rect || rect.width <= 0 || rect.height <= 0) continue;
 
-    let col = Math.max(0, Math.round(rect.x * scaleX));
-    let row = Math.round(rect.y * scaleY);
+    // Clamp into the grid: an element that starts above/left of the capture
+    // (negative y/x) is marked on its first visible row/column instead of
+    // writing outside the grid.
+    let col = Math.min(cols - 1, Math.max(0, Math.round(rect.x * scaleX)));
+    const row = Math.min(rows - 1, Math.max(0, Math.round(rect.y * scaleY)));
+    if (rect.y * scaleY >= rows || (rect.y + rect.height) * scaleY < 0) continue;
 
     const marker = `[${el.index}]`;
     const width = marker.length;

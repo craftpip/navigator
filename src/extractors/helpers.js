@@ -130,10 +130,51 @@ export function buildCleanText(lines, maxChars) {
 
 export function safeTruncateText(input, maxChars) {
   const text = String(input || "");
+  // Infinity = "no limit": the extraction pipeline asks extractors for their
+  // full output and truncates once, in one place (extractors/index.js).
+  if (maxChars === Infinity) return text;
   if (!Number.isFinite(maxChars) || maxChars <= 0) return "";
   if (text.length <= maxChars) return text;
   if (maxChars <= 3) return text.slice(0, maxChars);
   return `${text.slice(0, maxChars - 3)}...`;
+}
+
+/**
+ * Length of the human-visible text in a markdown string: link/image targets,
+ * fences, table pipes and emphasis markers removed, whitespace collapsed.
+ * Used to compare an extractor's output against the page's rendered text.
+ */
+export function markdownVisibleTextLength(markdown) {
+  return String(markdown || "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+"[^"]*")?\)/g, "]")
+    .replace(/[\[\]*_`#>|~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim().length;
+}
+
+const NON_VISIBLE_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+
+/** Whitespace-collapsed length of an element's text, skipping script/style. */
+export function domVisibleTextLength(element) {
+  if (!element) return 0;
+  const doc = element.ownerDocument;
+  const walker = doc.createTreeWalker(element, 4 /* SHOW_TEXT */, {
+    acceptNode: (node) => (NON_VISIBLE_TAGS.has(node.parentNode?.nodeName) ? 2 : 1)
+  });
+  let length = 0;
+  let pendingSpace = false;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parts = node.nodeValue.split(/\s+/);
+    for (let i = 0; i < parts.length; i += 1) {
+      if (i > 0) pendingSpace = true;
+      if (!parts[i]) continue;
+      if (pendingSpace && length > 0) length += 1;
+      pendingSpace = false;
+      length += parts[i].length;
+    }
+  }
+  return length;
 }
 
 // ── DOM Helpers ──────────────────────────────────────────────────────────────
@@ -150,8 +191,12 @@ export function parseHtmlToDom(html, url) {
 
 export function resolveRelativeUrls(doc, baseUrl) {
   if (!doc || !baseUrl) return;
+  // doc.baseURI honours a <base href> (relative links resolve against it in
+  // the browser too); fall back to the page URL when it is unusable.
   let base;
-  try { base = new URL(baseUrl); } catch { return; }
+  try { base = new URL(doc.baseURI || baseUrl); } catch {
+    try { base = new URL(baseUrl); } catch { return; }
+  }
   for (const el of doc.querySelectorAll("[href], [src]")) {
     for (const attr of ["href", "src"]) {
       const val = el.getAttribute(attr);
@@ -184,6 +229,33 @@ function normalizeTableCellText(input, maxChars = 120) {
   return safeTruncateText(cleanWhitespace(input), maxChars);
 }
 
+function isNavigableHref(href) {
+  return Boolean(href) && !href.startsWith("#") && !/^javascript:/i.test(href);
+}
+
+// Cell text with its anchors kept as markdown links, so a table of links
+// (Hacker News, listings, indexes) does not lose every href on the way to
+// output. maxChars budgets the visible text only — URLs are never cut.
+function tableCellText(cell, maxChars) {
+  const anchors = Array.from(cell.querySelectorAll("a[href]")).filter((a) => isNavigableHref(a.getAttribute("href")));
+  if (!anchors.length) return normalizeTableCellText(cell.textContent || "", maxChars);
+  const clone = cell.cloneNode(true);
+  let markupChars = 0;
+  for (const a of Array.from(clone.querySelectorAll("a[href]"))) {
+    const href = a.getAttribute("href");
+    if (!isNavigableHref(href)) continue;
+    const label = cleanWhitespace(a.textContent || "");
+    if (!label) {
+      a.remove();
+      continue;
+    }
+    const absolute = a.href || href;
+    markupChars += absolute.length + 4;
+    a.replaceWith(clone.ownerDocument.createTextNode(`[${label.replace(/[[\]]/g, "\\$&")}](${absolute})`));
+  }
+  return normalizeTableCellText(clone.textContent || "", maxChars + markupChars);
+}
+
 function expandTableRows(rowNodes, maxCellChars) {
   const grid = [];
   for (let rowIndex = 0; rowIndex < rowNodes.length; rowIndex += 1) {
@@ -197,7 +269,7 @@ function expandTableRows(rowNodes, maxCellChars) {
       }
       const rowspan = parseInt(cell.getAttribute("rowspan") || "1", 10) || 1;
       const colspan = parseInt(cell.getAttribute("colspan") || "1", 10) || 1;
-      const text = normalizeTableCellText(cell.textContent || "", maxCellChars);
+      const text = tableCellText(cell, maxCellChars);
       for (let dr = 0; dr < rowspan; dr += 1) {
         for (let dc = 0; dc < colspan; dc += 1) {
           const r = rowIndex + dr;

@@ -4,12 +4,12 @@
  * Picks the best semantic container and converts its innerHTML to markdown.
  * Falls back to flat text if no suitable container is found.
  */
-import { collectCandidateBlocks, safeTruncateText, htmlToMarkdown } from "./helpers.js";
+import { collectCandidateBlocks, htmlToMarkdown } from "./helpers.js";
 
 export const FORMAT = "html_to_markdown";
 
 export async function extract(doc, context) {
-  const { url, maxChars } = context;
+  const { url } = context;
 
   let bestMarkdown = "";
   let bestText = "";
@@ -28,7 +28,7 @@ export async function extract(doc, context) {
     return {
       title: "", // orchestrator fills title
       url,
-      text: safeTruncateText(bestMarkdown, maxChars),
+      text: bestMarkdown,
       textOriginalLength: bestMarkdown.length
     };
   }

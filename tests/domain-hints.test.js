@@ -1256,6 +1256,34 @@ describe("managed script-hint store (plan 62)", () => {
     expect(entries).toEqual([]);
   });
 
+  it("an invalid stored entry warns but does not block other mutations or disabling it", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "managed-unit-"));
+    const storePath = path.join(dir, "domain-hints.managed.json");
+    const broken = { ...managedHint({ id: "broken-one" }), domain: "Not A Domain!" };
+    await fs.writeFile(storePath, JSON.stringify([managedHint({ id: "good-one" }), broken]));
+    clearManagedHintCache();
+    const edited = await mutateManagedHints(storePath, (working) => {
+      working.find((e) => e.id === "good-one").comment = "edited";
+      return { id: "good-one" };
+    });
+    expect(edited.storeWarnings.join(" ")).toMatch(/broken-one/);
+    const disabled = await mutateManagedHints(storePath, (working) => {
+      working.find((e) => e.id === "broken-one").enabled = false;
+      return { id: "broken-one" };
+    });
+    expect(disabled.entries.find((e) => e.id === "broken-one").enabled).toBe(false);
+    await expect(mutateManagedHints(storePath, (working) => {
+      working.find((e) => e.id === "broken-one").enabled = true;
+      return { id: "broken-one" };
+    })).rejects.toThrow(/Invalid managed hint "broken-one"/);
+  });
+
+  it("validateManagedHint accepts the managed-only fields without unknown-field warnings", () => {
+    const { errors, warnings } = validateManagedHint({ ...managedHint({ id: "ok-one" }), enabled: true, priority: 60, createdAt: "x", updatedAt: "y" });
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
   it("getManagedHintsPath prefers config, then env, then the data default", () => {
     expect(getManagedHintsPath({ domainHintsManagedPath: "/tmp/custom.json" })).toBe("/tmp/custom.json");
     expect(getManagedHintsPath({})).toMatch(/data[/\\]domain-hints\.managed\.json$/);

@@ -3,12 +3,12 @@
  *
  * Wraps the best container's innerHTML in a ```html code fence.
  */
-import { collectCandidateBlocks, safeTruncateText, buildCleanText } from "./helpers.js";
+import { collectCandidateBlocks, buildCleanText } from "./helpers.js";
 
 export const FORMAT = "html";
 
 export async function extract(doc, context) {
-  const { url, maxChars } = context;
+  const { url } = context;
 
   let bestContainerHtml = "";
   let bestText = "";
@@ -27,7 +27,7 @@ export async function extract(doc, context) {
     return {
       title: "", // orchestrator fills title
       url,
-      text: safeTruncateText(`\`\`\`html\n${bestContainerHtml}\n\`\`\``, maxChars),
+      text: `\`\`\`html\n${bestContainerHtml}\n\`\`\``,
       textOriginalLength: bestContainerHtml.length,
       _rawHtml: bestContainerHtml
     };
@@ -37,7 +37,7 @@ export async function extract(doc, context) {
   return {
     title: "",
     url,
-    text: buildCleanText(lines, maxChars),
+    text: buildCleanText(lines, Infinity),
     textOriginalLength: bestText.length
   };
 }

@@ -454,6 +454,9 @@ export const PLUGIN_PLATFORMS = Object.freeze(new Set([
   "chrome", "chromium", "edge", "opera", "vivaldi", "brave", "firefox",
 ]));
 export const DEFAULT_MAX_CHARS = parseInteger(process.env.WEB_FETCH_MAX_CHARS, 90000);
+// Upper bound for a per-request web_fetch maxChars. Pages are extracted (and
+// cached) at this size; each request is truncated to its own maxChars after.
+export const MAX_CHARS_HARD_CAP = 200000;
 export const DEFAULT_SEARCH_ENABLED_ENGINES = Object.freeze([
   "duckduckgo_api",
   "brave",

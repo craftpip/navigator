@@ -8,8 +8,6 @@ import { collectCandidateBlocks, buildCleanText, elementTextWithBreaks } from ".
 export const FORMAT = "text";
 
 export async function extract(doc, context) {
-  const { maxChars } = context;
-
   let bestText = "";
   try {
     const candidates = collectCandidateBlocks(doc);
@@ -22,7 +20,7 @@ export async function extract(doc, context) {
   return {
     title: "", // orchestrator fills title
     url: context.url,
-    text: buildCleanText(lines, maxChars),
+    text: buildCleanText(lines, Infinity),
     textOriginalLength: bestText.length
   };
 }
