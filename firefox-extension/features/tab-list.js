@@ -86,11 +86,43 @@ var TabList = (function() {
     handleRequest();
   }
 
+  /**
+   * Push the tab list to navigator whenever the user opens, closes or
+   * navigates a tab. Without this the server only learns the tab list at
+   * connect time and Target.getTargets serves a stale cache (newly opened
+   * user tabs are invisible). Debounced: a page load fires several
+   * onUpdated events, and a session restore opens many tabs at once.
+   */
+  var PUSH_DEBOUNCE_MS = 300;
+  var _pushTimer = null;
+  var _watching = false;
+
+  function schedulePush() {
+    if (_pushTimer) clearTimeout(_pushTimer);
+    _pushTimer = setTimeout(function() {
+      _pushTimer = null;
+      refresh();
+    }, PUSH_DEBOUNCE_MS);
+  }
+
+  function watch() {
+    if (_watching) return;
+    _watching = true;
+    chrome.tabs.onCreated.addListener(schedulePush);
+    chrome.tabs.onRemoved.addListener(schedulePush);
+    chrome.tabs.onReplaced.addListener(schedulePush);
+    chrome.tabs.onUpdated.addListener(function(tabId, changeInfo) {
+      // Only changes that alter what Target.getTargets reports.
+      if (changeInfo && (changeInfo.url !== undefined || changeInfo.title !== undefined)) schedulePush();
+    });
+  }
+
   return {
     getAllAsTargets: getAllAsTargets,
     getTargetInfoById: getTargetInfoById,
     mapToTargetInfo: mapToTargetInfo,
     handleRequest: handleRequest,
-    refresh: refresh
+    refresh: refresh,
+    watch: watch
   };
 })();

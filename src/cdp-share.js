@@ -131,17 +131,14 @@ export function checkBrowserAccess(record, browserName) {
 // live DB/config so a revoked key, a narrowed allowed_browsers, or a removed
 // browser tears an established pipe down instead of letting it forward
 // forever.
-const activeCdpPipes = new Map(); // ws -> { presentedKey, browserName }
-
-/** Fake req shaped like a real upgrade request, for audit calls without one. */
-const EMPTY_REQ = { headers: {}, socket: {} };
+const activeCdpPipes = new Map(); // ws -> { presentedKey, browserName, ip }
 
 /**
  * Track an established /cdp pipe so it can be re-authorised later (plan 60
  * K3). Registers with the externally-facing ws and forgets it on close.
  */
-export function registerCdpPipe(ws, presentedKey, browserName) {
-  activeCdpPipes.set(ws, { presentedKey, browserName });
+export function registerCdpPipe(ws, presentedKey, browserName, ip = null) {
+  activeCdpPipes.set(ws, { presentedKey, browserName, ip });
   ws.once("close", () => activeCdpPipes.delete(ws));
 }
 
@@ -161,28 +158,26 @@ export function recheckCdpPipes(manager) {
         continue;
       }
       let denied = null;
+      let record = null;
       const keys = Array.isArray(config.mcpApiKeys) ? config.mcpApiKeys : [];
       const key = matchKey(pipe.presentedKey, keys);
       if (!key) {
         denied = "API key revoked";
       } else {
+        try {
+          record = listMcpApiKeys().find((entry) => entry.secret === key) || null;
+        } catch {
+          record = null;
+        }
         const backend = resolveCdpBrowser(manager, pipe.browserName);
         if (!backend) {
           denied = `browser "${pipe.browserName}" no longer exists`;
-        } else {
-          let record = null;
-          try {
-            record = listMcpApiKeys().find((entry) => entry.secret === key) || null;
-          } catch {
-            record = null;
-          }
-          if (record && !checkBrowserAccess(record, backend.name)) {
-            denied = `access to "${backend.name}" revoked`;
-          }
+        } else if (record && !checkBrowserAccess(record, backend.name)) {
+          denied = `access to "${backend.name}" revoked`;
         }
       }
       if (denied) {
-        auditCdpConnection({ req: EMPTY_REQ, record: null, browserName: pipe.browserName, ok: false, error: `pipe closed: ${denied}` });
+        auditCdpConnection({ ip: pipe.ip, record, browserName: pipe.browserName, ok: false, error: `pipe closed: ${denied}` });
         try { ws.close(4003, denied); } catch {}
         activeCdpPipes.delete(ws);
       }
@@ -193,7 +188,7 @@ export function recheckCdpPipes(manager) {
 
 /**
  * Step 5 of the gate: resolve a name to a shareable backend without
- * opening anything. Returns { name, type, cdpUrl?, status? } or null.
+ * opening anything. Returns { name, type, cdpUrl?, status?, paired? } or null.
  */
 export function resolveCdpBrowser(manager, name) {
   const lower = String(name || "").toLowerCase();
@@ -204,7 +199,7 @@ export function resolveCdpBrowser(manager, name) {
   if (cfg) return { name: cfg.name, type: "inbuilt" };
   const eff = (typeof manager._effectiveAddOns === "function" ? manager._effectiveAddOns() : [])
     .find((b) => String(b.name || "").toLowerCase() === lower);
-  if (eff) return { name: eff.name, type: eff.type, cdpUrl: eff.cdpUrl, status: eff.status };
+  if (eff) return { name: eff.name, type: eff.type, cdpUrl: eff.cdpUrl, status: eff.status, paired: Boolean(eff.paired) };
   return null;
 }
 
@@ -245,14 +240,16 @@ export async function getCdpDiscoveryPayload(manager) {
   };
 }
 
-function writeUpgradeError(socket, status, message) {
+function writeUpgradeError(socket, status, message, headers = {}) {
   const reason = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict", 429: "Too Many Requests", 502: "Bad Gateway" }[status] || "Error";
   const body = JSON.stringify({ ok: false, error: message });
+  const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
   try {
     socket.write(
       `HTTP/1.1 ${status} ${reason}\r\n` +
       "Content-Type: application/json\r\n" +
       `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      extra +
       "Connection: close\r\n\r\n" +
       body
     );
@@ -375,12 +372,13 @@ function safeHandleUpgrade(wss, req, socket, head, onWs, onUpgradeFailed) {
   }
 }
 
-function auditCdpConnection({ req, record, browserName, ok = true, error = "" }) {  try {
+function auditCdpConnection({ ip, record, browserName, ok = true, error = "" }) {
+  try {
     recordMcpCall({
       tool: `cdp:${browserName}`,
       args: { browser: browserName },
       responsePreview: null,
-      ip: clientIp(req),
+      ip: ip || null,
       apiKeyId: record?.id ?? null,
       apiKeyName: record?.name ?? null,
       apiKeyPreview: record ? maskCdpKey(record.secret) : null,
@@ -390,6 +388,78 @@ function auditCdpConnection({ req, record, browserName, ok = true, error = "" })
       source: "cdp"
     });
   } catch {}
+}
+
+// How long a client should wait before retrying a relay browser that is paired
+// but offline: the extension's reconnect backoff starts at 1s and caps at 30s.
+const RELAY_OFFLINE_RETRY_AFTER_S = 5;
+
+/**
+ * 409 wording for a relay browser that cannot take a /cdp client right now.
+ * "Pair the extension first" is only true when it is not paired; a paired
+ * browser is just offline and will come back on its own, so the client gets
+ * a Retry-After instead of an instruction it cannot act on.
+ */
+function relayUnavailable(backend) {
+  if (backend.status === "auth_pending") {
+    return {
+      message: `Browser "${backend.name}" is waiting for its pairing PIN — enter the PIN in the extension, then retry`,
+      headers: { "Retry-After": String(RELAY_OFFLINE_RETRY_AFTER_S) }
+    };
+  }
+  if (backend.paired) {
+    return {
+      message: `Browser "${backend.name}" is paired but offline — waiting for the extension to reconnect`,
+      headers: { "Retry-After": String(RELAY_OFFLINE_RETRY_AFTER_S) }
+    };
+  }
+  return { message: `Browser "${backend.name}" is not paired — pair the extension first`, headers: {} };
+}
+
+/**
+ * One /cdp upgrade request on its way through the gate. Captures the client
+ * IP up front (the socket is destroyed when the request is refused, and its
+ * remoteAddress goes with it) and remembers the API key record once the key
+ * checks out, so every refusal after authentication is audited against the
+ * key that made it.
+ */
+class CdpUpgradeAttempt {
+  constructor({ req, socket, head, wss, browserName, logToolError }) {
+    this.req = req;
+    this.socket = socket;
+    this.head = head;
+    this.wss = wss;
+    this.browserName = browserName || "?";
+    this.ip = clientIp(req);
+    this.key = null;
+    this.record = null;
+    this._logToolError = logToolError;
+  }
+
+  authenticated(auth) {
+    this.key = auth.key;
+    this.record = auth.record;
+  }
+
+  reject(status, message, headers = {}) {
+    writeUpgradeError(this.socket, status, message, headers);
+    auditCdpConnection({ ip: this.ip, record: this.record, browserName: this.browserName, ok: false, error: message });
+    if (typeof this._logToolError === "function") {
+      try {
+        this._logToolError({ tool: `cdp:${this.browserName}`, args: { browser: this.browserName }, error: new Error(message), transport: "cdp" });
+      } catch {}
+    }
+  }
+
+  /** Complete the upgrade; `onWs` wires the socket, `onUpgradeFailed` releases a dialed backend. */
+  accept(onWs, onUpgradeFailed) {
+    safeHandleUpgrade(this.wss, this.req, this.socket, this.head, (ws) => {
+      recordCdpConnection();
+      auditCdpConnection({ ip: this.ip, record: this.record, browserName: this.browserName, ok: true });
+      registerCdpPipe(ws, this.key, this.browserName, this.ip);
+      onWs(ws);
+    }, onUpgradeFailed);
+  }
 }
 
 /**
@@ -416,17 +486,6 @@ export function initCdpSharing({ server, manager, logToolError }) {
   }, CDP_PIPE_RECHECK_MS);
   recheckTimer.unref();
 
-  const failAuth = (req, socket, head, browserName, status, message) => {
-    void head;
-    writeUpgradeError(socket, status, message);
-    auditCdpConnection({ req, record: null, browserName: browserName || "?", ok: false, error: message });
-    if (typeof logToolError === "function") {
-      try {
-        logToolError({ tool: `cdp:${browserName || "?"}`, args: { browser: browserName || "?" }, error: new Error(message), transport: "cdp" });
-      } catch {}
-    }
-  };
-
   server.on("upgrade", (req, socket, head) => {
     let url;
     try {
@@ -443,53 +502,52 @@ export function initCdpSharing({ server, manager, logToolError }) {
       try { socket.destroy(); } catch {}
       return;
     }
+    const attempt = new CdpUpgradeAttempt({ req, socket, head, wss, browserName, logToolError });
 
     (async () => {
       // Gate steps 1–3: key
       const auth = authorizeCdpKey(req, url, config);
       if (auth.status) {
-        failAuth(req, socket, head, browserName, auth.status, auth.error);
+        attempt.reject(auth.status, auth.error);
         return;
       }
+      attempt.authenticated(auth);
       // Gate step 5 then 4 (plan §7.7): resolution before access, so
       // unknown names 404 even for restricted keys and stale names in
       // allowed_browsers simply stop resolving instead of 403ing.
       const backend = resolveCdpBrowser(manager, browserName);
       if (!backend) {
-        failAuth(req, socket, head, browserName, 404, `Unknown browser "${browserName}"`);
+        attempt.reject(404, `Unknown browser "${browserName}"`);
         return;
       }
+      attempt.browserName = backend.name;
       // Gate step 4: per-key browser access (exact name match, NULL = all)
       if (!checkBrowserAccess(auth.record, backend.name)) {
-        failAuth(req, socket, head, backend.name, 403, `API key has no CDP access to browser "${backend.name}"`);
+        attempt.reject(403, `API key has no CDP access to browser "${backend.name}"`);
         return;
       }
 
       try {
         if (backend.type === "navigator-cdp") {
           if (backend.status !== "connected") {
-            failAuth(req, socket, head, backend.name, 409, `Browser "${backend.name}" is not connected — pair the extension first`);
+            const why = relayUnavailable(backend);
+            attempt.reject(409, why.message, why.headers);
             return;
           }
-          safeHandleUpgrade(wss, req, socket, head, (ws) => {
-            recordCdpConnection();
-            auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
-            registerCdpPipe(ws, auth.key, backend.name);
-            relayServer.attachGatewayClient(backend.name, ws);
-          });
+          attempt.accept((ws) => relayServer.attachGatewayClient(backend.name, ws));
           return;
         }
 
         if (backend.type === "inbuilt") {
           if (manager._sharedBrowsers.size >= SHARED_CHROMIUM_CAP) {
-            failAuth(req, socket, head, backend.name, 429, `Too many concurrent shared Chromium sessions (cap ${SHARED_CHROMIUM_CAP})`);
+            attempt.reject(429, `Too many concurrent shared Chromium sessions (cap ${SHARED_CHROMIUM_CAP})`);
             return;
           }
           let shared;
           try {
             shared = await manager.createSharedBrowser();
           } catch (err) {
-            failAuth(req, socket, head, backend.name, 502, `Could not launch shared Chromium: ${err?.message || err}`);
+            attempt.reject(502, `Could not launch shared Chromium: ${err?.message || err}`);
             return;
           }
           const endpoint = shared.wsEndpoint();
@@ -498,18 +556,16 @@ export function initCdpSharing({ server, manager, logToolError }) {
             upstream = await dialAddOnCdp(endpoint);
           } catch (err) {
             try { await manager.closeSharedBrowser(shared); } catch {}
-            failAuth(req, socket, head, backend.name, 502, `Could not reach shared Chromium: ${err?.message || err}`);
+            attempt.reject(502, `Could not reach shared Chromium: ${err?.message || err}`);
             return;
           }
-          safeHandleUpgrade(wss, req, socket, head, (ws) => {
-            recordCdpConnection();
-            auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
-            registerCdpPipe(ws, auth.key, backend.name);
-            pipeSockets(ws, upstream, backend.name, () => manager.closeSharedBrowser(shared));
-          }, () => {
-            try { upstream.close(); } catch {}
-            manager.closeSharedBrowser(shared).catch(() => {});
-          });
+          attempt.accept(
+            (ws) => pipeSockets(ws, upstream, backend.name, () => manager.closeSharedBrowser(shared)),
+            () => {
+              try { upstream.close(); } catch {}
+              manager.closeSharedBrowser(shared).catch(() => {});
+            }
+          );
           return;
         }
 
@@ -519,19 +575,17 @@ export function initCdpSharing({ server, manager, logToolError }) {
         try {
           upstream = await dialAddOnCdp(backend.cdpUrl);
         } catch (err) {
-          failAuth(req, socket, head, backend.name, 502, `Could not reach browser "${backend.name}": ${err?.message || err}`);
+          attempt.reject(502, `Could not reach browser "${backend.name}": ${err?.message || err}`);
           return;
         }
-        safeHandleUpgrade(wss, req, socket, head, (ws) => {
-          recordCdpConnection();
-          auditCdpConnection({ req, record: auth.record, browserName: backend.name, ok: true });
-          registerCdpPipe(ws, auth.key, backend.name);
-          pipeSockets(ws, upstream, backend.name, null);
-        }, () => {
-          try { upstream.close(); } catch {}
-        });
+        attempt.accept(
+          (ws) => pipeSockets(ws, upstream, backend.name, null),
+          () => {
+            try { upstream.close(); } catch {}
+          }
+        );
       } catch (err) {
-        failAuth(req, socket, head, browserName, 500, `CDP proxy error: ${err?.message || err}`);
+        attempt.reject(500, `CDP proxy error: ${err?.message || err}`);
       }
     })().catch(() => {
       try { socket.destroy(); } catch {}

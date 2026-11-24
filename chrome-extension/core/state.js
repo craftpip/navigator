@@ -122,14 +122,10 @@ var State = (function() {
     }
   }
 
-  function startHeartbeat() {
+  /** Run `onTick` every Config.HEARTBEAT_INTERVAL until clearHeartbeatTimer(). */
+  function startHeartbeat(onTick) {
     State.clearHeartbeatTimer();
-    _state.heartbeatTimer = setInterval(function() {
-      var ws = State.getWs();
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ConnectionManager.send({ type: 'ping' });
-      }
-    }, Config.HEARTBEAT_INTERVAL);
+    _state.heartbeatTimer = setInterval(onTick, Config.HEARTBEAT_INTERVAL);
   }
 
   function addAttachedTab(tabId) {

@@ -27,9 +27,6 @@
  *  33. pending-connecting carries the description
  *  34. empty description is sent explicitly (clear is a real edit)
  *
- * 20d/20e fail pre-existing and are unrelated: the probe reports
- * mode:'unknown' when both schemes fail, those tests expect refused/dns.
- *
  * Usage: node test/unit-ff.mjs
  */
 import { readFileSync } from 'fs';
@@ -71,6 +68,17 @@ class FakeWebSocket {
   }
 }
 
+/** A chrome.events.Event stand-in: records listeners, fire() calls them. */
+function chromeEvent() {
+  const listeners = [];
+  return {
+    listeners,
+    addListener: (fn) => listeners.push(fn),
+    removeListener: (fn) => { const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); },
+    fire: (...args) => listeners.forEach((fn) => fn(...args))
+  };
+}
+
 function makeChromeMock() {
   const storage = new Map();
   const chrome = {
@@ -96,7 +104,10 @@ function makeChromeMock() {
       remove: (id, cb) => cb && cb(),
       hide: (ids, cb) => cb && cb(),
       show: (ids, cb) => cb && cb(),
-      onCreated: { addListener: () => {} }
+      onCreated: chromeEvent(),
+      onRemoved: chromeEvent(),
+      onReplaced: chromeEvent(),
+      onUpdated: chromeEvent()
     },
     windows: {
       getCurrent: cb => cb({ id: 1 }),
@@ -951,7 +962,10 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
       if (u.indexOf('http://10.0.0.5:1994/health') === 0) return Promise.resolve({ status: 200, text: () => Promise.resolve('{"ok":true}') });
       if (u.indexOf('https://10.0.0.6:1994/health') === 0) return Promise.reject(new Error('Failed to fetch: connection refused at 10.0.0.6:1994'));
       if (u.indexOf('http://10.0.0.6:1994/health') === 0) return Promise.reject(new Error('Failed to fetch: connection refused at 10.0.0.6:1994'));
+      // https fails generically, http names the DNS failure: the probe must
+      // report the specific cause from either attempt, not 'unknown'.
       if (u.indexOf('https://fail.dns.test:1994/health') === 0) return Promise.reject(new TypeError('Failed to fetch'));
+      if (u.indexOf('http://fail.dns.test:1994/health') === 0) return Promise.reject(new TypeError('Failed to fetch: DNS lookup failed for fail.dns.test'));
       return Promise.reject(new Error('Failed to fetch'));
     }
   };
@@ -975,7 +989,7 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
 
   test('20d. probe reports refused after both schemes fail', async () => {
     const r = await sandbox.Probe.probe('10.0.0.6:1994');
-    return r.ok === false && r.mode === 'refused';
+    return r.ok === false && r.mode === 'refused' && /https: .*refused.*; http: .*refused/.test(r.error);
   });
 
   test('20e. probe reports dns on failed resolution', async () => {
@@ -1341,6 +1355,292 @@ console.log('Navigator Browser Relay — Firefox (BiDi) standalone unit tests\n'
   const client = env2.State.getWs();
   const hello = client && client._sent.find((m) => m.type === 'navigator-hello');
   test('36e. the reconnect hello carries the persisted name', () => !!hello && hello.browserName === 'ChromeLinux');
+}
+
+// ---------------------------------------------------------------- tab-list watch + reconnect resilience
+//
+// 40. TabList.watch() pushes a debounced tab_list on create / remove / replace
+//     and on url / title changes, and stays quiet on other onUpdated changes.
+// 41. background init survives a TabList.watch() that throws.
+// 42. All candidates failed -> reconnect with capped exponential backoff.
+// 43. A disconnect during backoff stops the retries.
+// 44. Transient handshake codes (4007 hello timeout, 4008 protocol) reconnect.
+// 45. SUPERSEDED (4009) stops and turns auto-connect off.
+// 46. The server's {type:"ping"} is answered with a pong.
+// 47. A silent open socket (no inbound traffic) is abandoned and redialled.
+// 48. The keepalive alarm re-dials an idle, paired, auto-connect browser.
+
+/** A WebSocket that never opens: error, then close 1006 (navigator is down). */
+class RefusedWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static created = [];
+  constructor(url) {
+    this.url = url;
+    this.readyState = RefusedWebSocket.CONNECTING;
+    this._sent = [];
+    RefusedWebSocket.created.push({ url, at: Date.now() });
+    setTimeout(() => {
+      this.readyState = RefusedWebSocket.CLOSED;
+      if (this.onerror) this.onerror({ type: 'error' });
+      if (this.onclose) this.onclose({ code: 1006, reason: '' });
+    }, 2);
+  }
+  send() {}
+  close() { this.readyState = RefusedWebSocket.CLOSED; }
+}
+
+/** Run background.js in an env whose modules are already loaded. */
+function bootBackground(env) {
+  vm.runInContext(readFileSync(ROOT + 'background.js', 'utf8'), env, { filename: 'background.js' });
+}
+
+/** Connect `env` and pair it with a fake relay that answers `connected`. */
+async function connectedRelay(env) {
+  env.Config.saveServerUrl('ws://relay', () => {});
+  env.ConnectionManager.connect();
+  await sleep(30);
+  const [server, client] = wireRelay(env);
+  server.send(JSON.stringify({ type: 'connected', sessionToken: 'tok-live' }));
+  await sleep(30);
+  return { server, client };
+}
+const tabListPushes = (client) => client._sent.filter((m) => m.type === 'tab_list').length;
+
+// 40. watch()
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const { client } = await connectedRelay(env);
+  env.TabList.watch();
+  env.TabList.watch(); // idempotent: listeners registered once
+  const tabs = env.chrome.tabs;
+  test('40a. watch() registers once on created/removed/replaced/updated', () =>
+    tabs.onCreated.listeners.length === 1 && tabs.onRemoved.listeners.length === 1 &&
+    tabs.onReplaced.listeners.length === 1 && tabs.onUpdated.listeners.length === 1);
+  await sleep(400);
+  let base = tabListPushes(client);
+
+  tabs.onCreated.fire({ id: 3 });
+  tabs.onCreated.fire({ id: 4 });
+  tabs.onRemoved.fire(2, {});
+  await sleep(100);
+  const beforeDebounce = tabListPushes(client) - base;
+  await sleep(400);
+  const afterBurst = tabListPushes(client) - base;
+  test('40b. a burst of create/remove events -> ONE debounced tab_list push', () =>
+    beforeDebounce === 0 && afterBurst === 1);
+
+  base = tabListPushes(client);
+  tabs.onReplaced.fire(5, 4);
+  await sleep(400);
+  test('40c. onReplaced pushes the tab list', () => tabListPushes(client) - base === 1);
+
+  base = tabListPushes(client);
+  tabs.onUpdated.fire(1, { url: 'https://example.org' }, {});
+  await sleep(400);
+  const afterUrl = tabListPushes(client) - base;
+  tabs.onUpdated.fire(1, { title: 'New title' }, {});
+  await sleep(400);
+  const afterTitle = tabListPushes(client) - base;
+  test('40d. onUpdated url / title change pushes the tab list', () => afterUrl === 1 && afterTitle === 2);
+
+  base = tabListPushes(client);
+  tabs.onUpdated.fire(1, { status: 'loading' }, {});
+  tabs.onUpdated.fire(1, { favIconUrl: 'https://example.org/f.ico' }, {});
+  tabs.onUpdated.fire(1, { audible: true }, {});
+  await sleep(400);
+  test('40e. other onUpdated changes (status, favicon, audible) push nothing', () => tabListPushes(client) - base === 0);
+
+  env.State.setConnected(false);
+  base = tabListPushes(client);
+  tabs.onCreated.fire({ id: 6 });
+  await sleep(400);
+  test('40f. no push while not connected', () => tabListPushes(client) - base === 0);
+  env.ConnectionManager.disconnect();
+}
+
+// 41. A throwing watch() must not cost background init its other listeners.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const listeners = { message: 0, alarm: 0, startup: 0 };
+  env.chrome.runtime.onMessage = { addListener: () => { listeners.message++; } };
+  env.chrome.runtime.onStartup = { addListener: () => { listeners.startup++; } };
+  env.chrome.runtime.onInstalled = { addListener: () => {} };
+  env.chrome.alarms.onAlarm = { addListener: () => { listeners.alarm++; } };
+  env.TabList.watch = () => { throw new Error('tabs API unavailable'); };
+  let threw = null;
+  try { bootBackground(env); } catch (e) { threw = e; }
+  test('41. background boots and registers its listeners even when TabList.watch() throws', () =>
+    !threw && listeners.message >= 1 && listeners.alarm === 1 && listeners.startup === 1);
+}
+
+// 42. Reconnect with capped exponential backoff after every candidate failed.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.RECONNECT_BASE_DELAY = 40;
+  env.Config.RECONNECT_MAX_DELAY = 160;
+  env.WebSocket = RefusedWebSocket;
+  RefusedWebSocket.created = [];
+  env.Config.saveServerUrl('ws://relay', () => {});
+  let callbackResult = null;
+  env.ConnectionManager.connect({}, (r) => { callbackResult = r; });
+  await sleep(20);
+  test('42a. all candidates failed -> a reconnect is scheduled (not given up)', () =>
+    callbackResult && callbackResult.success === false && !!env.State.getReconnectTimer() &&
+    /retrying in/.test(String(env.State.getLastError())));
+  await sleep(900);
+  // A round starts with the first candidate URL (then tries any fallback).
+  const firstUrl = RefusedWebSocket.created[0] && RefusedWebSocket.created[0].url;
+  const rounds = RefusedWebSocket.created.filter((c) => c.url === firstUrl).map((c) => c.at);
+  const gaps = rounds.slice(1).map((t, i) => t - rounds[i]);
+  test('42b. retries keep coming with growing delays, capped at the maximum (' + gaps.join(',') + 'ms)', () =>
+    gaps.length >= 4 && gaps[1] > gaps[0] && gaps[2] > gaps[1] &&
+    gaps.every((g) => g < 160 + 60) && gaps[gaps.length - 1] >= 140);
+
+  // navigator comes back: the next retry connects; acceptance resets the backoff.
+  env.WebSocket = FakeWebSocket;
+  await sleep(250);
+  const ws = env.State.getWs();
+  const hello = ws && ws._sent && ws._sent.find((m) => m.type === 'navigator-hello');
+  test('42c. once navigator is back, the scheduled retry reconnects and says hello', () => !!hello);
+  const [server] = wireRelay(env);
+  server.send(JSON.stringify({ type: 'connected', sessionToken: 'tok-back' }));
+  await sleep(30);
+  env.WebSocket = RefusedWebSocket;
+  RefusedWebSocket.created = [];
+  const t0 = Date.now();
+  env.State.getWs().close(1006, 'navigator restarted');
+  await sleep(300);
+  const firstRetry = RefusedWebSocket.created[0];
+  test('42d. after a successful connect the backoff starts again from the base delay', () =>
+    env.State.isConnected() === false && !!firstRetry && firstRetry.at - t0 < 40 + 30);
+  env.ConnectionManager.disconnect();
+}
+
+// 43. Disconnect during backoff stops the retries.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.RECONNECT_BASE_DELAY = 40;
+  env.WebSocket = RefusedWebSocket;
+  RefusedWebSocket.created = [];
+  env.Config.saveServerUrl('ws://relay', () => {});
+  env.ConnectionManager.connect();
+  await sleep(20);
+  env.ConnectionManager.disconnect();
+  const after = RefusedWebSocket.created.length;
+  await sleep(300);
+  test('43. an explicit disconnect during backoff cancels the retries', () =>
+    RefusedWebSocket.created.length === after && !env.State.getReconnectTimer() && env.ConnectionManager.isIdle() === false);
+}
+
+// 44. Transient handshake closes reconnect.
+for (const [code, label] of [[4007, 'hello timeout'], [4008, 'protocol error']]) {
+  const env = buildEnv();
+  loadExtension(env);
+  const { client } = await connectedRelay(env);
+  client.onclose({ code, reason: label });
+  await sleep(10);
+  test(`44. close ${code} (${label}) schedules a reconnect instead of stopping`, () =>
+    !!env.State.getReconnectTimer() && !env.State.isPairing());
+  env.ConnectionManager.disconnect();
+}
+
+// 45. SUPERSEDED stops and disables auto-connect.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const { client } = await connectedRelay(env);
+  await new Promise((res) => env.Config.setAutoConnect(true, res));
+  client.onclose({ code: 4009, reason: 'replaced by a newer connection' });
+  await sleep(20);
+  const auto = await new Promise((res) => env.Config.getAutoConnect(res));
+  test('45. SUPERSEDED (4009): no reconnect, auto-connect off, token kept, explained', () =>
+    !env.State.getReconnectTimer() && auto === false && env.State.getSessionToken() === 'tok-live' &&
+    /took over/.test(String(env.State.getLastError())));
+}
+
+// 46. Server ping -> pong.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  const { server, client } = await connectedRelay(env);
+  server.send(JSON.stringify({ type: 'ping' }));
+  await sleep(30);
+  test('46. the server\'s ping is answered with a pong', () => client._sent.some((m) => m.type === 'pong'));
+  env.ConnectionManager.disconnect();
+}
+
+// 47. Half-dead socket detection.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  env.Config.LIVENESS_TIMEOUT = 60;
+  const { server, client } = await connectedRelay(env);
+  env.ConnectionManager.keepalive();
+  const pingedWhileFresh = client._sent.some((m) => m.type === 'ping');
+  // Inbound traffic keeps it alive...
+  await sleep(40);
+  server.send(JSON.stringify({ type: 'pong' }));
+  await sleep(40);
+  env.ConnectionManager.keepalive();
+  const aliveAfterTraffic = env.State.getWs() === client && env.State.isConnected();
+  // ...silence past the timeout does not.
+  await sleep(90);
+  env.ConnectionManager.keepalive();
+  test('47a. keepalive pings a live socket and keeps it while traffic flows', () => pingedWhileFresh && aliveAfterTraffic);
+  test('47b. a silent socket is abandoned and a reconnect scheduled', () =>
+    env.State.getWs() !== client && !env.State.isConnected() && !!env.State.getReconnectTimer());
+  env.ConnectionManager.disconnect();
+}
+
+// 48. Keepalive alarm re-dials an idle paired browser.
+{
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise((res) => env.Config.saveServerUrl('ws://relay', res));
+  await new Promise((res) => env.Config.saveSessionToken('tok-paired', res));
+  await new Promise((res) => env.Config.setAutoConnect(true, res));
+  const alarms = [];
+  env.chrome.alarms.onAlarm = { addListener: (fn) => alarms.push(fn) };
+  bootBackground(env);
+  await sleep(40);
+  // The socket dropped and its reconnect timer died with the worker.
+  const dropped = env.State.getWs();
+  env.State.setWs(null);
+  env.State.clearReconnectTimer();
+  env.State.setConnecting(false);
+  env.State.setConnected(false);
+  test('48a. a dropped socket with no timer left is idle', () => env.ConnectionManager.isIdle());
+  alarms.forEach((fn) => fn({ name: 'keepalive' }));
+  await sleep(40);
+  const ws = env.State.getWs();
+  test('48b. the keepalive alarm auto-connects it again', () =>
+    !!ws && ws !== dropped && ws._sent.some((m) => m.type === 'navigator-hello' && m.sessionToken === 'tok-paired'));
+
+  env.ConnectionManager.disconnect();
+}
+{
+  // After an explicit disconnect (auto-connect off) a restarted worker's alarm
+  // must not dial on its own.
+  const env = buildEnv();
+  loadExtension(env);
+  await new Promise((res) => env.Config.saveServerUrl('ws://relay', res));
+  await new Promise((res) => env.Config.saveSessionToken('tok-paired', res));
+  await new Promise((res) => env.Config.setAutoConnect(false, res));
+  const alarms = [];
+  env.chrome.alarms.onAlarm = { addListener: (fn) => alarms.push(fn) };
+  bootBackground(env);
+  await sleep(40);
+  alarms.forEach((fn) => fn({ name: 'keepalive' }));
+  await sleep(40);
+  test('48c. with auto-connect off the alarm leaves it disconnected', () =>
+    env.ConnectionManager.isIdle() && env.State.getWs() === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

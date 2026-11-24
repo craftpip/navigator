@@ -241,13 +241,14 @@ importScripts('features/badge.js');
       resumePendingConnect();
     });
 
+    // Every 30s: ping (and liveness-check) an open connection, or — when a
+    // dropped connection has nothing left that would bring it back (its
+    // reconnect timer died with a restarted service worker) — dial again if
+    // the user wants this browser connected.
     chrome.alarms.onAlarm.addListener(function(alarm) {
-      if (alarm.name === 'keepalive') {
-        var ws = State.getWs();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ConnectionManager.send({ type: 'ping' });
-        }
-      }
+      if (alarm.name !== 'keepalive') return;
+      if (ConnectionManager.isIdle()) maybeAutoConnect();
+      else ConnectionManager.keepalive();
     });
 
     // Keep the SW alive via periodic alarm + heartbeat
@@ -306,6 +307,15 @@ importScripts('features/badge.js');
 
     maybeAutoConnect();
     resumePendingConnect();
+
+    // Keep navigator's cached tab list in sync with the user's tabs. Last,
+    // and guarded: it is an optimization (navigator also asks for the list),
+    // so a failure here must not cost the listeners registered above.
+    try {
+      TabList.watch();
+    } catch (e) {
+      Logger.error('[Init] Tab-list watch unavailable:', e);
+    }
   }
 
   init();

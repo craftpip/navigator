@@ -2,7 +2,7 @@ import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import puppeteer from "puppeteer-core";
-import { RelayServer, relayServer } from "../src/relay-server.js";
+import { RelayServer } from "../src/relay-server.js";
 
 const ONE_PX_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -129,6 +129,18 @@ function flushAll(ws) {
   for (const w of waiters.splice(0)) clearTimeout(w.timer);
 }
 
+/** Status row for one relay browser — the projection the dashboard renders. */
+function statusOf(relay, name) {
+  return relay.getStatusEntries([]).find((b) => b.name === name);
+}
+
+/** The PIN the dashboard shows the user for a pending pairing. */
+function pendingPin(relay, name) {
+  const row = statusOf(relay, name);
+  expect(row?.status).toBe("auth_pending");
+  return row.pin;
+}
+
 function nextClose(ws, timeoutMs = 4000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timeout waiting for close")), timeoutMs);
@@ -141,12 +153,11 @@ async function pairExtension(relay, wsBase, browserName, { platform = "chrome", 
   ws.send(JSON.stringify({ type: "navigator-hello", browserName, platform, extensionVersion: "0.1.0", ...(bidiOrigin ? { bidiOrigin } : {}), ...(sessionToken ? { sessionToken } : {}) }));
   const pinRequired = await nextMessage(ws, (m) => m.type === "pin_required");
   expect(pinRequired).toEqual({ type: "pin_required" });
-  const entry = relay._entries.get(browserName);
-  const pin = entry.pendingPin.pin;
+  const pin = pendingPin(relay, browserName);
   ws.send(JSON.stringify({ type: "pin", pin }));
   await nextMessage(ws, (m) => m.type === "pin_accepted");
   const connected = await nextMessage(ws, (m) => m.type === "connected");
-  return { ws, entry, token: connected.sessionToken };
+  return { ws, entry: relay.getEntry(browserName), token: connected.sessionToken };
 }
 
 describe("relay registry + PIN pairing (/relay)", () => {
@@ -173,18 +184,31 @@ describe("relay registry + PIN pairing (/relay)", () => {
     re.send(JSON.stringify({ type: "navigator-hello", browserName: "browser-b", platform: "chrome", sessionToken: token }));
     const connected = await nextMessage(re, (m) => m.type === "connected");
     expect(connected.sessionToken).toBe(token);
-    expect(relay._entries.get("browser-b").status).toBe("connected");
+    expect(statusOf(relay, "browser-b").status).toBe("connected");
     re.close();
+    await nextClose(re);
 
     const bad = await open(`${wsBase}/relay`);
     bad.send(JSON.stringify({ type: "navigator-hello", browserName: "browser-b", platform: "chrome" }));
     await nextMessage(bad, (m) => m.type === "pin_required");
-    const entry = relay._entries.get("browser-b");
-    const wrongPin = entry.pendingPin.pin === "000000" ? "000001" : "000000";
+    const pin = pendingPin(relay, "browser-b");
+    const wrongPin = pin === "000000" ? "000001" : "000000";
     bad.send(JSON.stringify({ type: "pin", pin: wrongPin }));
     const closeCode = await nextClose(bad);
     expect(closeCode).toBe(4000);
-    expect(relay._entries.get("browser-b").status).toBe("auth_pending");
+    // A rejected PIN cancels the pairing request outright (nothing left
+    // pending, no PIN shown) and keeps the previous pairing: the old token
+    // still authenticates.
+    expect(relay.isPending("browser-b")).toBe(false);
+    const after = statusOf(relay, "browser-b");
+    expect(after.status).toBe("disconnected");
+    expect(after.pin).toBeNull();
+    expect(after.paired).toBe(true);
+    expect(relay.getEntry("browser-b")).toBeNull();
+    const again = await open(`${wsBase}/relay`);
+    again.send(JSON.stringify({ type: "navigator-hello", browserName: "browser-b", platform: "chrome", sessionToken: token }));
+    expect((await nextMessage(again, (m) => m.type === "connected")).sessionToken).toBe(token);
+    again.close();
   });
 
   it("expired PIN closes 4000; token for another name closes 4001", async () => {
@@ -199,14 +223,24 @@ describe("relay registry + PIN pairing (/relay)", () => {
     const expired = await open(`${wsBase}/relay`);
     expired.send(JSON.stringify({ type: "navigator-hello", browserName: "name-three", platform: "chrome" }));
     await nextMessage(expired, (m) => m.type === "pin_required");
-    relay._entries.get("name-three").pendingPin.expiresAt = Date.now() - 1000;
-    expired.send(JSON.stringify({ type: "pin", pin: "123456" }));
+    const pin = pendingPin(relay, "name-three");
+    // Age the pending PIN past its expiry (no public clock hook).
+    relay._pairings.get("name-three").pin.expiresAt = Date.now() - 1000;
+    // An expired PIN is no longer pending, so the dashboard stops offering it.
+    expect(relay.isPending("name-three")).toBe(false);
+    expect(statusOf(relay, "name-three").status).toBe("disconnected");
+    expect(statusOf(relay, "name-three").pin).toBeNull();
+    // Even the right PIN is refused once it has expired.
+    expired.send(JSON.stringify({ type: "pin", pin }));
     const expiredClose = await nextClose(expired);
     expect(expiredClose).toBe(4000);
+    expect(relay._pairings.has("name-three")).toBe(false);
+    expect(relay.getEntry("name-three")).toBeNull();
+    expect(relay.isPaired("name-three")).toBe(false);
   });
 
   it("status summaries: pre-declared roles honored, dynamic default appended, disconnect drops entry", async () => {
-    const { relay } = await ephemeralRelay();
+    const { relay, wsBase } = await ephemeralRelay();
     const configured = [
       { name: "chromium", role: ["default"], addOn: false },
       { name: "pre-declared", role: ["default", "devtools"], type: "navigator-cdp", plugin: "chrome", addOn: true },
@@ -221,30 +255,24 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(pre.configured).toBe(true);
     entries.find((e) => e.name === "plain-cdp");
 
-    // connected via registry (same name) keeps configured roles
-    relay._entries.set("pre-declared", {
-      name: "pre-declared", plugin: "chrome", platform: "chrome", extensionVersion: "1.2.3",
-      bidiOrigin: "moz-extension://11111111-2222-3333-4444-555555555555",
-      status: "connected", ws: {}, connectedAt: 1, sessionToken: "t", pendingPin: null,
-      tabs: [], tabWaiters: [], sessionForTarget: new Map(), extSessionToTarget: new Map(),
-      tabIdToTarget: new Map(), clients: new Map(), lastActivity: Date.now()
-    });
+    // a paired extension of the same name keeps the configured roles
+    const bidiOrigin = "moz-extension://11111111-2222-3333-4444-555555555555";
+    const pre1 = await pairExtension(relay, wsBase, "pre-declared", { platform: "firefox", bidiOrigin });
     entries = relay.getStatusEntries(configured);
     const preConnected = entries.find((e) => e.name === "pre-declared");
     expect(preConnected.status).toBe("connected");
     expect(preConnected.role).toEqual(["default", "devtools"]);
-    expect(preConnected.connectedAt).toBe(1);
-    expect(preConnected.extensionVersion).toBe("1.2.3");
-    expect(preConnected.bidiOrigin).toBe("moz-extension://11111111-2222-3333-4444-555555555555");
+    expect(preConnected.connectedAt).toBe(pre1.entry.connectedAt);
+    expect(typeof preConnected.connectedAt).toBe("number");
+    expect(preConnected.plugin).toBe("firefox");
+    expect(preConnected.extensionVersion).toBe("0.1.0");
+    expect(preConnected.bidiOrigin).toBe(bidiOrigin);
 
-    // dynamic registration (name not in config) appended with role ["default"]
-    relay._entries.set("dynamic-ff", {
-      name: "dynamic-ff", plugin: "firefox", platform: "firefox", extensionVersion: "0.0.9",
-      status: "auth_pending", ws: {}, connectedAt: null, sessionToken: null,
-      pendingPin: { pin: "654321", expiresAt: Date.now() + 60000 },
-      tabs: [], tabWaiters: [], sessionForTarget: new Map(), extSessionToTarget: new Map(),
-      tabIdToTarget: new Map(), clients: new Map(), lastActivity: Date.now()
-    });
+    // a dynamic browser (name not in config) waiting on its PIN is appended
+    // with role ["default"], showing the hello details and the pending PIN
+    const pendingWs = await open(`${wsBase}/relay`);
+    pendingWs.send(JSON.stringify({ type: "navigator-hello", browserName: "dynamic-ff", platform: "firefox", extensionVersion: "0.0.9" }));
+    await nextMessage(pendingWs, (m) => m.type === "pin_required");
     entries = relay.getStatusEntries(configured);
     expect(entries[0].name).toBe("pre-declared");
     expect(entries[1].name).toBe("plain-cdp");
@@ -252,6 +280,10 @@ describe("relay registry + PIN pairing (/relay)", () => {
     expect(entries[2].status).toBe("auth_pending");
     expect(entries[2].configured).toBe(false);
     expect(entries[2].role).toEqual(["default"]);
+    expect(entries[2].plugin).toBe("firefox");
+    expect(entries[2].extensionVersion).toBe("0.0.9");
+    expect(entries[2].pin).toMatch(/^\d{6}$/);
+    expect(entries[2].pinExpiresAt).toBeGreaterThan(Date.now());
 
     // register each configured username in order → order preserved
     relay._entries.set("plain-cdp", {
@@ -261,6 +293,14 @@ describe("relay registry + PIN pairing (/relay)", () => {
     });
     entries = relay.getStatusEntries(configured);
     expect(entries.map((e) => e.name)).toEqual(["pre-declared", "plain-cdp", "dynamic-ff"]);
+
+    // disconnect drops the live entry; the configured row reverts to disconnected
+    pre1.ws.close();
+    await nextClose(pre1.ws);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(relay.getEntry("pre-declared")).toBeNull();
+    expect(relay.getStatusEntries(configured).find((e) => e.name === "pre-declared").status).toBe("disconnected");
+    pendingWs.close();
   });
 
   it("forget clears pairing but keeps the row; remove deletes the row entirely", async () => {
@@ -352,7 +392,7 @@ describe("relay registry + PIN pairing (/relay)", () => {
     // pairExtension's hello → pin_required flow proves the gate let it through.
     const { token } = await pairExtension(relay, wsBase, "readded-b6");
     expect(typeof token).toBe("string");
-    expect(relay._entries.get("readded-b6").status).toBe("connected");
+    expect(statusOf(relay, "readded-b6").status).toBe("connected");
   });
 
   it("a dynamic hello for a name configured as a direct-CDP browser is rejected 4006 (collision, plan 60 B7)", async () => {
@@ -436,7 +476,7 @@ describe("browser description (plan 45) — auth gate, hello, live update, lifec
     expect(relay.getDescription("late")).toBe("");
 
     // Pair it for real.
-    const pin = relay._entries.get("late").pendingPin.pin;
+    const pin = pendingPin(relay, "late");
     ws.send(JSON.stringify({ type: "pin", pin }));
     await nextMessage(ws, (m) => m.type === "connected");
 
@@ -479,7 +519,7 @@ describe("browser description (plan 45) — auth gate, hello, live update, lifec
     }));
     await nextMessage(ws, (m) => m.type === "pin_required");
     expect(relay.getDescription("fresh")).toBe("");
-    const pin = relay._entries.get("fresh").pendingPin.pin;
+    const pin = pendingPin(relay, "fresh");
     ws.send(JSON.stringify({ type: "pin", pin }));
     await nextMessage(ws, (m) => m.type === "connected");
     expect(relay.getDescription("fresh")).toBe("first pair, description included");
@@ -962,13 +1002,12 @@ describe("pure CDP gateway (/browser/<name>) with a fake-extension backend", () 
 describe("routing: auth_pending navigator-cdp is never a routing candidate (resolveBrowserParam)", () => {
   it("skips auth_pending in the fallback chain and errors on an explicit request", async () => {
     const { resolveBrowserParam } = await import("../src/browser.js");
-    relayServer._entries.set("pending-browser", {
-      name: "pending-browser", plugin: "auto", platform: "chrome", extensionVersion: null,
-      status: "auth_pending", ws: null, connectedAt: null, sessionToken: null,
-      pendingPin: { pin: "111111", expiresAt: Date.now() + 60000 },
-      tabs: [], tabWaiters: [], sessionForTarget: new Map(), extSessionToTarget: new Map(),
-      tabIdToTarget: new Map(), clients: new Map(), lastActivity: Date.now()
-    });
+    const { relay, wsBase } = await ephemeralRelay();
+    // A real extension socket that said hello and is waiting on its PIN.
+    const pendingWs = await open(`${wsBase}/relay`);
+    pendingWs.send(JSON.stringify({ type: "navigator-hello", browserName: "pending-browser", platform: "chrome" }));
+    await nextMessage(pendingWs, (m) => m.type === "pin_required");
+    cleanups.push(() => pendingWs.close());
     const cfg = {
       browsers: [
         { name: "chromium", role: ["default"], addOn: false },
@@ -979,7 +1018,7 @@ describe("routing: auth_pending navigator-cdp is never a routing candidate (reso
     const chromiumSpy = vi.fn(async () => ({ fake: "chromium" }));
     const mgr = {
       config: cfg,
-      _effectiveAddOns: () => relayServer.getStatusEntries(cfg.browsers),
+      _effectiveAddOns: () => relay.getStatusEntries(cfg.browsers),
       _connectAddOnPage: connectSpy,
       _newChromiumPage: chromiumSpy
     };
@@ -996,8 +1035,6 @@ describe("routing: auth_pending navigator-cdp is never a routing candidate (reso
     expect(result.rollbackNotes).toContain("pending-browser: auth_pending");
     expect(connectSpy).not.toHaveBeenCalled();
     expect(chromiumSpy).toHaveBeenCalledOnce();
-
-    cleanups.push(() => relayServer._entries.delete("pending-browser"));
   });
 });
 
@@ -1023,7 +1060,7 @@ describe("attach failure reason identity (plan 59 §9a)", () => {
   it("two concurrent failed attaches each keep their own reason (out-of-order replies)", async () => {
     const { relay, wsBase } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "attach-race");
-    const entry = relay._entries.get("attach-race");
+    const entry = relay.getEntry("attach-race");
     entry.tabs = [
       { targetId: "tab-A", type: "page", title: "A", url: "https://a.example/" },
       { targetId: "tab-B", type: "page", title: "B", url: "https://b.example/" },
@@ -1058,7 +1095,7 @@ describe("attach failure reason identity (plan 59 §9a)", () => {
   it("a successful attach resolves { sessionId, reason: null }", async () => {
     const { relay, wsBase } = await ephemeralRelay();
     const { ws } = await pairExtension(relay, wsBase, "attach-ok");
-    const entry = relay._entries.get("attach-ok");
+    const entry = relay.getEntry("attach-ok");
     entry.tabs = [{ targetId: "tab-OK", type: "page", title: "OK", url: "https://ok.example/" }];
     attachResponder(ws, {
       "tab-OK": (id) => setTimeout(() => ws.send(JSON.stringify({

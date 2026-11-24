@@ -85,9 +85,169 @@ function clientSessions(client) {
   return client.sessionForTarget;
 }
 
+/**
+ * Domain-enable semantics for the shared tab debugger.
+ *
+ * On real Chrome every CDP session has its own domain state, so a fresh
+ * session's `Runtime.enable` reports every existing execution context
+ * (`Runtime.executionContextCreated`). The extension instead multiplexes all
+ * logical sessions for a tab onto ONE chrome.debugger attachment, and that
+ * attachment outlives gateway clients, extension socket flaps, and navigator
+ * restarts. Chrome only reports existing state on the disabled → enabled
+ * transition, so a new session's `X.enable` on an already-enabled debugger is a
+ * silent no-op: puppeteer never learns the main-world context and every
+ * `page.evaluate` waits for it forever (Runtime.evaluate hung after a restart
+ * while a raw context-less Target.sendCommand Runtime.evaluate still worked).
+ *
+ * For the domains listed here the gateway resets the domain on the shared
+ * debugger before forwarding the enable, so each logical session observes the
+ * state a dedicated session would. Add a domain only when its enable replays
+ * existing state that clients depend on and its disable is harmless to the
+ * other sessions sharing the debugger.
+ */
+class SharedDebuggerDomains {
+  static #RESET_BEFORE_ENABLE = new Map([
+    // executionContextCreated for every live context (puppeteer main/isolated worlds)
+    ["Runtime.enable", "Runtime.disable"]
+  ]);
+
+  /** @returns {string|null} the reset command to send before `method`, if any */
+  static resetBefore(method) {
+    return SharedDebuggerDomains.#RESET_BEFORE_ENABLE.get(method) || null;
+  }
+}
+
+/**
+ * WebSocket close codes the relay sends. This table is the protocol contract
+ * with the extensions (chrome-extension and firefox-extension
+ * core/connection-manager.js mirror it). It is the only place these numbers
+ * are defined on the server side.
+ *
+ * | code | name             | sent to   | the extension then                          |
+ * |------|------------------|-----------|---------------------------------------------|
+ * | 4000 | PIN_REJECTED     | /relay    | stops; keeps its previous pairing (no retry) |
+ * | 4001 | INVALID_TOKEN    | /relay    | drops its token, re-pairs with a fresh PIN   |
+ * | 4003 | NOT_CONNECTED    | /browser  | (gateway client) browser is not connected    |
+ * | 4004 | FORGOTTEN        | /relay    | drops its token, stops                       |
+ * | 4005 | REMOVED          | /relay    | drops its token, stops (name tombstoned)     |
+ * | 4006 | NAME_COLLISION   | /relay    | drops its token, stops (name is direct-CDP)  |
+ * | 4007 | HELLO_TIMEOUT    | /relay    | reconnects with backoff                      |
+ * | 4008 | PROTOCOL_ERROR   | /relay    | reconnects with backoff                      |
+ * | 4009 | SUPERSEDED       | /relay    | stops; another connection took the pairing   |
+ *
+ * 4000 is reserved for PIN failures. Transient handshake problems
+ * (timeout, malformed hello) use the reconnectable 4007/4008: extensions
+ * older than chrome 0.4.5 / firefox 0.2.3 treat any unknown code as
+ * "reconnect", so these stay backward compatible.
+ */
+export const RelayCloseCode = Object.freeze({
+  PIN_REJECTED: 4000,
+  INVALID_TOKEN: 4001,
+  NOT_CONNECTED: 4003,
+  FORGOTTEN: 4004,
+  REMOVED: 4005,
+  NAME_COLLISION: 4006,
+  HELLO_TIMEOUT: 4007,
+  PROTOCOL_ERROR: 4008,
+  SUPERSEDED: 4009
+});
+
+/**
+ * A /relay socket that has not authenticated yet. It carries the hello
+ * details and, on the PIN path, the pending PIN. It is bound to the browser's
+ * registry entry only after a valid session token or the correct PIN
+ * (RelayServer._bindExtension), so an unauthenticated peer that merely knows
+ * a browser's name cannot replace, flip or tear down that browser's live
+ * entry.
+ */
+class ExtensionHandshake {
+  constructor(ws) {
+    this.ws = ws;
+    this.name = null; // set by the hello
+    this.platform = null;
+    this.extensionVersion = null;
+    this.bidiOrigin = null;
+    // undefined = the hello carried no description (old extension: keep the stored one)
+    this.description = undefined;
+    this.sessionToken = ""; // presented token, "" = PIN path
+    this.pin = null; // { pin, expiresAt } while a PIN pairing is pending
+    this.closed = false; // the server has rejected this socket; ignore anything it still sends
+    this._helloTimer = null;
+  }
+
+  get greeted() {
+    return this.name !== null;
+  }
+
+  /** Record the hello. Returns an error string when it is unusable. */
+  acceptHello(msg) {
+    const name = typeof msg.browserName === "string" ? msg.browserName.trim() : "";
+    if (!name) return "navigator-hello requires browserName";
+    this.name = name;
+    if (PLUGIN_PLATFORMS.has(msg.platform)) this.platform = msg.platform;
+    if (typeof msg.extensionVersion === "string") this.extensionVersion = msg.extensionVersion;
+    // The extension reports the exact "moz-extension://<uuid>" origin its
+    // BiDi WebSocket connects from — surfaced via status()/stats so the
+    // Remote Agent allow-list (--remote-allow-origins) can be set correctly.
+    if (typeof msg.bidiOrigin === "string" && msg.bidiOrigin.startsWith("moz-extension://")) this.bidiOrigin = msg.bidiOrigin;
+    // Re-sent on EVERY hello (including a silent token reconnect) so edits
+    // made while offline still land — but applied only after authentication.
+    if (msg.browserDescription !== undefined) this.description = msg.browserDescription;
+    this.sessionToken = typeof msg.sessionToken === "string" ? msg.sessionToken : "";
+    this.clearHelloTimer();
+    return null;
+  }
+
+  startHelloTimer(ms, onTimeout) {
+    this.clearHelloTimer();
+    this._helloTimer = setTimeout(onTimeout, ms);
+    if (this._helloTimer.unref) this._helloTimer.unref();
+  }
+
+  clearHelloTimer() {
+    if (this._helloTimer) clearTimeout(this._helloTimer);
+    this._helloTimer = null;
+  }
+
+  issuePin() {
+    this.pin = { pin: freshPin(), expiresAt: Date.now() + PIN_EXPIRY_MS };
+    return this.pin.pin;
+  }
+
+  pinExpired(now = Date.now()) {
+    return Boolean(this.pin && now > this.pin.expiresAt);
+  }
+
+  close(code, reason) {
+    this.closed = true;
+    this.clearHelloTimer();
+    try { this.ws.close(code, String(reason).slice(0, 120)); } catch {}
+  }
+}
+
+/**
+ * Per-gateway-client ordering of commands forwarded to the extension. Most
+ * forwards are synchronous, but some wait first (the shared-domain reset
+ * before Runtime.enable). Without a queue, that client's later commands would
+ * overtake the held one, e.g. a Runtime.evaluate arriving at the tab before
+ * the Runtime.enable it was sent after. Each client has its own queue, so one
+ * client's wait never delays another client.
+ */
+class ClientForwardQueue {
+  #tail = Promise.resolve();
+
+  /** Run `step` after every step enqueued before it; resolves/rejects with it. */
+  enqueue(step) {
+    const run = this.#tail.then(step);
+    this.#tail = run.catch(() => {});
+    return run;
+  }
+}
+
 export class RelayServer {
   constructor() {
-    this._entries = new Map(); // name -> entry
+    this._entries = new Map(); // name -> entry (authenticated extensions only)
+    this._pairings = new Map(); // name -> ExtensionHandshake awaiting its PIN (latest request wins)
     this._tokenToName = new Map(); // sessionToken -> name
     this._knownBrowsers = new Map(); // name -> { plugin, firstSeenAt } — durable "has dialed in" registry, survives forget()
     this._meta = new Map(); // name -> { description, updatedAt } — durable user-authored LLM hint, survives disconnect AND restart
@@ -248,13 +408,14 @@ export class RelayServer {
     return Boolean(entry && entry.status === "connected" && entry.ws && entry.ws.readyState === entry.ws.OPEN);
   }
 
+  /**
+   * A PIN pairing is waiting for the user. An expired PIN is not pending: the
+   * previous pairing (if any) stays valid and no "expired" UI is shown. The
+   * heartbeat sweep closes expired pairings.
+   */
   isPending(name) {
-    const entry = this._entries.get(name);
-    if (!entry || entry.status !== "auth_pending") return false;
-    // Expired PIN is no longer pending — treat as not pending so the
-    // previous pairing (if any) stays valid and no "expired" UI is shown.
-    if (entry.pendingPin && Date.now() > entry.pendingPin.expiresAt) return false;
-    return true;
+    const pairing = this._pairings.get(name);
+    return Boolean(pairing && !pairing.pinExpired());
   }
 
   isPaired(name) {
@@ -288,22 +449,25 @@ export class RelayServer {
         found = true;
       }
     }
-    // Remove from live entries (close ws if connected)
+    // Remove from live entries (close ws if connected). FORGOTTEN (4004),
+    // not PIN_REJECTED (4000, "revert to your previous pairing and keep the
+    // token"): a forgotten browser must drop its stored pairing material and
+    // stop, otherwise it reconnects with a token the server no longer honors
+    // (plan 60 B2).
     const entry = this._entries.get(trimmed);
     if (entry) {
       found = true;
       try {
-        if (entry.ws && entry.ws.readyState === entry.ws.OPEN) {
-          // Distinct close code 4004 = "this browser was forgotten by the
-          // server" — NOT 4000 ("PIN wrong/expired"), which the extensions
-          // treat as "revert to your previous pairing and keep the token".
-          // A forgotten browser must drop its stored pairing material and
-          // stop, otherwise it reconnects with a token the server no longer
-          // honors (plan 60 B2).
-          entry.ws.close(4004, "forget");
-        }
+        if (entry.ws && entry.ws.readyState === entry.ws.OPEN) entry.ws.close(RelayCloseCode.FORGOTTEN, "forget");
       } catch {}
       this._teardownEntry(entry);
+    }
+    // A PIN pairing still waiting for this name is cancelled the same way.
+    const pairing = this._pairings.get(trimmed);
+    if (pairing) {
+      found = true;
+      this._pairings.delete(trimmed);
+      pairing.close(RelayCloseCode.FORGOTTEN, "forget");
     }
     // Remove from DB (persisted pairing). The description is deliberately
     // KEPT: it is not part of the pairing, and Forget answers "drop the
@@ -373,7 +537,7 @@ export class RelayServer {
     // add-on. Evict the pairing (forget: keeps the known row for the record,
     // closes the socket with 4004); the hello gate then refuses the name
     // (4006) so the conflict cannot be recreated.
-    for (const name of [...this._entries.keys()]) {
+    for (const name of new Set([...this._entries.keys(), ...this._pairings.keys()])) {
       if (this._configuredDirectNames.has(name)) {
         log(`evicting dynamic relay "${name}" — collision with configured direct-CDP browser`);
         this.forget(name);
@@ -457,9 +621,33 @@ export class RelayServer {
   }
 
   /**
+   * Tabs for a relay browser, refreshed only when the cached list is older
+   * than `maxAgeMs`, and never waiting longer than `waitMs` for the extension.
+   * For snapshot callers (Target.getTargets) that must not stall on a slow
+   * browser but also must not report a list from minutes ago. Extensions
+   * since chrome 0.4.4 / firefox 0.2.2 push on every tab change, so the cache
+   * is normally fresh and this returns immediately.
+   * @param {string} name
+   * @param {{maxAgeMs?: number, waitMs?: number}} [opts]
+   * @returns {Promise<Array>}
+   */
+  async freshTabList(name, { maxAgeMs = 2_000, waitMs = 1_500 } = {}) {
+    const entry = this._entries.get(name);
+    if (!entry) return [];
+    if (!this._canSend(entry) || Date.now() - (entry.tabsAt || 0) < maxAgeMs) return entry.tabs.slice();
+    let timer;
+    const cached = new Promise((resolve) => { timer = setTimeout(() => resolve(entry.tabs.slice()), waitMs); });
+    try {
+      return await Promise.race([this.refreshTabList(name), cached]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Ask the extension for a fresh tab list for a relay browser, then resolve
    * with the updated entry.tabs. Used by callers that must see user-opened
-   * tabs immediately (e.g. Target.getTargets) instead of a stale cache.
+   * tabs immediately instead of a stale cache.
    * @param {string} name
    * @returns {Promise<Array>} the (possibly unchanged) tabs for that entry
    */
@@ -541,49 +729,20 @@ export class RelayServer {
     return out;
   }
 
+  /**
+   * Status projection for one relay browser. Read-only: expired PIN pairings
+   * are swept by the heartbeat, never by a status read.
+   */
   _statusFor(cfg) {
     const name = cfg.name;
     const entry = this._entries.get(name);
     const connected = this.isConnected(name);
-    let pending = this.isPending(name);
-    let pendingPin = entry?.pendingPin || null;
-    // If PIN is expired, clear it and revert to previous state — the
-    // previously paired browser (if any) stays valid, no "expired" UI.
-    if (pending && pendingPin && Date.now() > pendingPin.expiresAt) {
-      entry.pendingPin = null;
-      pendingPin = null;
-      pending = false;
-      // Fresh pending entry that never paired and never connected — remove it
-      // so it doesn't linger as "not paired" after expiry.
-      if (!this.isPaired(name) && !connected) {
-        this._entries.delete(name);
-        // Return a synthetic disconnected entry (paired==false) — the
-        // caller (getStatusEntries) will handle synthetic paired entries
-        // separately, but for unpaired we just return disconnected.
-        return {
-          name,
-          type: "navigator-cdp",
-          plugin: cfg.plugin || "auto",
-          status: "disconnected",
-          paired: false,
-          role: cfg.role || [],
-          configured: Boolean(cfg.configured),
-          dynamic: !cfg.configured,
-          cdpUrl: null,
-          connectedAt: null,
-          extensionVersion: null,
-          bidiOrigin: null,
-          description: this.getDescription(name),
-          descriptionUpdatedAt: this._meta.get(name)?.updatedAt || null,
-          pin: null,
-          pinExpiresAt: null
-        };
-      }
-    }
+    const pending = this.isPending(name);
+    const pairing = pending ? this._pairings.get(name) : null;
     return {
       name,
       type: "navigator-cdp",
-      plugin: entry?.platform || entry?.plugin || cfg.plugin || "auto",
+      plugin: entry?.platform || pairing?.platform || entry?.plugin || cfg.plugin || "auto",
       status: connected ? "connected" : pending ? "auth_pending" : "disconnected",
       paired: this.isPaired(name),
       role: cfg.role || [],
@@ -591,14 +750,17 @@ export class RelayServer {
       dynamic: !cfg.configured,
       cdpUrl: connected ? this.gatewayWsUrl(name) : null,
       connectedAt: entry?.connectedAt || null,
-      extensionVersion: entry?.extensionVersion || null,
-      bidiOrigin: entry?.bidiOrigin || null,
+      extensionVersion: entry?.extensionVersion || pairing?.extensionVersion || null,
+      bidiOrigin: entry?.bidiOrigin || pairing?.bidiOrigin || null,
       // The browser's own words first; the live entry is the writer of truth
       // when connected, the durable map covers every offline case.
       description: entry?.description ?? this.getDescription(name),
       descriptionUpdatedAt: entry?.descriptionUpdatedAt ?? this._meta.get(name)?.updatedAt ?? null,
-      pin: pending && pendingPin ? pendingPin.pin : null,
-      pinExpiresAt: pending && pendingPin ? pendingPin.expiresAt : null
+      // A pending pairing's PIN is shown even while an older socket for the
+      // same name still counts as connected, so the user can complete a
+      // re-pair that replaces it.
+      pin: pairing ? pairing.pin.pin : null,
+      pinExpiresAt: pairing ? pairing.pin.expiresAt : null
     };
   }
 
@@ -670,35 +832,20 @@ export class RelayServer {
 
   // ---- Extension side (/relay) -------------------------------------------
 
+  /**
+   * One /relay socket. Until it authenticates, every message goes to the
+   * handshake (hello, then a session token or a PIN); the registry entry is
+   * not touched. Once authenticated the socket is bound to the entry and its
+   * messages are connected traffic — for as long as it is still the entry's
+   * socket (a superseded or torn-down socket's late frames are dropped).
+   */
   _handleExtension(ws) {
-    let name = null;
+    const handshake = new ExtensionHandshake(ws);
     let entry = null;
-    let settled = false;
 
-    const fail = (code, reason) => {
-      settled = true;
-      try { ws.close(code, String(reason).slice(0, 120)); } catch {}
-    };
-
-    // A description may ride along on the hello, but it is only written once
-    // the socket has actually authenticated (valid session token, or a PIN
-    // the user accepted). Anything earlier would let an unauthenticated peer
-    // that merely knows a browser's name rewrite that browser's description.
-    // Held here, applied on the connected paths below.
-    let helloDescription;
-    const applyHelloDescription = () => {
-      if (helloDescription === undefined) return;
-      const applied = this.setDescription(name, helloDescription);
-      if (!applied.ok) {
-        log(`extension "${name}" description rejected: ${applied.error}`);
-        sendJson(ws, { type: "description_error", error: applied.error });
-      }
-      helloDescription = undefined;
-    };
-
-    const helloTimer = setTimeout(() => {
-      if (!settled) fail(4000, "hello timeout");
-    }, HELLO_TIMEOUT_MS);
+    handshake.startHelloTimer(HELLO_TIMEOUT_MS, () => {
+      if (!handshake.greeted) handshake.close(RelayCloseCode.HELLO_TIMEOUT, "hello timeout");
+    });
 
     ws.on("message", (data) => {
       let msg;
@@ -708,220 +855,20 @@ export class RelayServer {
         return;
       }
       if (!msg || typeof msg !== "object") return;
-
       if (!entry) {
-        // ---- navigator-hello ------------------------------------------------
-        if (msg.type !== "navigator-hello") return;
-        name = typeof msg.browserName === "string" && msg.browserName.trim() ? msg.browserName.trim() : "";
-        if (!name) {
-          fail(4000, "navigator-hello requires browserName");
-          return;
-        }
-        clearTimeout(helloTimer);
-        // Plan 60 B6 — hello admission gate: a name the user explicitly
-        // removed is rejected BEFORE any entry/known-row is created, so it
-        // cannot re-materialize as a dynamic browser. Close 4005 is the
-        // extension-side "removed" signal (4004 remains "forgotten").
-        if (!this._discoverable(name)) {
-          // Plan 60 B7: a name configured as a direct-CDP browser is a
-          // collision, not a removal — distinct close code 4006.
-          if (this._configuredDirectNames.has(name)) {
-            log(`extension "${name}" rejected — name is configured as a direct-CDP browser (plan 60 B7)`);
-            fail(4006, "configured as direct browser");
-          } else {
-            log(`extension "${name}" rejected — name was removed from navigator (tombstone)`);
-            fail(4005, "removed by navigator");
-          }
-          return;
-        }
-        entry = this._ensureEntry(name);
-        entry.ws = ws;
-        if (PLUGIN_PLATFORMS.has(msg.platform)) entry.platform = msg.platform;
-        if (typeof msg.extensionVersion === "string") entry.extensionVersion = msg.extensionVersion;
-        this._rememberKnown(name, entry.platform || msg.platform);
-        // The extension reports the exact "moz-extension://<uuid>" origin its
-        // BiDi WebSocket connects from — surfaced via status()/stats so the
-        // Remote Agent allow-list (--remote-allow-origins) can be set correctly.
-        if (typeof msg.bidiOrigin === "string" && msg.bidiOrigin.startsWith("moz-extension://")) entry.bidiOrigin = msg.bidiOrigin;
-        // The extension re-sends its description on EVERY hello (including a
-        // silent token reconnect) so edits made while offline still land.
-        // A missing field means "old extension" — keep whatever we already have.
-        if (msg.browserDescription !== undefined) helloDescription = msg.browserDescription;
-        entry.lastActivity = Date.now();
-
-        const token = typeof msg.sessionToken === "string" && msg.sessionToken ? msg.sessionToken : "";
-        if (token) {
-          if (this._tokenToName.get(token) === name) {
-            log(`extension "${name}" reconnected with valid session token`);
-            entry.status = "connected";
-            entry.connectedAt = Date.now();
-            entry.pendingPin = null;
-            sendJson(ws, { type: "connected", sessionToken: token });
-            applyHelloDescription();
-            this._onPairingComplete(entry);
-          } else {
-            // A token that is stale or that belongs to a different browser is a
-            // state leak, not a new pairing — reject the connection outright.
-            log(`extension "${name}" presented an invalid/expired session token`);
-            fail(4001, "invalid session token");
-          }
-        } else {
-          const pin = freshPin();
-          entry.pendingPin = { pin, expiresAt: Date.now() + PIN_EXPIRY_MS };
-          entry.status = "auth_pending";
-          this._printPin(entry, pin);
-          sendJson(ws, { type: "pin_required" });
-        }
+        entry = this._onHandshakeMessage(handshake, msg);
         return;
       }
-
+      if (entry.ws !== ws || this._entries.get(entry.name) !== entry) return;
       entry.lastActivity = Date.now();
-
-      // ---- PIN submission ---------------------------------------------------
-      if (msg.type === "pin" && entry.status === "auth_pending") {
-        const pending = entry.pendingPin;
-        if (!pending) {
-          fail(4000, "No pending PIN");
-          return;
-        }
-        if (Date.now() > pending.expiresAt) {
-          entry.pendingPin = null;
-          log(`extension "${name}" PIN expired`);
-          fail(4000, "PIN expired");
-          return;
-        }
-        if (String(msg.pin) !== pending.pin) {
-          entry.pendingPin = null;
-          log(`extension "${name}" submitted wrong PIN`);
-          fail(4000, "Invalid PIN");
-          return;
-        }
-        entry.pendingPin = null;
-        entry.status = "connected";
-        entry.connectedAt = Date.now();
-        entry.sessionToken = randomUUID().replace(/-/g, "");
-        this._tokenToName.set(entry.sessionToken, name);
-        try {
-          saveRelaySession(name, entry.sessionToken);
-        } catch (e) {
-          log(`persist session for "${name}" failed`, String(e && e.message));
-        }
-        log(`extension "${name}" PIN accepted`);
-        sendJson(ws, { type: "pin_accepted" });
-        sendJson(ws, { type: "connected", sessionToken: entry.sessionToken });
-        applyHelloDescription();
-        this._onPairingComplete(entry);
-        return;
-      }
-
-      // ---- connected traffic ------------------------------------------------
-      if (entry.status !== "connected") return;
-
-      // ---- live description update -----------------------------------------
-      // The popup lets the owner re-word their browser while it stays paired
-      // and connected — no re-PIN, no reconnect. Reached only past the
-      // connected guard above, so the channel is already authenticated by the
-      // session token.
-      if (msg.type === "update_description") {
-        const applied = this.setDescription(name, msg.description);
-        if (applied.ok) {
-          log(`extension "${name}" description updated`);
-          sendJson(ws, { type: "description_updated", description: applied.description });
-        } else {
-          log(`extension "${name}" description update rejected: ${applied.error}`);
-          sendJson(ws, { type: "description_error", error: applied.error });
-        }
-        return;
-      }
-
-      if (msg.type === "ping") {
-        sendJson(ws, { type: "pong" });
-        return;
-      }
-      if (msg.type === "pong") return;
-      if (msg.type === "tab_list" && Array.isArray(msg.tabs)) {
-        this._onTabList(entry, msg.tabs);
-        return;
-      }
-      if (msg.type === "tab_detached" && msg.tabId != null) {
-        // Extension's chrome.debugger.onDetach — the user closed the
-        // "started debugging this browser" banner (canceled_by_user) or a
-        // tab was closed. Purge the stale session maps so the next
-        // _ensureTargetSession creates a fresh chrome.debugger.attach instead
-        // of replaying the dead sessionId ("Tab not attached").
-        //
-        // BEFORE clearing the maps, forward a session-scoped
-        // Target.detachedFromTarget to every client tracking the target —
-        // that event is what resolves puppeteer's page.close() (TargetManager
-        // listens on the session), and this is the only moment the sessionId
-        // is still known: once the maps are purged here, the later _diffTabs
-        // can only emit destroy-without-detach and page.close() hangs forever.
-        const tabIdStr = String(msg.tabId);
-        const targetId = entry.tabIdToTarget.get(tabIdStr);
-        if (targetId) {
-          const sess = entry.sessionForTarget.get(targetId);
-          if (sess) {
-            for (const client of [...entry.clients.values()]) {
-              const cs = client.sessionForTarget;
-              if (cs && cs.has(targetId)) {
-                this._emitToClient(client, {
-                  method: "Target.detachedFromTarget",
-                  params: { sessionId: cs.get(targetId), targetId }
-                });
-                log(`[relay] tab_detached: emitting detachedFromTarget session=${cs.get(targetId)} (client ${client.id})`);
-              }
-            }
-            entry.sessionForTarget.delete(targetId);
-            entry.extSessionToTarget.delete(sess);
-            for (const client of entry.clients.values()) {
-              if (client.sessionForTarget) client.sessionForTarget.delete(targetId);
-            }
-            log(`extension "${name}" detached tab ${msg.tabId} (target ${targetId}) reason=${msg.reason || ""} — cleared stale session`);
-          }
-        } else {
-          // No targetId mapping yet (tab list race) — still clear any session
-          // that was mapped via extSessionToTarget → tabId
-          for (const [sess, tid] of [...entry.extSessionToTarget.entries()]) {
-            const mappedTab = [...entry.tabIdToTarget.entries()].find(([, v]) => v === tid)?.[0];
-            if (mappedTab === tabIdStr) {
-              for (const client of [...entry.clients.values()]) {
-                const cs = client.sessionForTarget;
-                if (cs && cs.has(tid)) {
-                  this._emitToClient(client, {
-                    method: "Target.detachedFromTarget",
-                    params: { sessionId: cs.get(tid), targetId: tid }
-                  });
-                }
-              }
-              entry.sessionForTarget.delete(tid);
-              entry.extSessionToTarget.delete(sess);
-              for (const client of entry.clients.values()) {
-                if (client.sessionForTarget) client.sessionForTarget.delete(tid);
-              }
-              log(`extension "${name}" detached tab ${msg.tabId} (session ${sess}) — cleared stale session (fallback)`);
-              break;
-            }
-          }
-        }
-        return;
-      }
-      if (msg.type === "cdp_event" && typeof msg.method === "string") {
-        this._onCdpEvent(entry, msg);
-        return;
-      }
-      if (typeof msg.type === "undefined" && typeof msg.id === "number") {
-        this._onCdpResponse(entry, msg);
-        return;
-      }
-      if (msg.type === "detach_all_result") {
-        log(`extension "${name}" detach_all done (success=${Boolean(msg.success)})`);
-      }
+      this._onExtensionMessage(entry, msg);
     });
 
     ws.on("close", () => {
-      clearTimeout(helloTimer);
+      handshake.clearHelloTimer();
+      if (handshake.greeted && this._pairings.get(handshake.name) === handshake) this._pairings.delete(handshake.name);
       if (entry && entry.ws === ws) {
-        log(`extension "${name || "?"}" disconnected`);
+        log(`extension "${entry.name}" disconnected`);
         this._teardownEntry(entry);
       }
     });
@@ -931,6 +878,255 @@ export class RelayServer {
     });
   }
 
+  /**
+   * Pre-authentication traffic: the hello, then either a session token check
+   * or a PIN exchange. Returns the bound entry once the socket authenticated,
+   * else null. Nothing here mutates a live entry before authentication.
+   */
+  _onHandshakeMessage(handshake, msg) {
+    if (handshake.closed) return null;
+    if (!handshake.greeted) {
+      if (msg.type !== "navigator-hello") return null;
+      const problem = handshake.acceptHello(msg);
+      if (problem) {
+        handshake.close(RelayCloseCode.PROTOCOL_ERROR, problem);
+        return null;
+      }
+      const name = handshake.name;
+      // Plan 60 B6/B7 — hello admission gate: a name the user explicitly
+      // removed (4005) or that the config owns as a direct-CDP browser (4006)
+      // is rejected before any known-row is created, so it cannot
+      // re-materialize as a dynamic browser.
+      if (!this._discoverable(name)) {
+        if (this._configuredDirectNames.has(name)) {
+          log(`extension "${name}" rejected — name is configured as a direct-CDP browser (plan 60 B7)`);
+          handshake.close(RelayCloseCode.NAME_COLLISION, "configured as direct browser");
+        } else {
+          log(`extension "${name}" rejected — name was removed from navigator (tombstone)`);
+          handshake.close(RelayCloseCode.REMOVED, "removed by navigator");
+        }
+        return null;
+      }
+      this._rememberKnown(name, handshake.platform);
+
+      if (handshake.sessionToken) {
+        if (this._tokenToName.get(handshake.sessionToken) !== name) {
+          // A token that is stale or belongs to a different browser is a
+          // state leak, not a new pairing — reject this socket only. The live
+          // entry (if any) is not this socket's to disturb.
+          log(`extension "${name}" presented an invalid/expired session token`);
+          handshake.close(RelayCloseCode.INVALID_TOKEN, "invalid session token");
+          return null;
+        }
+        log(`extension "${name}" reconnected with valid session token`);
+        const entry = this._bindExtension(handshake);
+        sendJson(entry.ws, { type: "connected", sessionToken: handshake.sessionToken });
+        this._applyHelloDescription(entry, handshake);
+        this._onPairingComplete(entry);
+        return entry;
+      }
+
+      this._beginPinPairing(handshake);
+      return null;
+    }
+
+    if (msg.type !== "pin") return null;
+    const name = handshake.name;
+    if (!handshake.pin || this._pairings.get(name) !== handshake) {
+      handshake.close(RelayCloseCode.PROTOCOL_ERROR, "No pending PIN");
+      return null;
+    }
+    if (handshake.pinExpired()) {
+      this._pairings.delete(name);
+      log(`extension "${name}" PIN expired`);
+      handshake.close(RelayCloseCode.PIN_REJECTED, "PIN expired");
+      return null;
+    }
+    if (String(msg.pin) !== handshake.pin.pin) {
+      this._pairings.delete(name);
+      log(`extension "${name}" submitted wrong PIN`);
+      handshake.close(RelayCloseCode.PIN_REJECTED, "Invalid PIN");
+      return null;
+    }
+    this._pairings.delete(name);
+    handshake.pin = null;
+    const entry = this._bindExtension(handshake);
+    entry.sessionToken = randomUUID().replace(/-/g, "");
+    this._tokenToName.set(entry.sessionToken, name);
+    try {
+      saveRelaySession(name, entry.sessionToken);
+    } catch (e) {
+      log(`persist session for "${name}" failed`, String(e && e.message));
+    }
+    log(`extension "${name}" PIN accepted`);
+    sendJson(entry.ws, { type: "pin_accepted" });
+    sendJson(entry.ws, { type: "connected", sessionToken: entry.sessionToken });
+    this._applyHelloDescription(entry, handshake);
+    this._onPairingComplete(entry);
+    return entry;
+  }
+
+  /**
+   * Issue a PIN for a token-less hello. The newest request for a name wins;
+   * an older socket still waiting on its PIN is closed with PIN_REJECTED so it
+   * reverts to its previous pairing instead of typing a PIN that no longer
+   * exists.
+   */
+  _beginPinPairing(handshake) {
+    const name = handshake.name;
+    const previous = this._pairings.get(name);
+    if (previous && previous !== handshake) previous.close(RelayCloseCode.PIN_REJECTED, "PIN request superseded");
+    const pin = handshake.issuePin();
+    this._pairings.set(name, handshake);
+    this._printPin(name, pin);
+    sendJson(handshake.ws, { type: "pin_required" });
+  }
+
+  /**
+   * Make an authenticated handshake the browser's live connection. An older
+   * socket still bound to the entry (a reconnect the server has not noticed
+   * dropping, or a second instance) is closed with SUPERSEDED; its close
+   * handler then sees it is no longer the entry's socket and leaves the
+   * entry, its gateway clients and their sessions intact.
+   */
+  _bindExtension(handshake) {
+    const entry = this._ensureEntry(handshake.name);
+    const previous = entry.ws;
+    entry.ws = handshake.ws;
+    if (previous && previous !== handshake.ws) {
+      log(`extension "${entry.name}" — replacing the previous connection`);
+      try { previous.close(RelayCloseCode.SUPERSEDED, "replaced by a newer connection"); } catch {}
+    }
+    if (handshake.platform) entry.platform = handshake.platform;
+    if (handshake.extensionVersion) entry.extensionVersion = handshake.extensionVersion;
+    if (handshake.bidiOrigin) entry.bidiOrigin = handshake.bidiOrigin;
+    entry.status = "connected";
+    entry.connectedAt = Date.now();
+    entry.lastActivity = Date.now();
+    return entry;
+  }
+
+  /**
+   * A description that rode along on the hello is written only now that the
+   * socket has authenticated — otherwise an unauthenticated peer that merely
+   * knows a browser's name could rewrite that browser's description.
+   */
+  _applyHelloDescription(entry, handshake) {
+    if (handshake.description === undefined) return;
+    const applied = this.setDescription(entry.name, handshake.description);
+    if (!applied.ok) {
+      log(`extension "${entry.name}" description rejected: ${applied.error}`);
+      sendJson(entry.ws, { type: "description_error", error: applied.error });
+    }
+    handshake.description = undefined;
+  }
+
+  /** Traffic from an authenticated extension socket. */
+  _onExtensionMessage(entry, msg) {
+    const name = entry.name;
+    const ws = entry.ws;
+
+    // ---- live description update -------------------------------------------
+    // The popup lets the owner re-word their browser while it stays paired
+    // and connected — no re-PIN, no reconnect. The channel is already
+    // authenticated by the session token.
+    if (msg.type === "update_description") {
+      const applied = this.setDescription(name, msg.description);
+      if (applied.ok) {
+        log(`extension "${name}" description updated`);
+        sendJson(ws, { type: "description_updated", description: applied.description });
+      } else {
+        log(`extension "${name}" description update rejected: ${applied.error}`);
+        sendJson(ws, { type: "description_error", error: applied.error });
+      }
+      return;
+    }
+
+    if (msg.type === "ping") {
+      sendJson(ws, { type: "pong" });
+      return;
+    }
+    if (msg.type === "pong") return;
+    if (msg.type === "tab_list" && Array.isArray(msg.tabs)) {
+      this._onTabList(entry, msg.tabs);
+      return;
+    }
+    if (msg.type === "tab_detached" && msg.tabId != null) {
+      this._onTabDetached(entry, msg);
+      return;
+    }
+    if (msg.type === "cdp_event" && typeof msg.method === "string") {
+      this._onCdpEvent(entry, msg);
+      return;
+    }
+    if (typeof msg.type === "undefined" && typeof msg.id === "number") {
+      this._onCdpResponse(entry, msg);
+      return;
+    }
+    if (msg.type === "detach_all_result") {
+      log(`extension "${name}" detach_all done (success=${Boolean(msg.success)})`);
+    }
+  }
+
+  /**
+   * Extension's chrome.debugger.onDetach — the user closed the "started
+   * debugging this browser" banner (canceled_by_user) or a tab was closed.
+   * Purge the stale session maps so the next _ensureTargetSession creates a
+   * fresh chrome.debugger.attach instead of replaying the dead sessionId
+   * ("Tab not attached").
+   *
+   * BEFORE clearing the maps, forward a session-scoped
+   * Target.detachedFromTarget to every client tracking the target — that
+   * event is what resolves puppeteer's page.close() (TargetManager listens on
+   * the session), and this is the only moment the sessionId is still known:
+   * once the maps are purged here, the later _diffTabs can only emit
+   * destroy-without-detach and page.close() hangs forever.
+   */
+  _onTabDetached(entry, msg) {
+    const name = entry.name;
+    const tabIdStr = String(msg.tabId);
+    const notifyAndForget = (targetId) => {
+      for (const client of [...entry.clients.values()]) {
+        const cs = client.sessionForTarget;
+        if (cs && cs.has(targetId)) {
+          this._emitToClient(client, {
+            method: "Target.detachedFromTarget",
+            params: { sessionId: cs.get(targetId), targetId }
+          });
+          log(`[relay] tab_detached: emitting detachedFromTarget session=${cs.get(targetId)} (client ${client.id})`);
+          cs.delete(targetId);
+        }
+      }
+    };
+    const targetId = entry.tabIdToTarget.get(tabIdStr);
+    if (targetId) {
+      const sess = entry.sessionForTarget.get(targetId);
+      if (sess) {
+        notifyAndForget(targetId);
+        entry.sessionForTarget.delete(targetId);
+        entry.extSessionToTarget.delete(sess);
+        log(`extension "${name}" detached tab ${msg.tabId} (target ${targetId}) reason=${msg.reason || ""} — cleared stale session`);
+      }
+      return;
+    }
+    // No targetId mapping yet (tab list race) — still clear any session that
+    // was mapped via extSessionToTarget → tabId.
+    for (const [sess, tid] of [...entry.extSessionToTarget.entries()]) {
+      const mappedTab = [...entry.tabIdToTarget.entries()].find(([, v]) => v === tid)?.[0];
+      if (mappedTab !== tabIdStr) continue;
+      notifyAndForget(tid);
+      entry.sessionForTarget.delete(tid);
+      entry.extSessionToTarget.delete(sess);
+      log(`extension "${name}" detached tab ${msg.tabId} (session ${sess}) — cleared stale session (fallback)`);
+      break;
+    }
+  }
+
+  /**
+   * The registry entry for an authenticated browser — created by
+   * _bindExtension only, so every entry in `_entries` is an authenticated
+   * connection (pending PIN pairings live in `_pairings`).
+   */
   _ensureEntry(name) {
     let entry = this._entries.get(name);
     if (!entry) {
@@ -941,11 +1137,11 @@ export class RelayServer {
         platform: null,
         extensionVersion: null,
         bidiOrigin: null,
-        status: "auth_pending",
+        status: "connected",
         ws: null,
         connectedAt: null,
         sessionToken: null,
-        pendingPin: null,
+        tornDown: false,
         // Carry the durable description onto a fresh live entry so a browser
         // that reconnects with an old extension (no browserDescription field)
         // keeps the description it set earlier.
@@ -964,7 +1160,15 @@ export class RelayServer {
     return entry;
   }
 
+  /**
+   * Drop an entry and fail everything waiting on it. Idempotent: forget() and
+   * the heartbeat tear down synchronously and the socket's close event
+   * arrives later; the second call must not touch a newer entry that has
+   * since registered under the same name.
+   */
   _teardownEntry(entry) {
+    if (entry.tornDown) return;
+    entry.tornDown = true;
     // Flush every pending command for THIS entry's clients so gateway clients
     // (puppeteer) get clean "browser disconnected" errors instead of hanging
     // until their own timeout. The pending map is instance-level
@@ -996,14 +1200,14 @@ export class RelayServer {
     for (const client of [...entry.clients.values()]) {
       this._closeGatewayClient(entry, client, "browser disconnected");
     }
-    this._entries.delete(entry.name);
+    if (this._entries.get(entry.name) === entry) this._entries.delete(entry.name);
   }
 
-  _printPin(entry, pin) {
+  _printPin(name, pin) {
     for (const line of [
       "",
       "┌────────────────────────────────────────────────┐",
-      `│  🔐 "${entry.name}" wants to connect                  │`,
+      `│  🔐 "${name}" wants to connect                  │`,
       `│     PIN: ${pin}  (expires in 60s)                 │`,
       "│     Enter this PIN in the browser extension.     │",
       "└────────────────────────────────────────────────┘",
@@ -1040,6 +1244,9 @@ export class RelayServer {
 
   _onTabList(entry, tabs) {
     const incoming = Array.isArray(tabs) ? tabs.slice() : [];
+    // Any tab_list is a fresh answer, including an ignored empty one — a
+    // browser with no page tabs must not refresh on every getTargets.
+    entry.tabsAt = Date.now();
     if (incoming.length === 0 && entry.tabs.length > 0) {
       // A delayed extension response must not turn a populated registry into an
       // empty browser and tear down every client session. A real tab close is
@@ -1117,7 +1324,7 @@ export class RelayServer {
     const entry = this._entries.get(name);
     if (!entry || entry.status !== "connected") {
       log(`gateway connect for unknown/disconnected browser "${name}"`);
-      try { ws.close(4003, "browser not connected"); } catch {}
+      try { ws.close(RelayCloseCode.NOT_CONNECTED, "browser not connected"); } catch {}
       return;
     }
     const client = {
@@ -1126,7 +1333,8 @@ export class RelayServer {
       tabs: new Map(),
       discover: false,
       autoAttach: false,
-      browserTargetSent: false
+      browserTargetSent: false,
+      forwardQueue: new ClientForwardQueue()
     };
     entry.clients.set(client.id, client);
 
@@ -1233,8 +1441,29 @@ export class RelayServer {
         return;
       }
       default: {
-        this._sendExtensionCommand(entry, { id, method, params, sessionId }, client.id);
+        // Forwarded in the order the client sent them, even when one waits
+        // for a shared-domain reset first (see ClientForwardQueue).
+        const reset = sessionId ? SharedDebuggerDomains.resetBefore(method) : null;
+        await client.forwardQueue.enqueue(async () => {
+          if (reset) await this._resetSharedDomain(entry, sessionId, reset);
+          this._sendExtensionCommand(entry, { id, method, params, sessionId }, client.id);
+        });
       }
+    }
+  }
+
+  /**
+   * Reset a domain on the tab's shared debugger so the enable that follows
+   * replays existing state (see SharedDebuggerDomains). Best-effort and
+   * bounded: a failed or slow reset must never block the client's own enable,
+   * which is forwarded either way.
+   */
+  async _resetSharedDomain(entry, sessionId, method) {
+    try {
+      const resp = await this.sendCdpCommand(entry.name, { method, sessionId, timeoutMs: GATEWAY_WAIT_MS });
+      if (resp.error) log(`${method} before re-enable on session ${sessionId} failed: ${resp.error.message || resp.error.code}`);
+    } catch (error) {
+      log(`${method} before re-enable on session ${sessionId} failed: ${error?.message || error}`);
     }
   }
 
@@ -1724,14 +1953,26 @@ export class RelayServer {
 
   _heartbeatTick() {
     const now = Date.now();
-    for (const entry of this._entries.values()) {
+    for (const entry of [...this._entries.values()]) {
       if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) continue;
       if (now - entry.lastActivity > HEARTBEAT_TIMEOUT_MS) {
-        log(`extension "${entry.name}" heartbeat timeout — closing`);
-        try { entry.ws.close(); } catch {}
+        // terminate(), not close(): a silent peer will not answer a close
+        // handshake either, and close() would keep the dead entry (and route
+        // commands into it) for the 30s closing timeout.
+        log(`extension "${entry.name}" heartbeat timeout — terminating`);
+        try { entry.ws.terminate(); } catch {}
+        this._teardownEntry(entry);
         continue;
       }
       sendJson(entry.ws, { type: "ping" });
+    }
+    // Expired PIN pairings are closed here rather than as a side effect of
+    // a status read; the extension reverts to its previous pairing.
+    for (const [name, pairing] of [...this._pairings]) {
+      if (!pairing.pinExpired(now)) continue;
+      this._pairings.delete(name);
+      log(`extension "${name}" PIN expired`);
+      pairing.close(RelayCloseCode.PIN_REJECTED, "PIN expired");
     }
   }
 

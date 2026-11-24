@@ -38,11 +38,12 @@ async function pairExtension(relay, wsBase, name) {
   const ws = await open(`${wsBase}/relay`);
   ws.send(JSON.stringify({ type: "navigator-hello", browserName: name, platform: "chrome", extensionVersion: "0.1.0" }));
   await nextMsg(ws, (m) => m.type === "pin_required");
-  const pin = relay._entries.get(name).pendingPin.pin;
+  // The pending PIN is what the dashboard shows the user (status row `pin`).
+  const pin = relay.getStatusEntries([]).find((b) => b.name === name).pin;
   ws.send(JSON.stringify({ type: "pin", pin }));
   await nextMsg(ws, (m) => m.type === "pin_accepted");
   const connected = await nextMsg(ws, (m) => m.type === "connected");
-  return { ws, entry: relay._entries.get(name), token: connected.sessionToken };
+  return { ws, entry: relay.getEntry(name), token: connected.sessionToken };
 }
 
 let extSeq = 0;

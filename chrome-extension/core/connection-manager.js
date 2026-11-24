@@ -3,6 +3,57 @@ var ConnectionManager = (function() {
   var _listeners = [];
   var _intentionalDisconnect = false;
 
+  // Close codes navigator's relay sends — mirror of RelayCloseCode in
+  // navigator's src/relay-server.js, which documents each one. Every 4xxx
+  // code is the server's verdict on this connection: trying the alternate
+  // candidate URL after one is pointless.
+  var CloseCode = {
+    PIN_REJECTED: 4000,   // stop; keep the previous pairing
+    INVALID_TOKEN: 4001,  // drop the token, re-pair with a fresh PIN
+    FORGOTTEN: 4004,      // drop the token, stop
+    REMOVED: 4005,        // drop the token, stop (name tombstoned)
+    NAME_COLLISION: 4006, // drop the token, stop (name is a direct-CDP browser)
+    HELLO_TIMEOUT: 4007,  // transient: reconnect with backoff
+    PROTOCOL_ERROR: 4008, // transient: reconnect with backoff
+    SUPERSEDED: 4009      // another connection took this pairing: stop
+  };
+
+  function isServerVerdict(code) {
+    return code >= 4000 && code <= 4999;
+  }
+
+  /**
+   * Capped exponential reconnect delay: 1s, 2s, 4s … up to 30s, back to 1s
+   * once the server accepts us. A navigator restart of any length is
+   * survived without hammering a server that is down.
+   */
+  var Backoff = (function() {
+    var _attempt = 0;
+    return {
+      next: function() {
+        var delay = Math.min(Config.RECONNECT_MAX_DELAY, Config.RECONNECT_BASE_DELAY * Math.pow(2, _attempt));
+        if (delay < Config.RECONNECT_MAX_DELAY) _attempt++;
+        return delay;
+      },
+      reset: function() { _attempt = 0; }
+    };
+  })();
+
+  /**
+   * Half-dead socket detection. navigator pings every 15s and answers our
+   * pings, so an open socket that has delivered nothing for
+   * Config.LIVENESS_TIMEOUT is dead even though the browser still reports it
+   * OPEN (NAT/proxy drop, suspended peer). It is abandoned and redialled.
+   */
+  var Liveness = (function() {
+    var _lastInboundAt = 0;
+    return {
+      noteInbound: function() { _lastInboundAt = Date.now(); },
+      reset: function() { _lastInboundAt = Date.now(); },
+      isStale: function() { return Date.now() - _lastInboundAt > Config.LIVENESS_TIMEOUT; }
+    };
+  })();
+
   // Identify which Chromium-based browser this extension is running in.
   // Edge/Opera/Vivaldi/Chromium mark their UA distinctly; Brave deliberately
   // mimics Chrome's UA, so it must be probed via navigator.brave.isBrave()
@@ -91,6 +142,7 @@ var ConnectionManager = (function() {
           if (!rawUrl) {
             Logger.error('[Connection] No relay URL configured');
             State.setLastError('No relay server URL configured — open the extension popup and set it');
+            State.setConnecting(false);
             ClearPending();
             notify({ type: 'connection-status-changed' });
             if (callback) callback({ success: false, error: 'No relay server URL configured' });
@@ -119,9 +171,13 @@ var ConnectionManager = (function() {
           function tryNext() {
             if (tried >= candidates.length) {
               Logger.error('[Connection] All candidates failed for', rawUrl);
-              State.setLastError('Could not connect to ' + rawUrl + ' (tried ' + candidates.join(', ') + ')');
               State.setConnecting(false);
               ClearPending();
+              // navigator is down or restarting: keep trying, slower each
+              // time, instead of going offline until the user notices.
+              var retryIn = scheduleBackoffReconnect();
+              State.setLastError('Could not connect to ' + rawUrl + ' (tried ' + candidates.join(', ') + ')' +
+                (retryIn ? ' — retrying in ' + Math.round(retryIn / 1000) + 's' : ''));
               notify({ type: 'connection-status-changed' });
               fireCallbackOnce({ success: false, error: 'All candidates failed' });
               return;
@@ -204,8 +260,10 @@ var ConnectionManager = (function() {
               State.setWs(null);
               State.clearHeartbeatTimer();
               State.setConnected(false);
-              // If we never opened, try next candidate before giving up
-              if (!opened && tried < candidates.length && !_intentionalDisconnect && event.code !== 4001 && event.code !== 4000 && event.code !== 4004 && event.code !== 4005 && event.code !== 4006) {
+              // Never opened: move on to the next candidate (tryNext reports
+              // and schedules the retry once they are exhausted) — unless the
+              // server itself closed us; its verdict holds for every URL.
+              if (!opened && !_intentionalDisconnect && !isServerVerdict(event.code)) {
                 Logger.info('[Connection] Falling back to next candidate');
                 tryNext();
                 return;
@@ -226,6 +284,8 @@ var ConnectionManager = (function() {
             };
 
             ws.onmessage = function(event) {
+              if (State.getWs() !== ws) return; // abandoned socket
+              Liveness.noteInbound();
               _handleMessage(event.data);
             };
           }
@@ -293,16 +353,63 @@ var ConnectionManager = (function() {
   function scheduleReconnect(delay) {
     State.clearReconnectTimer();
     var timer = setTimeout(function() {
+      State.setReconnectTimer(null);
+      if (_intentionalDisconnect) return;
       Logger.info('[Connection] Reconnecting...');
       ConnectionManager.connect();
     }, delay);
     State.setReconnectTimer(timer);
   }
 
+  /** Schedule the next backoff reconnect; returns its delay, or 0 when the user disconnected. */
+  function scheduleBackoffReconnect() {
+    if (_intentionalDisconnect) return 0;
+    var delay = Backoff.next();
+    Logger.info('[Connection] Reconnecting in', delay, 'ms');
+    scheduleReconnect(delay);
+    return delay;
+  }
+
+  function startHeartbeat() {
+    Liveness.reset();
+    State.startHeartbeat(keepalive);
+  }
+
+  /**
+   * Periodic upkeep of an open connection (heartbeat interval and the
+   * service worker's keepalive alarm): ping navigator, and abandon the
+   * socket if navigator has gone silent.
+   */
+  function keepalive() {
+    var ws = State.getWs();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (State.isConnected() && Liveness.isStale()) {
+      Logger.warn('[Connection] No traffic from navigator for over', Config.LIVENESS_TIMEOUT, 'ms — reconnecting');
+      State.setWs(null);
+      State.clearHeartbeatTimer();
+      State.setConnected(false);
+      try { ws.close(); } catch (e) {}
+      notify({ type: 'connection-status-changed' });
+      scheduleBackoffReconnect();
+      return;
+    }
+    send({ type: 'ping' });
+  }
+
+  /**
+   * True when nothing is connected, connecting, or scheduled to reconnect —
+   * the state a dropped socket ends in when its reconnect timer was lost
+   * (e.g. the service worker restarted). The keepalive alarm auto-connects
+   * from here.
+   */
+  function isIdle() {
+    return !State.getWs() && !State.getReconnectTimer() && !State.isConnecting() && !_intentionalDisconnect;
+  }
+
   function _handleClose(event) {
     if (_intentionalDisconnect) return;
 
-    if (event.code === 4001) {
+    if (event.code === CloseCode.INVALID_TOKEN) {
       // Stale/invalid session token — clear it and pair with a fresh PIN.
       Logger.warn('[Connection] Server rejected: bad session token');
       State.setConnecting(false);
@@ -316,7 +423,7 @@ var ConnectionManager = (function() {
       scheduleReconnect(300);
       return;
     }
-    if (event.code === 4004 || event.code === 4005 || event.code === 4006) {
+    if (event.code === CloseCode.FORGOTTEN || event.code === CloseCode.REMOVED || event.code === CloseCode.NAME_COLLISION) {
       // 4004 = the server forgot this browser (removed from BROWSERS or
       // forgotten through Manage); 4005 = the name was removed from navigator
       // and is tombstoned server-side; 4006 = the name is configured as a
@@ -324,8 +431,8 @@ var ConnectionManager = (function() {
       // (plan 60 B6/B7). All three mean the pairing is gone server-side: drop
       // our stored token so we do not keep reconnecting with stale material,
       // and stop without an auto-reconnect loop (plan 60 B2).
-      const collision = event.code === 4006;
-      const removed = event.code === 4005;
+      const collision = event.code === CloseCode.NAME_COLLISION;
+      const removed = event.code === CloseCode.REMOVED;
       Logger.warn(collision
         ? '[Connection] This browser name is configured as a direct browser on the server'
         : removed
@@ -348,7 +455,22 @@ var ConnectionManager = (function() {
       notify({ type: 'connection-status-changed' });
       return;
     }
-    if (event.code === 4000) {
+    if (event.code === CloseCode.SUPERSEDED) {
+      // Another connection authenticated as this browser (a second instance
+      // using the same pairing). Reconnecting would only take it back and
+      // start a tug of war, so stop and leave auto-connect off until the
+      // user connects again. The token stays valid.
+      Logger.warn('[Connection] Another connection took over this browser\'s pairing');
+      State.setConnecting(false);
+      State.setPairing(false);
+      State.setPinRequired(false);
+      State.setLastError('Another connection took over this browser\'s pairing in navigator — connect again to take it back');
+      ClearPending();
+      Config.setAutoConnect(false);
+      notify({ type: 'connection-status-changed' });
+      return;
+    }
+    if (event.code === CloseCode.PIN_REJECTED) {
       // PIN no longer valid (wrong or expired) — don't show the
       // "expired — reconnect" UI. The previously paired browser (if any)
       // stays valid, so just revert to that state. No new PIN is issued
@@ -364,8 +486,10 @@ var ConnectionManager = (function() {
       return;
     }
 
+    // Everything else — a dropped socket, a navigator restart, a transient
+    // handshake failure (HELLO_TIMEOUT / PROTOCOL_ERROR) — reconnects.
     State.setConnecting(false);
-    scheduleReconnect(Config.RECONNECT_DELAY);
+    scheduleBackoffReconnect();
   }
 
   function _handleMessage(data) {
@@ -394,7 +518,8 @@ var ConnectionManager = (function() {
         State.setLastError(null);
         State.setPinError(null);
         ClearPending();
-        State.startHeartbeat();
+        Backoff.reset();
+        startHeartbeat();
         if (message.sessionToken) {
           State.setSessionToken(message.sessionToken);
           Config.saveSessionToken(message.sessionToken);
@@ -418,6 +543,12 @@ var ConnectionManager = (function() {
 
       case 'pin_accepted':
         Logger.info('[Connection] PIN accepted');
+        break;
+
+      case 'ping':
+        // navigator's heartbeat. Answering keeps its side of the liveness
+        // check fed even when our own pings are delayed.
+        send({ type: 'pong' });
         break;
 
       case 'pong':
@@ -457,6 +588,9 @@ var ConnectionManager = (function() {
     updateDescription: updateDescription,
     notify: notify,
     addListener: addListener,
+    keepalive: keepalive,
+    isIdle: isIdle,
+    CloseCode: CloseCode,
     get: get
   };
 })();

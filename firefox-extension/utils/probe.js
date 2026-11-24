@@ -73,33 +73,42 @@ var Probe = (function() {
       { scheme: 'http', url: 'http://' + hostPort + '/health' }
     ];
 
-    var attemptIndex = 0;
-    function nextTry() {
-      if (attemptIndex >= attempts.length) {
-        // Both schemes failed to even reach the server (network layer).
-        return Promise.resolve({
-          ok: false,
-          hostPort: hostPort,
-          error: hostPort + ' not reachable via http or https (DNS/connection/timeout)',
-          mode: 'unknown'
-        });
-      }
-      var a = attempts[attemptIndex++];
+    // Network-level failures, one per scheme. When every scheme fails, the
+    // result reports the most specific cause seen (refused/dns/timeout/cors
+    // from either attempt), not a blanket 'unknown': that cause is what the
+    // popup shows the user.
+    var failures = [];
+    function allFailed() {
+      var specific = failures.filter(function(f) { return f.mode && f.mode !== 'unknown'; })[0];
+      return {
+        ok: false,
+        hostPort: hostPort,
+        scheme: specific ? specific.scheme : null,
+        status: null,
+        body: null,
+        error: hostPort + ' not reachable via http or https (' +
+          failures.map(function(f) { return f.scheme + ': ' + f.error; }).join('; ') + ')',
+        mode: specific ? specific.mode : 'unknown'
+      };
+    }
+
+    function attempt(i) {
+      if (i >= attempts.length) return Promise.resolve(allFailed());
+      var a = attempts[i];
       Logger.info('[Probe] Trying', a.url);
       return fetchOnce(a.url).then(function(res) {
         if (res.ok) {
           Logger.info('[Probe] OK', a.url, '->', res.status, res.body);
           return { ok: true, hostPort: hostPort, scheme: a.scheme, status: res.status, body: res.body, error: null, mode: 'http' };
         }
-        // Network-level failure on this scheme: remember and try the other.
-        Logger.warn('[Probe] Failed', a.url, ':', res.error, res.mode);
-        return nextTry().then(function(r2) {
-          return { ok: r2.ok, hostPort: hostPort, scheme: r2.scheme, status: r2.status, body: r2.body, error: r2.error || res.error, mode: r2.mode || res.mode };
-        });
+        var mode = res.timedOut ? 'timeout' : (res.mode || 'unknown');
+        Logger.warn('[Probe] Failed', a.url, ':', res.error, mode);
+        failures.push({ scheme: a.scheme, error: res.error, mode: mode });
+        return attempt(i + 1);
       });
     }
 
-    return nextTry();
+    return attempt(0);
   }
 
   return {

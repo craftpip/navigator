@@ -221,6 +221,17 @@
       }
     });
 
+  // Tab create/close/navigate → push the tab list so navigator's cache stays
+  // current. Top-level for the same reason as the message listener above:
+  // tab events must wake a suspended event page. Guarded: it is an
+  // optimization (navigator also asks for the list), so a failure here must
+  // not stop init() below from registering the connection listeners.
+  try {
+    TabList.watch();
+  } catch (e) {
+    Logger.error('[Init] Tab-list watch unavailable:', e);
+  }
+
   // Connection + runtime listeners and durable-flag recovery (runs on every
   // wake once the message listener above is registered).
   function init() {
@@ -288,13 +299,14 @@
       resumePendingConnect();
     });
 
+    // Every 30s: ping (and liveness-check) an open connection, or — when a
+    // dropped connection has nothing left that would bring it back (its
+    // reconnect timer died with a suspended event page) — dial again if the
+    // user wants this browser connected.
     chrome.alarms.onAlarm.addListener(function(alarm) {
-      if (alarm.name === 'keepalive') {
-        var ws = State.getWs();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ConnectionManager.send({ type: 'ping' });
-        }
-      }
+      if (alarm.name !== 'keepalive') return;
+      if (ConnectionManager.isIdle()) maybeAutoConnect();
+      else ConnectionManager.keepalive();
     });
 
     chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });

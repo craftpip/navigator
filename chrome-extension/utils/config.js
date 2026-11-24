@@ -1,6 +1,12 @@
 var Config = {
-  RECONNECT_DELAY: 3000,
+  // Reconnect backoff after a drop or a failed connect: doubles from the
+  // base up to the cap, resets once navigator accepts the connection.
+  RECONNECT_BASE_DELAY: 1000,
+  RECONNECT_MAX_DELAY: 30000,
   HEARTBEAT_INTERVAL: 25000,
+  // navigator pings every 15s and answers our pings; this much silence on an
+  // open socket means it is dead.
+  LIVENESS_TIMEOUT: 60000,
   BADGE_COLORS: {
     CONNECTED: '#4CAF50',
     PAIRING: '#FF9800',
