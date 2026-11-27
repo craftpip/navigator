@@ -65,7 +65,7 @@
     "@mozilla/readability": "^0.6.0",
     "@xmldom/xmldom": "^0.9.12",
     "better-sqlite3": "^11.10.0",
-    "cloakbrowser": "^0.5.8",
+    "cloakbrowser": "^0.7.3",
     "jsdom": "^30.0.1",
     "puppeteer-core": "^25.16.0",
     "react": "^19.2.4",
