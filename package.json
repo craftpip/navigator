@@ -68,7 +68,7 @@
     "cloakbrowser": "^0.5.8",
     "jsdom": "^30.0.1",
     "puppeteer-core": "^25.16.0",
-    "react": "^19.2.4",
+    "react": "^19.3.1",
     "react-dom": "^19.2.4",
     "trafilatura": "^0.2.0",
     "turndown": "^7.2.4",
