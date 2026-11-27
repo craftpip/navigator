@@ -28,7 +28,7 @@ jobs:
         working-directory: website
       - run: npm run docs:build
         working-directory: website
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: website/.vitepress/dist
 
